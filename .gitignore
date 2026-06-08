@@ -1,0 +1,49 @@
+# Data directories
+data/
+checkpoints/
+outputs/
+viz/
+model_zoo/
+third_party/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Model weights and checkpoints
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# Large binary/media files
+*.mp4
+*.ply
+*.npz
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.so
+*.dylib
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Misc
+*.egg-info/
+.eggs/
+dist/
+build/
