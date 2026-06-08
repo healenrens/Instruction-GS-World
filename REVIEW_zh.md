@@ -1,4 +1,4 @@
-# Instruct-GS-World 实现审查文档（zh）
+# _Instruct-GS-World 实现审查文档（zh）OLD read agent.md
 
 > 生成时间：2026-06-07。配套权威日志见 `agent.md`（§1–§33+），本文件聚焦**实现思路 + 代码位置**，便于逐文件审查。
 > ⚠️ **这是一次代码快照**（agent.md ≈ §33 时点）。代码仍在并行演进——例如 `dynamics/model.py` 已新增 §37 的"逐控制点空间 grounding"可选钩子（见 §2.6）。审查时以实际 `file:line` 为准。
