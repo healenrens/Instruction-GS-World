@@ -278,7 +278,14 @@ def main():
                 Kf = int(clip["Kf"]); K = min(args.K, Kf)
                 H, W = int(clip["H"]), int(clip["W"])
                 K_intr = clip["K_intr"].to(dev).float()             # [3,3]
-                viewmat = clip["viewmat"].to(dev).float()           # [4,4] world->cam (static)
+                viewmat = clip["viewmat"].to(dev).float()           # [4,4] world->cam (== viewmats[0])
+                # §63 Phase C (moving-cam): per-frame world->cam. Back-compat — static-cam clips carry
+                # only 'viewmat' -> broadcast it to [Kf+1,4,4] so the render loop indexes uniformly
+                # (all rows equal => byte-identical to the old static path).
+                if "viewmats" in clip:
+                    viewmats = clip["viewmats"].to(dev).float()         # [Kf+1,4,4]
+                else:
+                    viewmats = viewmat[None].expand(int(clip["Kf"]) + 1, 4, 4).contiguous()
                 gt_rgb = clip["gt_rgb"].to(dev).float() / 255.0     # [Kf+1,H,W,3]
                 instruction = clip["instruction"]
 
@@ -321,7 +328,7 @@ def main():
                     vlm_inputs_wrong = move_vlm_inputs(enc_ref.build_inputs(cand[wj], vlm_img), dev, torch.bfloat16)
                 if not (torch.isfinite(traj_full).all() and torch.isfinite(g0.means).all()
                         and torch.isfinite(g0.scales).all() and torch.isfinite(K_intr).all()
-                        and torch.isfinite(viewmat).all()):
+                        and torch.isfinite(viewmats).all()):
                     ok = False
             except Exception as e:
                 ok = False
@@ -363,7 +370,7 @@ def main():
                 tt = k + 1
                 s = GaussianSet(out["means"][k].float(), out["quats"][k].float(), out["scales"][k].float(),
                                 out["opacities"][k].float(), out["colors"][k].float(), None)
-                colors, _, _ = render_gaussianset(s, viewmat[None], K_intr[None], W, H)
+                colors, _, _ = render_gaussianset(s, viewmats[tt][None], K_intr[None], W, H)
                 pl, _, _ = photometric_loss(colors[0], gt_rgb[tt]); rloss = rloss + pl
                 ps.append(psnr(colors[0].clamp(0, 1).detach(), gt_rgb[tt]))
             rloss = rloss / max(1, len(rsteps))

@@ -922,3 +922,32 @@ robot→id8 lump + generic-shape prompts（grounding-dino-base）后实测：
 **Sam2Processor 坑**：point prompt 需 4 层嵌套 `[image][object][point][xy]`、labels 3 层；multimask 输出 `[obj,n_masks,H,W]` 需降到 `[n_masks,H,W]` 再按 iou_scores 选。
 
 **B2 后半（运行中）**：`orchestrate_v9ov.sh`（detached）= 56 clip 用 `--seg openvocab` 重生成 → train **v9lang_ov**（同配方：rel_head/w_rel1.5/w_rel_cf1.0/entity_head0/resume v7_pi3/800步）→ langswap 三划分。**诚实性判据**：v9lang_ov 在 OV 数据上的 sel-acc/dir-cos 不比 GT-mask 版 v9lang（heldseed 0.75/+0.81）差 >10% → 管线能扛自己的分割噪声 → 真实视频可行。日志 `logs/orchestrate_v9ov.log`。
+
+## §62 openvocab 训练数据诚实性自验（B2 前半，子 agent 交叉验证，CPU-only 不碰训练）
+
+56 个 OV clip vs GT-mask clip（同 episode/window）逐项对照：
+
+**目标-IoU 分划分**：train 中位 0.96/均 0.937（0 个<0.70）、heldtask 中位 0.97/均 0.936（0<0.70）、heldseed 中位 0.955/均 0.900（**1 个<0.70**）。全体中位 **0.965**、均 0.931。早窗(0.97)略优于中窗(0.955)。
+
+**唯一离群** `epi000140_c_heldseed`（"pick up the **butter**"）：cov 0.99 但 IoU **0.55**——三独立信号定位：物体 Gaussian 数 OV/GT=672/380=**1.77×**（全场最大过分割）、中窗、butter 是该波 GT footprint 最小物体（380 vs alphabet-soup 1487）。**小/平/低对比物体上 point-prompt SAM2 向邻域外溢**。孤立失败，非系统性。
+
+**运动一致性**（windowing 相同→物体 3D 位移必须一致）：全 56 clip 物体终点位移 **中位 |Δ|=0.000m、最大 |Δ|=0.009m**（CoTracker 随机性）。**证明 OV 只改了分割，GT-运动驱动的 windowing + 动力学目标完全未变**——干净 A/B。（关键：必须用 `is_obj` 键算物体位移，GT 的 `seg_per_g` 带全 LIBERO schema；`is_obj === seg_per_g==1`。）
+
+**实体分布恢复**（bincount seg_per_g）：物体 id1 比值中位 1.03，**49/56 在 ±15% 内**，0 个欠分割；basket 近乎完美（中位 1.01）；arm 中位 1.11（非训练目标）。**结构性注意**：只有 {1=物体,2=basket,8=arm} 在 OV↔GT 对齐；干扰物 id 3-10 不对齐（GT 用 sim label，OV 用 GD→schema 映射）——**但训练只用 `is_obj`(seg==1) 喂 relevance 头（v9-lang headline），不监督干扰物 id**，故不影响 A/B。
+
+**判据通过**：运动一致(Δ≤0.009m)、监督 mask(物体/basket) 55/56 在 ±15%、IoU 中位 0.96、唯一失败可定位且在 eval clip——**足够干净，是公平的诚实性测试**。等 v9lang_ov langswap 三划分出数对比 GT-mask v9-lang(heldseed 0.75/+0.81)。
+
+## §63 Phase C 实现（逐帧 viewmats，真实 ego 视频就绪）+ B3 词汇扩展下载方案（子 agent）
+
+**Phase C（移动相机/真实 ego 视频）已实现**——子 agent 代码审计确认逐帧 world→cam 矩阵本就存在（`rel[t]=inv(T0)@poses[t]` 是 cam_t→canonical，取逆即 viewmats[t]），纯 schema/管线改动、零新几何：
+- `pi3_video_gt.py`：build_clip 算 `viewmats=stack(inv(rel[t]))` [Kf+1,4,4]、return dict + save dict 加 `viewmats` 键（保留 `viewmat`=viewmats[0] 向后兼容）。LIBERO 静态相机 viewmats[t]≈I（cam_t.max<0.02 已验）。
+- `train_sim.py`：加载 viewmats，**向后兼容广播**（无 viewmats 键的旧 clip→`viewmat[None].expand(Kf+1)`，逐帧索引统一、对静态 clip 逐字节等价）；finite-guard 改查 viewmats；渲染环 `viewmat[None]`→`viewmats[tt][None]`（确认渲染损失渲染多帧未来 rsteps，逐帧 GT_rgb[tt] 对应逐帧相机）。
+- `render.py`/`model_full.py` 无需改（render_gaussianset 签名已是 batched [C,4,4]；模型相机无关）。本地语法过。**待 GPU 空闲后 pilot 验证**（regen 一个静态 clip 确认 viewmats[0]==I），再跑真实视频。
+
+**B3 词汇扩展下载方案**（子 agent 在 server 实测元数据，proxy 200）：唯一 schema 匹配（LeRobot v2.1、`observation.images.image`+`wrist_image`、instruction 在 `meta/episodes.jsonl[*].tasks[0]`）= **`IPEC-COMMUNITY/*_no_noops_*_lerobot`**。排名：
+1. **`libero_90_no_noops_lerobot`**（3921 eps、73 任务、~20+ 新名词 book/caddy/mug/bowl/drawer/microwave… + 新动词 put/open/close/turn/push + 空间介词）= **先拉**，最可能把 heldtask sel-acc 从 0 抬起。
+2. **`libero_goal_no_noops_1.0.0_lerobot`**（428 eps，动词/关系密集）= 次拉。
+3. libero_spatial（空间指代）、libero_10（长时多物体）备选。
+- **fps 注意**：现数据 fps=10，IPEC 是 fps=20（2× 时间密度）→ gen 时 stride 加倍保持同 wall-clock 窗口/运动尺度。
+- 拒绝（schema 不符）：physical-intelligence/libero(v2.0 裸键)、HuggingFaceVLA/libero(v3.0)、jesbu1(v2.0)。
+- **下载中**（detached，network-only）：libero_goal 全量 + libero_90 meta（logs/dl_libero_goal.log、dl_libero_90_meta.log）。disk 51T free。

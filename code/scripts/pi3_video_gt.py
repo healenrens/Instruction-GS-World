@@ -430,13 +430,20 @@ def build_clip(epi, K, win, device, lifter, model_ct, window_mode="center", seg_
         print(f"[dbg] hole-fill failed: {type(ex).__name__}: {ex}", flush=True)
     print(f"[dbg] hole-fill added {n_fill} static background Gaussians (N={N})", flush=True)
 
-    viewmat = torch.eye(4, device=device)                         # canonical == cam0, static cam
+    viewmat = torch.eye(4, device=device)                         # canonical == cam0 (== viewmats[0])
+    # §63 Phase C (moving-camera / real ego video): per-frame world->camera_t for render supervision.
+    # rel[t] = inv(T0)@poses[t] is camera_t->canonical(world), so the view matrix is its inverse.
+    # rel[0]==I -> viewmats[0]==I == viewmat. For LIBERO (static cam) every viewmats[t]≈I (the
+    # cam_t.max()<0.02 sanity print above confirms it); for ego video they differ per frame.
+    viewmats = torch.from_numpy(
+        np.stack([np.linalg.inv(rel[t].astype(np.float64)) for t in range(Kf + 1)]).astype(np.float32)
+    ).to(device)                                                  # [Kf+1,4,4] world->cam_t
     K_intr = torch.from_numpy(K_model).float().to(device)
     gt_rgb = torch.from_numpy(np.stack([cv2.resize(rgb_all[widx[i]], (Wm, Hm)) for i in sub])
                               ).to(torch.uint8)                   # [Kf+1,Hm,Wm,3] model res
 
     return dict(g0=g0, uv=uv, seg_per_g=seg_per_g, traj=traj, K_intr=K_intr,
-                viewmat=viewmat, H=Hm, W=Wm, Kf=Kf, instruction=instruction,
+                viewmat=viewmat, viewmats=viewmats, H=Hm, W=Wm, Kf=Kf, instruction=instruction,
                 gt_rgb=gt_rgb, is_obj=is_obj, focal=float(focal),
                 widx=[int(widx[i]) for i in sub], scene_r=scene_r,
                 mover_frac=mover_frac, n_obj=int(is_obj.sum()), n_fill=n_fill)
@@ -547,6 +554,7 @@ def main():
         "colors": clip["g0"].colors.cpu(), "uv": clip["uv"].cpu(),
         "seg_per_g": clip["seg_per_g"].cpu(), "traj": clip["traj"].cpu(),
         "K_intr": clip["K_intr"].cpu(), "viewmat": clip["viewmat"].cpu(),
+        "viewmats": clip["viewmats"].cpu(),                       # §63 [Kf+1,4,4] world->cam per frame
         "H": clip["H"], "W": clip["W"], "Kf": clip["Kf"],
         "instruction": clip["instruction"], "epi": args.epi, "split": args.split,
         "val_psnr": val, "gt_rgb": clip["gt_rgb"],
