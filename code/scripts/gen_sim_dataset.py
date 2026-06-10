@@ -63,6 +63,14 @@ def main():
     ap.add_argument("--K", type=int, default=16)
     ap.add_argument("--cam", type=int, default=512)
     ap.add_argument("--depth_max", type=float, default=2.0)
+    ap.add_argument("--window_sec", type=float, default=0.0,
+                    help=">0: each clip spans this many SECONDS of motion from a (random) start; 0=whole episode (legacy)")
+    ap.add_argument("--control_freq", type=int, default=20,
+                    help="sim control Hz (PickCube/PushCube=20) to map window_sec -> sim steps")
+    ap.add_argument("--random_start", type=int, default=0,
+                    help="1: random clip start within the episode (deterministic per env+seed); needs episodes longer than the window")
+    ap.add_argument("--fuse_stride", type=int, default=0,
+                    help=">0: WHOLE-VIDEO temporal fusion of the canonical G0 (every Nth frame registered into canonical via known poses) -> complete, low-uncertainty geometry; 0=single-frame G0 (legacy)")
     ap.add_argument("--min_val_psnr", type=float, default=16.0, help="drop clips whose mean(t>=1) full PSNR is below this")
     ap.add_argument("--min_movefrac", type=float, default=0.02, help="drop clips with too little moving geometry (frac>0.02r)")
     ap.add_argument("--shard", type=int, default=0)
@@ -71,8 +79,10 @@ def main():
     ap.add_argument("--overwrite", type=int, default=0, help="0=skip clips already on disk (resumable)")
     args = ap.parse_args()
 
+    import hashlib
     dev = args.device if torch.cuda.is_available() else "cpu"
     tasks = [t for t in args.tasks.split(",") if t]
+    window_steps = int(round(args.window_sec * args.control_freq)) if args.window_sec > 0 else None
     jobs = build_jobs(tasks, args.seeds, args.held_task, args.held_seed_frac, args.seed_base)
     mine = jobs[args.shard::args.nshards]
     os.makedirs(args.out, exist_ok=True)
@@ -93,7 +103,10 @@ def main():
                 print(f"[gen {args.shard}] {env} s{seed}: NO motion -> drop", flush=True)
                 n_drop += 1
                 continue
-            clip = build_clip(rec, args.K, dev, depth_max=args.depth_max)
+            sseed = int(hashlib.md5(f"{env}:{seed}:start".encode()).hexdigest()[:8], 16)
+            rng = np.random.default_rng(sseed) if args.random_start else None
+            clip = build_clip(rec, args.K, dev, depth_max=args.depth_max,
+                              window_steps=window_steps, rng=rng, fuse_stride=args.fuse_stride)
             full, dyn, mover_names = validate(clip, dev, out_dir=None)
             mean_full = float(np.mean(full[1:]))
             # moving-geometry fraction (normalized by workspace radius over movers)
@@ -119,6 +132,9 @@ def main():
                 "viewmat": clip["viewmat"].cpu(), "H": clip["H"], "W": clip["W"], "Kf": clip["Kf"],
                 "instruction": instruction, "env": env, "seed": seed, "split": split,
                 "val_psnr": full, "movefrac": movefrac,
+                "window_sec": args.window_sec, "start_idx": clip.get("start"),
+                "n_sim": clip.get("n_sim"), "win_steps": clip.get("win"),
+                "fuse_stride": args.fuse_stride,
                 "gt_rgb": torch.stack([f["rgb"] for f in clip["frames"]], 0),
             }
             torch.save(save, out)

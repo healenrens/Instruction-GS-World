@@ -20,6 +20,7 @@ import torch.nn as nn
 from ..gaussians.types import GaussianSet, inverse_sigmoid
 from .tokenizer import GaussianTokenizer
 from .transformer import DiTBlock, TimestepEmbed
+from .manifold import axis_angle_to_quat, quat_to_rotmat
 
 
 @dataclass
@@ -60,7 +61,7 @@ class GaussianState:
 
 
 class GaussianDynamics(nn.Module):
-    def __init__(self, cfg: DynamicsConfig):
+    def __init__(self, cfg: DynamicsConfig, entity_head: bool = False):
         super().__init__()
         self.cfg = cfg
         d = cfg.d_model
@@ -75,15 +76,28 @@ class GaussianDynamics(nn.Module):
         nn.init.zeros_(self.head.weight)   # identity start
         nn.init.zeros_(self.head.bias)
         self._out_dim = out_dim
+        # §54 ENTITY-SLOT SE(3) head (built ONLY when on, so v8-lang has no unused params under DDP).
+        # Pools the per-control DiT feature (d) + pooled relevance feature (ent_rd) per seg entity ->
+        # one rigid (v_e, omega_e) per entity per step. Zero-init last layer => v_e=omega_e=0 =>
+        # rigid term = 0 => the per-control head is the WHOLE motion = exact legacy behavior at init.
+        self.ent_rd = 256
+        self.ent_mlp = None
+        if entity_head:
+            self.ent_mlp = nn.Sequential(nn.Linear(d + self.ent_rd, d), nn.SiLU(), nn.Linear(d, 6))
+            nn.init.zeros_(self.ent_mlp[-1].weight); nn.init.zeros_(self.ent_mlp[-1].bias)
+        self.last_resid = None
 
     def forward(self, state, ctx_per_block, ctx_mask, cond_global, step,
-                cond_local=None, film_local=None, v_logit_local=None):
+                cond_local=None, film_local=None, v_logit_local=None, gate_local=None,
+                seg_local=None, rel_feat_local=None):
         return self.predict_deltas(state, ctx_per_block, ctx_mask, cond_global, step,
                                    cond_local=cond_local, film_local=film_local,
-                                   v_logit_local=v_logit_local)
+                                   v_logit_local=v_logit_local, gate_local=gate_local,
+                                   seg_local=seg_local, rel_feat_local=rel_feat_local)
 
     def predict_deltas(self, state: GaussianState, ctx_per_block, ctx_mask, cond_global, step,
-                       cond_local=None, film_local=None, v_logit_local=None):
+                       cond_local=None, film_local=None, v_logit_local=None, gate_local=None,
+                       seg_local=None, rel_feat_local=None):
         """state: GaussianState[B,N,*]; ctx_per_block: [B,n_layers,L,d] (projected VLM
         features per block); ctx_mask: [B,L]; cond_global: [B,d]; step: [B].
 
@@ -96,6 +110,11 @@ class GaussianDynamics(nn.Module):
                                  load-bearing path: the resumed head projects per-control directions
                                  into its null space (diagnosed), so grounding needs this direct,
                                  un-projectable vote on which control moves.
+          gate_local   [B,N,1]   per-control DYNAMICS GATE in [0,1] (Exp-1, --dyn_gate): the BOUNDED
+                                 velocity/rotation are MULTIPLIED by it AFTER the tanh, so a control
+                                 the gate calls "static" (gate→0) cannot move regardless of what the
+                                 regression head emits (DynaSplat/DeGauss static-group near-identity).
+                                 gate≈1 at init (warm-start) => identity, legacy behavior preserved.
         All default None (legacy global-only behavior)."""
         log_s = torch.log(state.scales.clamp_min(1e-8))
         logit_o = inverse_sigmoid(state.opacities.clamp(1e-6, 1 - 1e-6))
@@ -124,9 +143,46 @@ class GaussianDynamics(nn.Module):
         if v_logit_local is not None:
             v = v + v_logit_local                        # grounding's direct per-control velocity vote
         if self.cfg.max_disp > 0:
-            v = self.cfg.max_disp * torch.tanh(v)
+            v = self.cfg.max_disp * torch.tanh(v)        # bounded per-control RESIDUAL (when entity head on)
         if self.cfg.max_rot > 0:
             omega = self.cfg.max_rot * torch.tanh(omega)
+        # §54 ENTITY-SLOT SE(3): pool the DiT features by seg entity -> one rigid (v_e, omega_e) per
+        # entity, broadcast as a rigid transform about the entity's CURRENT centroid; the per-control
+        # head above becomes a small residual. Zero-init => v_e=omega_e=0 => rigid term = 0 => v stays
+        # the residual = exact legacy motion at init. Rigidity is then a STRUCTURAL guarantee, not a soft
+        # loss (an entity's controls share one SE(3) by construction -> no intra-object spread possible).
+        self.last_resid = v.new_zeros(())
+        if seg_local is not None and self.ent_mlp is not None:
+            means0 = state.means[0]                                   # [N,3] current control positions
+            uniq, inv = torch.unique(seg_local.view(-1), return_inverse=True)
+            E = uniq.numel()
+            ones = x.new_ones(x.shape[1], 1)
+            cnt = torch.zeros(E, 1, device=x.device, dtype=x.dtype).index_add_(0, inv, ones)        # [E,1]
+            cen = (torch.zeros(E, 3, device=x.device, dtype=means0.dtype)
+                   .index_add_(0, inv, means0) / cnt.clamp_min(1).to(means0.dtype))                 # [E,3] centroid
+            xfe = (torch.zeros(E, x.shape[-1], device=x.device, dtype=x.dtype)
+                   .index_add_(0, inv, x[0]) / cnt.clamp_min(1))                                     # [E,d] pooled DiT
+            if rel_feat_local is not None:
+                afe = (torch.zeros(E, rel_feat_local.shape[-1], device=x.device, dtype=x.dtype)
+                       .index_add_(0, inv, rel_feat_local.to(x.dtype)) / cnt.clamp_min(1))           # [E,rd]
+            else:
+                afe = x.new_zeros(E, self.ent_rd)
+            ent = self.ent_mlp(torch.cat([xfe, afe], dim=-1))        # [E,6]
+            ve = self.cfg.max_disp * torch.tanh(ent[:, :3])          # [E,3] entity translation
+            we = self.cfg.max_rot * torch.tanh(ent[:, 3:6])          # [E,3] entity rotation (axis-angle)
+            Ri = quat_to_rotmat(axis_angle_to_quat(we))[inv]         # [N,3,3]
+            ci = cen[inv]                                            # [N,3]
+            rigid = torch.einsum("nij,nj->ni", Ri, means0 - ci) + ci + ve[inv] - means0   # [N,3]
+            self.last_resid = v[0].norm(dim=-1).mean()               # residual magnitude (w_resid target)
+            v = rigid[None].to(v.dtype) + v                          # entity rigid + small per-control residual
+            omega = we[inv][None].to(omega.dtype) + omega
+        if gate_local is not None:
+            # Exp-1 STATIC GATE: scale the (already tanh-BOUNDED) velocity/rotation by the per-control
+            # dynamics probability p_dyn∈[0,1]. Applied AFTER the bound so the tanh discipline (§31) is
+            # untouched and this is exactly v_gated = p_dyn·v_bounded — a static control (gate→0) emits
+            # ~0 motion, which the rollout accumulates to ~0. gate≈1 at warm-start => no-op at init.
+            v = v * gate_local                           # [B,N,1] broadcasts over the 3 xyz channels
+            omega = omega * gate_local
         return v, omega, dlog_s, dlogit_o, dcolor, dfeat
 
     def num_params(self) -> int:

@@ -42,7 +42,7 @@ vi = {k: (v.to(dev, dtype=torch.bfloat16) if torch.is_tensor(v) and v.is_floatin
 
 with torch.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
     # 1) per-control visual feature variance
-    vt, vf, vh = model._control_visual(vi, control_uv, img_hw, dev, torch.bfloat16)
+    vt, vf, vh, _dyn, _sem = model._control_visual(vi, control_uv, img_hw, dev, torch.bfloat16)
     print("\nvis_tok   out [M,d]:  per-control std (avg over d)=%.4f  (0 => no per-control signal)" %
           vt.float().std(0).mean().item())
     print("vis_film  out [M,2d]: per-control std=%.4f" % vf.float().std(0).mean().item())

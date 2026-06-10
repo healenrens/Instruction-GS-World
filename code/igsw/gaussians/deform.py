@@ -32,17 +32,36 @@ def build_lbs_binding(
     sigma_scale: float = 1.0,
     chunk: int = 20000,
     eps: float = 1e-8,
+    dense_seg: torch.Tensor | None = None,    # [N] long entity id per dense gaussian (optional)
+    control_seg: torch.Tensor | None = None,  # [M] long entity id per control (optional)
 ):
-    """Return (knn_idx [N,k] long, knn_w [N,k]) — canonical LBS weights (sum to 1)."""
+    """Return (knn_idx [N,k] long, knn_w [N,k]) — canonical LBS weights (sum to 1).
+
+    ENTITY-AWARE binding (§49, fixes the smear/dilution the user called "炸开和扩散"): when
+    dense_seg+control_seg are given, a dense gaussian binds ONLY to controls of its OWN entity —
+    a boundary point of the moved object can no longer average mover controls with static table
+    controls (which dragged it to ~70% of the GT and smeared the object along the path), and a
+    table point can no longer be dragged out by nearby object controls (the dense-level half of
+    the table-collapse failure). Points whose entity has NO control fall back to plain nearest-k
+    (their neighbourhood is gate-closed statics, so they stay put). A point with j<k same-entity
+    controls gets its remaining slots weighted to ~0 (inf distance -> exp -> 0 -> renormalize)."""
     n = dense_means.shape[0]
     idx_out = torch.empty(n, k, dtype=torch.long, device=dense_means.device)
     w_out = torch.empty(n, k, dtype=dense_means.dtype, device=dense_means.device)
+    use_seg = dense_seg is not None and control_seg is not None
     for s in range(0, n, chunk):
         e = min(s + chunk, n)
         d = torch.cdist(dense_means[s:e], control_means)         # [c,M]
+        if use_seg:
+            same = dense_seg[s:e, None] == control_seg[None, :]  # [c,M]
+            has_same = same.any(dim=1, keepdim=True)             # [c,1] entity has >=1 control?
+            d = torch.where(same | ~has_same, d, torch.full_like(d, float("inf")))
         knn_d, knn_i = torch.topk(d, k, dim=1, largest=False)     # [c,k]
-        sigma = knn_d.mean(dim=1, keepdim=True).clamp_min(eps) * sigma_scale
-        w = torch.exp(-(knn_d ** 2) / (2 * sigma ** 2))
+        finite = torch.isfinite(knn_d)
+        kd0 = torch.where(finite, knn_d, torch.zeros_like(knn_d))
+        sigma = (kd0.sum(dim=1, keepdim=True)
+                 / finite.sum(dim=1, keepdim=True).clamp_min(1)).clamp_min(eps) * sigma_scale
+        w = torch.exp(-(knn_d ** 2) / (2 * sigma ** 2))          # inf distance -> weight 0
         w = w / w.sum(dim=1, keepdim=True).clamp_min(eps)
         idx_out[s:e] = knn_i
         w_out[s:e] = w

@@ -36,7 +36,18 @@ from igsw.dynamics.model import DynamicsConfig  # noqa: E402
 from igsw.model_full import InstructGSWorldModel  # noqa: E402
 from igsw.training import photometric_loss, delta_reg, velocity_smoothness  # noqa: E402
 from igsw.training.losses import (trajectory_loss, rotation_loss, contrastive_infonce,  # noqa: E402
-                                  scale_anchor_loss)
+                                  scale_anchor_loss, mover_bce_loss, semantic_id_loss,
+                                  mover_magnitude_loss, entity_rigidity_loss,
+                                  relevance_bce_loss, counterfactual_gate_loss)
+
+# §54: the 10 LIBERO-object instruction nouns — the counterfactual WRONG-instruction pool. Real
+# instructions are "pick up the {noun} and place it in the basket".
+LIBERO_OBJ_NOUNS = ["alphabet soup", "bbq sauce", "butter", "chocolate pudding", "cream cheese",
+                    "ketchup", "milk", "orange juice", "salad dressing", "tomato sauce"]
+
+
+def _libero_instr(noun):
+    return f"pick up the {noun} and place it in the basket"
 
 
 def setup_ddp():
@@ -109,6 +120,40 @@ def main():
     ap.add_argument("--obj_focus", type=float, default=0.0,
                     help="weight traj loss toward GT-movers (0 = plain L1 = the overfit's clean test)")
     ap.add_argument("--spatial_ground", type=int, default=1)
+    # ---- Exp-1: per-control mover/static GATE (default OFF -> A/B). Needs --spatial_ground 1.
+    ap.add_argument("--dyn_gate", type=int, default=0,
+                    help="Exp-1: per-control p_dyn gate (sigmoid(p_dyn)*v); BCE-supervised by the free sim mover label")
+    ap.add_argument("--w_dyn", type=float, default=1.0, help="weight of the mover-BCE loss on p_dyn")
+    ap.add_argument("--sem_dim", type=int, default=0,
+                    help="Exp-1 #3 (optional): per-control object-semantic embedding dim (0=off)")
+    ap.add_argument("--w_seg", type=float, default=0.2, help="weight of the object-semantic (seg_per_g) loss")
+    ap.add_argument("--w_mag", type=float, default=0.0,
+                    help="weight of the relative mover-MAGNITUDE loss (fights L1 heavy-tailed under-prediction; raises top-mover ratio)")
+    ap.add_argument("--gate_uses_sem", type=int, default=1,
+                    help="§44h: feed the occlusion-robust 3D identity e_sem INTO the dyn-gate (concat with "
+                         "the 2D Qwen patch). Only active when --dyn_gate 1 --sem_dim>0; 0 = gate sees only "
+                         "the 2D patch (A/B). Default 1.")
+    # ---- §49: the learning-method fix for "Gaussians explode/diffuse instead of moving" ----
+    ap.add_argument("--entity_lbs", type=int, default=0,
+                    help="§49: ENTITY-AWARE LBS binding — dense points deform only with controls of their "
+                         "own seg entity (no cross-boundary dilution/smear). 0 = legacy nearest-k.")
+    ap.add_argument("--w_rigid", type=float, default=0.0,
+                    help="§49: per-entity RIGID-CONSENSUS loss weight (differentiable Kabsch residual on the "
+                         "predicted control endpoints — forbids intra-entity spread; GT is rigid per entity).")
+    ap.add_argument("--gate_entity_pool", type=int, default=0,
+                    help="§49: pool the dyn-gate logit per seg entity -> ONE move/stay decision per object "
+                         "(epi440: per-control gates froze 59%% of the object's controls -> smear).")
+    # ---- §54: language as a CAUSAL input ----
+    ap.add_argument("--rel_head", type=int, default=0,
+                    help="§54: per-control LANGUAGE-RELEVANCE head (patch q x instruction-text k/v) added to "
+                         "the gate for object-class controls. Needs --dyn_gate 1 --spatial_ground 1.")
+    ap.add_argument("--w_rel", type=float, default=1.0, help="§54: relevance-BCE weight (r vs is_obj over objects)")
+    ap.add_argument("--w_rel_cf", type=float, default=1.0,
+                    help="§54: COUNTERFACTUAL gate-BCE weight (wrong instruction -> named object suppressed)")
+    ap.add_argument("--entity_head", type=int, default=0,
+                    help="§54: entity-slot SE(3) head (per-entity rigid v_e,omega_e + small per-control residual)")
+    ap.add_argument("--w_resid", type=float, default=0.1,
+                    help="§54: residual-magnitude reg (push motion through the entity SE(3) channel)")
     ap.add_argument("--feature_dim", type=int, default=0)
     ap.add_argument("--render_steps", type=int, default=2)
     ap.add_argument("--checkpoint_every", type=int, default=1)
@@ -144,7 +189,13 @@ def main():
                          lang_dim=2048, use_checkpoint=True, checkpoint_every=args.checkpoint_every,
                          feature_dim=args.feature_dim)
     model = InstructGSWorldModel(cfg, n_control=args.M, n_query=args.n_query,
-                                 cond_mode=args.cond_mode, spatial_ground=bool(args.spatial_ground)).to(dev)
+                                 cond_mode=args.cond_mode, spatial_ground=bool(args.spatial_ground),
+                                 dyn_gate=bool(args.dyn_gate), sem_dim=args.sem_dim,
+                                 gate_uses_sem=bool(args.gate_uses_sem),
+                                 gate_entity_pool=bool(args.gate_entity_pool),
+                                 entity_lbs=bool(args.entity_lbs),
+                                 rel_head=bool(args.rel_head),
+                                 entity_head=bool(args.entity_head)).to(dev)
     if is_main and args.spatial_ground and not args.vlm_image:
         print("[WARN] --spatial_ground 1 needs --vlm_image 1 (per-control Qwen-image features).", flush=True)
     if is_main:
@@ -168,8 +219,10 @@ def main():
         model = DDP(model, device_ids=[local], static_graph=True,
                     gradient_as_bucket_view=True, broadcast_buffers=False)
 
-    # two param groups: base (lr) and freshly-init spatial-grounding (lr_sg, higher) as in the overfit
-    sg_names = ("vis_tok", "vis_film", "vis_norm", "vis_vhead")
+    # two param groups: base (lr) and freshly-init spatial-grounding (lr_sg, higher) as in the overfit.
+    # Exp-1's dyn_head/sem_head are also freshly-init -> train them at lr_sg too.
+    sg_names = ("vis_tok", "vis_film", "vis_norm", "vis_vhead", "dyn_head", "sem_head", "sem_proto",
+                "rel_norm", "rel_q", "rel_attn", "rel_mlp", "rel_logit", "ent_")   # §54 new heads -> lr_sg
     sg_params = [p for n, p in model.named_parameters() if p.requires_grad and any(s in n for s in sg_names)]
     base_params = [p for n, p in model.named_parameters() if p.requires_grad and not any(s in n for s in sg_names)]
     if args.spatial_ground and sg_params:
@@ -225,12 +278,22 @@ def main():
                 Kf = int(clip["Kf"]); K = min(args.K, Kf)
                 H, W = int(clip["H"]), int(clip["W"])
                 K_intr = clip["K_intr"].to(dev).float()             # [3,3]
-                viewmat = clip["viewmat"].to(dev).float()           # [4,4] world->cam (static)
+                viewmat = clip["viewmat"].to(dev).float()           # [4,4] world->cam (== viewmats[0])
+                # §63 Phase C (moving-cam): per-frame world->cam. Back-compat — static-cam clips carry
+                # only 'viewmat' -> broadcast it to [Kf+1,4,4] so the render loop indexes uniformly
+                # (all rows equal => byte-identical to the old static path).
+                if "viewmats" in clip:
+                    viewmats = clip["viewmats"].to(dev).float()         # [Kf+1,4,4]
+                else:
+                    viewmats = viewmat[None].expand(int(clip["Kf"]) + 1, 4, 4).contiguous()
                 gt_rgb = clip["gt_rgb"].to(dev).float() / 255.0     # [Kf+1,H,W,3]
                 instruction = clip["instruction"]
 
                 disp_all = (traj_full[K] - traj_full[0]).norm(dim=-1)   # [N]
-                ctrl_idx = sample_controls(g0.means, disp_all, args.M, gen, args.mover_thresh)
+                # §54: exclude the hole-FILL Gaussians (the last n_fill — last-frame mask ids whose uv reads
+                # the occluder's patch) from control sampling. Fill is contiguous at the END of g0.
+                n_keep = N - int(clip.get("n_fill", 0))
+                ctrl_idx = sample_controls(g0.means[:n_keep], disp_all[:n_keep], args.M, gen, args.mover_thresh)
                 M = ctrl_idx.numel()
                 control_uv = uv[ctrl_idx]                           # [M,2]
                 gt_pos = traj_full[:, ctrl_idx, :]                  # [K+1,M,3]
@@ -242,11 +305,30 @@ def main():
                 gtm = (gt_pos - gt_pos[:1]).norm(dim=-1).amax(0)
                 rel = (gtm / gtm.quantile(0.9).clamp_min(1e-6)).clamp(0, 1)
                 knn_idx = torch.cdist(init, init).topk(args.rot_knn + 1, largest=False).indices[:, 1:]
+                # Exp-1: FREE per-control MOVER LABEL from the exact GT trajectory (no extra Qwen call,
+                # no stored field): a control is a mover iff its frame0->K displacement exceeds the
+                # threshold. This is exactly disp_all (already used for control sampling) sliced to the
+                # control set -> the BCE target for the dyn-gate. Object-semantic uses seg_per_g.
+                mover_label = (disp_all[ctrl_idx] > args.mover_thresh).float()      # [M]
+                seg_all = clip["seg_per_g"].to(dev).long()                          # [N]
+                seg_ctrl = seg_all[ctrl_idx] if (args.sem_dim > 0 or args.w_rigid > 0 or args.rel_head) else None
+                # §54 relevance LABEL: 1 where the control belongs to the instruction-named object (the free
+                # role-based `is_obj` = seg==obj_id). None for clips without it (ManiSkill) -> rel loss 0.
+                is_obj_ctrl = (clip["is_obj"].to(dev)[ctrl_idx].float()
+                               if ("is_obj" in clip and args.rel_head) else None)
                 vlm_img = (gt_rgb[0].clamp(0, 1) * 255).to(torch.uint8).cpu().numpy() if args.vlm_image else None
                 vlm_inputs = move_vlm_inputs(enc_ref.build_inputs(instruction, vlm_img), dev, torch.bfloat16)
+                # §54 COUNTERFACTUAL wrong instruction (SAME image, a DIFFERENT LIBERO-object noun). Built
+                # UNCONDITIONALLY when rel_head is on (DDP static_graph: the wrong-pass params are the SAME
+                # rel head used every step, so the branch is graph-safe). Real instruction pool, !=current.
+                vlm_inputs_wrong = None
+                if args.rel_head and args.w_rel_cf > 0:
+                    cand = [_libero_instr(n) for n in LIBERO_OBJ_NOUNS if n not in instruction]
+                    wj = int(torch.randint(len(cand), (1,), generator=gen, device=dev).item())
+                    vlm_inputs_wrong = move_vlm_inputs(enc_ref.build_inputs(cand[wj], vlm_img), dev, torch.bfloat16)
                 if not (torch.isfinite(traj_full).all() and torch.isfinite(g0.means).all()
                         and torch.isfinite(g0.scales).all() and torch.isfinite(K_intr).all()
-                        and torch.isfinite(viewmat).all()):
+                        and torch.isfinite(viewmats).all()):
                     ok = False
             except Exception as e:
                 ok = False
@@ -264,10 +346,15 @@ def main():
             # ---- forward / loss / backward ----
             with amp:
                 out = model(vlm_inputs, g0, K, ctrl_idx=ctrl_idx,
+                            vlm_inputs_wrong=vlm_inputs_wrong,
                             control_uv=(control_uv if args.spatial_ground else None),
-                            control_uv_hw=((H, W) if args.spatial_ground else None))
+                            control_uv_hw=((H, W) if args.spatial_ground else None),
+                            seg_per_g=(seg_all if (args.entity_lbs or args.gate_entity_pool or args.rel_head) else None))
             pos_l, vel_l = trajectory_loss(out["ctrl"].float(), gt_traj.float(), vis_traj, init.float(),
                                            relevance=rel, obj_focus=args.obj_focus)
+            mag_l = (mover_magnitude_loss(out["ctrl"].float(), gt_traj.float(), init.float(), vis_traj,
+                                          mover_thresh=args.mover_thresh)
+                     if args.w_mag > 0 else out["v"].new_zeros(()))
             gt_full = torch.cat([init[None], gt_traj], 0)
             rot_l = rotation_loss(out["om"].float(), gt_full.float(), knn_idx,
                                   torch.cat([vis[:1], vis_traj], 0))
@@ -283,16 +370,42 @@ def main():
                 tt = k + 1
                 s = GaussianSet(out["means"][k].float(), out["quats"][k].float(), out["scales"][k].float(),
                                 out["opacities"][k].float(), out["colors"][k].float(), None)
-                colors, _, _ = render_gaussianset(s, viewmat[None], K_intr[None], W, H)
+                colors, _, _ = render_gaussianset(s, viewmats[tt][None], K_intr[None], W, H)
                 pl, _, _ = photometric_loss(colors[0], gt_rgb[tt]); rloss = rloss + pl
                 ps.append(psnr(colors[0].clamp(0, 1).detach(), gt_rgb[tt]))
             rloss = rloss / max(1, len(rsteps))
             reg = delta_reg(out["v"], out["om"], out["dls"])
             vel = velocity_smoothness([out["ctrl"][i] for i in range(out["ctrl"].shape[0])])
             scale_a = scale_anchor_loss(out["scales"].float(), g0.scales.float())
+            # Exp-1: mover-BCE on the dyn-gate + (optional) object-semantic loss. Zero when off so the
+            # A/B baseline (--dyn_gate 0) is byte-for-byte the old total.
+            dyn_l = out["v"].new_zeros(())
+            seg_l = out["v"].new_zeros(())
+            if args.dyn_gate and "p_dyn" in out:
+                dyn_l = mover_bce_loss(out["p_dyn"].float(), mover_label, vis[K - 1])
+                if args.sem_dim > 0 and "e_sem" in out:
+                    seg_l = semantic_id_loss(out["e_sem"], seg_ctrl, knn_idx,
+                                             sem_proto=out.get("sem_proto"))
+            # §49 rigid consensus: the predicted endpoints of each entity's controls must agree
+            # with that entity's OWN best-fit rigid motion (kills intra-entity spread = the smear).
+            rig_l = (entity_rigidity_loss(out["ctrl"].float(), init.float(), seg_ctrl, vis_traj)
+                     if args.w_rigid > 0 else out["v"].new_zeros(()))
+            # §54 LANGUAGE losses: relevance-BCE (r vs is_obj over object-class controls) + the
+            # load-bearing COUNTERFACTUAL gate-BCE (named object suppressed under a wrong instruction).
+            rel_l = out["v"].new_zeros(()); cf_l = out["v"].new_zeros(())
+            if args.rel_head and "p_rel" in out and is_obj_ctrl is not None:
+                rel_l = relevance_bce_loss(out["p_rel"].float(), is_obj_ctrl, out["objmask"].float())
+                if "p_dyn_wrong" in out and "p_rel_wrong" in out:
+                    cf_l = counterfactual_gate_loss(out["p_dyn_wrong"].float(), out["p_rel_wrong"].float(),
+                                                    is_obj_ctrl)
+            # §54 residual reg: push motion through the entity SE(3) channel (only when entity_head emits it).
+            resid_l = out["resid_norm"] if ("resid_norm" in out) else out["v"].new_zeros(())
             total = (args.w_traj_pos * pos_l + args.w_traj_vel * vel_l + args.w_traj_rot * rot_l
                      + args.w_lang_contrast * lang_c + args.w_render * rloss
-                     + args.w_reg * reg + args.w_vel * vel + args.w_scale_anchor * scale_a)
+                     + args.w_reg * reg + args.w_vel * vel + args.w_scale_anchor * scale_a
+                     + args.w_dyn * dyn_l + args.w_seg * seg_l + args.w_mag * mag_l
+                     + args.w_rigid * rig_l + args.w_rel * rel_l + args.w_rel_cf * cf_l
+                     + args.w_resid * resid_l)
             # NaN/Inf guard (DDP-safe): always backward (lockstep), skip opt.step iff global gnorm non-finite.
             total.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -313,12 +426,50 @@ def main():
                     corr = torch.corrcoef(torch.stack([gt_disp.float(), pd.float()]))[0, 1]
                     topk = gt_disp.topk(max(1, M // 20)).indices
                     ratio = (pd[topk].mean() / gt_disp[topk].mean().clamp_min(1e-6)).item()
+                    # §A1 DIRECTION cosine of the movers (the blind-spot metric — corr/ratio are
+                    # norm-only and missed the entity-head's +0.99->-0.18 direction collapse).
+                    gt_vec = gt_pos[K] - gt_pos[0]; pred_vec = out["ctrl"][K - 1].float() - init
+                    mvk = gt_vec.norm(dim=-1) > args.mover_thresh
+                    dcos = float("nan")
+                    if mvk.any():
+                        cs = (pred_vec[mvk] * gt_vec[mvk]).sum(-1) / (
+                            pred_vec[mvk].norm(dim=-1) * gt_vec[mvk].norm(dim=-1)).clamp_min(1e-6)
+                        dcos = cs.median().item()
+                    # Exp-1 metrics: static-leakage (mean PRED disp of GT-static controls -> should ->0)
+                    # and mover precision/recall of sigmoid(p_dyn)>0.5 vs the free mover label.
+                    stat_m = mover_label < 0.5                              # GT-static controls
+                    leak = pd[stat_m].mean().item() if stat_m.any() else float("nan")
+                    mp_prec = mp_rec = float("nan")
+                    if args.dyn_gate and "p_dyn" in out:
+                        pred_mv = torch.sigmoid(out["p_dyn"].float()) > 0.5
+                        gt_mv = mover_label > 0.5
+                        tp = (pred_mv & gt_mv).sum().float()
+                        mp_prec = (tp / pred_mv.sum().clamp_min(1)).item()
+                        mp_rec = (tp / gt_mv.sum().clamp_min(1)).item()
+                    # §54: relevance SELECT rate (frac of named-object controls with r>0; ->1) and
+                    # counterfactual SUPPRESSION (gate prob on the named object under WRONG text; ->0).
+                    rel_sel = cf_sup = float("nan")
+                    if args.rel_head and "p_rel" in out and is_obj_ctrl is not None:
+                        obj_m = is_obj_ctrl > 0.5
+                        if obj_m.any():
+                            rel_sel = (torch.sigmoid(out["p_rel"].float()[obj_m]) > 0.5).float().mean().item()
+                            if "p_dyn_wrong" in out:
+                                cf_sup = torch.sigmoid(out["p_dyn_wrong"].float()[obj_m]).mean().item()
                 mp = float(np.mean(ps)); rate = (step + 1) / (time.time() - t0 + 1e-6)
                 mem = torch.cuda.max_memory_allocated() / 1e9
                 print(f"e{epoch} s{step} lr{lr_base[0]*sc:.2e} pos{pos_l.item():.4f} vel{vel_l.item():.4f} "
-                      f"rot{rot_l.item():.4f} lang{lang_c.item():.4f} scl{scale_a.item():.3f} rPSNR{mp:.1f} "
-                      f"corr{corr.item():.3f} ratio{ratio:.2f} {rate:.2f}it/s peakGB{mem:.1f}", flush=True)
+                      f"rot{rot_l.item():.4f} lang{lang_c.item():.4f} scl{scale_a.item():.3f} "
+                      f"dyn{dyn_l.item():.4f} seg{seg_l.item():.4f} rig{rig_l.item():.4f} "
+                      f"rel{rel_l.item():.3f} cf{cf_l.item():.3f} resid{float(resid_l):.4f} rPSNR{mp:.1f} "
+                      f"corr{corr.item():.3f} ratio{ratio:.2f} dcos{dcos:.2f} leak{leak:.4f} relSel{rel_sel:.2f} cfSup{cf_sup:.2f} "
+                      f"mP{mp_prec:.2f} mR{mp_rec:.2f} {rate:.2f}it/s peakGB{mem:.1f}", flush=True)
                 if writer:
+                    writer.add_scalar("loss/mover_bce", dyn_l.item(), step)
+                    writer.add_scalar("loss/semantic", seg_l.item(), step)
+                    writer.add_scalar("metric/static_leakage", leak, step)
+                    if mp_prec == mp_prec:
+                        writer.add_scalar("metric/mover_precision", mp_prec, step)
+                        writer.add_scalar("metric/mover_recall", mp_rec, step)
                     writer.add_scalar("loss/traj_pos", pos_l.item(), step)
                     writer.add_scalar("loss/traj_vel", vel_l.item(), step)
                     writer.add_scalar("loss/traj_rot", rot_l.item(), step)
@@ -330,7 +481,11 @@ def main():
                 ckpt = {"model": (model.module if ddp else model).state_dict(),
                         "opt": opt.state_dict(), "step": step, "cfg": cfg.__dict__,
                         "n_query": args.n_query, "M": args.M, "spatial_ground": args.spatial_ground,
-                        "cond_mode": args.cond_mode}
+                        "cond_mode": args.cond_mode, "dyn_gate": args.dyn_gate, "sem_dim": args.sem_dim,
+                        "gate_uses_sem": args.gate_uses_sem, "entity_lbs": args.entity_lbs,
+                        "w_rigid": args.w_rigid, "gate_entity_pool": args.gate_entity_pool,
+                        "rel_head": args.rel_head, "entity_head": args.entity_head,
+                        "w_rel": args.w_rel, "w_rel_cf": args.w_rel_cf}
                 torch.save(ckpt, os.path.join(args.out, f"ckpt_{step:07d}.pt"))
                 torch.save(ckpt, os.path.join(args.out, "ckpt_last.pt"))
                 print(f"[ckpt] @step {step}", flush=True)
@@ -342,7 +497,11 @@ def main():
         ckpt = {"model": (model.module if ddp else model).state_dict(),
                 "opt": opt.state_dict(), "step": step, "cfg": cfg.__dict__,
                 "n_query": args.n_query, "M": args.M, "spatial_ground": args.spatial_ground,
-                "cond_mode": args.cond_mode}
+                "cond_mode": args.cond_mode, "dyn_gate": args.dyn_gate, "sem_dim": args.sem_dim,
+                "gate_uses_sem": args.gate_uses_sem, "entity_lbs": args.entity_lbs,
+                "w_rigid": args.w_rigid, "gate_entity_pool": args.gate_entity_pool,
+                "rel_head": args.rel_head, "entity_head": args.entity_head,
+                "w_rel": args.w_rel, "w_rel_cf": args.w_rel_cf}
         torch.save(ckpt, os.path.join(args.out, "ckpt_last.pt"))
         print(f"[done] step {step}", flush=True)
     if ddp:

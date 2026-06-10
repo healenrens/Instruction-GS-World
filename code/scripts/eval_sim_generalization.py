@@ -88,9 +88,10 @@ def eval_clip(model, clip, dev, M, K_max, spatial, video_path=None):
     cuhw = (H, W) if spatial else None
     img0 = (gt_rgb[0].clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
 
+    seg_pg = clip["seg_per_g"].to(dev) if "seg_per_g" in clip else None    # §49/§54: entity-LBS/gate/relevance
     with torch.autocast("cuda", dtype=torch.bfloat16):
         vi = _to_dev(model.encoder.build_inputs(instruction, img0), dev)
-        out = model(vi, g0, K, ctrl_idx=ctrl_idx, control_uv=cu, control_uv_hw=cuhw)
+        out = model(vi, g0, K, ctrl_idx=ctrl_idx, control_uv=cu, control_uv_hw=cuhw, seg_per_g=seg_pg)
         v_correct = out["v"][0].float()                                    # [M,3] step-0 velocity
 
         # language sensitivity: same control set + image, only the TEXT changes
@@ -111,6 +112,17 @@ def eval_clip(model, clip, dev, M, K_max, spatial, video_path=None):
     d_wrong = ((v_correct - v_wrong).norm(dim=-1).mean() / vnorm).item()
     frac_pred = (pred_disp > 0.02).float().mean().item()
     frac_gt = (gt_disp > 0.02).float().mean().item()
+    # Exp-1 metrics: static-leakage = mean PRED disp (normalized) of GT-static controls (raw disp<thresh
+    # -> the table) -> should ->0 with the gate; mover precision/recall of sigmoid(p_dyn)>0.5.
+    mover_label = (gt_pos[K] - gt_pos[0]).norm(dim=-1) > 0.01                  # [M] raw-metric mover
+    stat_m = ~mover_label
+    leak = pred_disp[stat_m].mean().item() if stat_m.any() else float("nan")
+    m_prec = m_rec = float("nan")
+    if "p_dyn" in out:
+        pred_mv = torch.sigmoid(out["p_dyn"].float()) > 0.5
+        tp = (pred_mv & mover_label).sum().float()
+        m_prec = (tp / pred_mv.sum().clamp_min(1)).item()
+        m_rec = (tp / mover_label.sum().clamp_min(1)).item()
 
     if video_path is not None:
         _render_video(model, clip, g0, ctrl_idx, control_uv, out, traj_full, K_intr,
@@ -118,7 +130,8 @@ def eval_clip(model, clip, dev, M, K_max, spatial, video_path=None):
 
     return {"env": clip.get("env"), "seed": clip.get("seed"), "split": clip.get("split"),
             "corr": corr, "ratio": ratio, "d_null": d_null, "d_wrong": d_wrong,
-            "frac_pred": frac_pred, "frac_gt": frac_gt, "instr": (instruction or "")[:40]}
+            "frac_pred": frac_pred, "frac_gt": frac_gt, "leak": leak,
+            "m_prec": m_prec, "m_rec": m_rec, "instr": (instruction or "")[:40]}
 
 
 @torch.no_grad()
@@ -175,11 +188,19 @@ def main():
     cfg = DynamicsConfig(**ck["cfg"]); M = ck.get("M", 2048)
     spatial = bool(ck.get("spatial_ground", 1))
     cond_mode = ck.get("cond_mode", "aggregator")
+    dyn_gate = bool(ck.get("dyn_gate", 0)); sem_dim = int(ck.get("sem_dim", 0))  # Exp-1
+    gate_uses_sem = bool(ck.get("gate_uses_sem", 1))  # §44h (default on); must match the gate's dyn_head width
     model = InstructGSWorldModel(cfg, n_control=M, n_query=ck.get("n_query", 16),
-                                 cond_mode=cond_mode, spatial_ground=spatial).to(dev).eval()
+                                 cond_mode=cond_mode, spatial_ground=spatial,
+                                 dyn_gate=dyn_gate, sem_dim=sem_dim, gate_uses_sem=gate_uses_sem,
+                                 gate_entity_pool=bool(ck.get("gate_entity_pool", 0)),  # §49/§54: were SILENTLY
+                                 entity_lbs=bool(ck.get("entity_lbs", 0)),              # OFF -> §49 ckpts mis-evaluated
+                                 rel_head=bool(ck.get("rel_head", 0)),
+                                 entity_head=bool(ck.get("entity_head", 0))).to(dev).eval()
     miss, unexp = model.load_state_dict(ck["model"], strict=False)
     print(f"[eval] ckpt={args.ckpt} step={ck.get('step')} spatial={spatial} cond={cond_mode} "
-          f"M={M} | load missing={len(miss)} unexpected={len(unexp)}", flush=True)
+          f"dyn_gate={dyn_gate} sem_dim={sem_dim} gate_uses_sem={gate_uses_sem} M={M} | "
+          f"load missing={len(miss)} unexpected={len(unexp)}", flush=True)
 
     splits = {"train": (("train",), args.n_train),
               "heldseed": (("heldseed",), args.n_heldseed),
@@ -206,10 +227,15 @@ def main():
         corr = np.array([x["corr"] for x in rows]); ratio = np.array([x["ratio"] for x in rows])
         dn = np.array([x["d_null"] for x in rows]); dw = np.array([x["d_wrong"] for x in rows])
         fp = np.array([x["frac_pred"] for x in rows]); fg = np.array([x["frac_gt"] for x in rows])
+        lk = np.array([x["leak"] for x in rows])
+        mpr = np.array([x["m_prec"] for x in rows]); mre = np.array([x["m_rec"] for x in rows])
         print(f"\n=== SPLIT {name} (n={len(rows)}) ===", flush=True)
         print(f"  corr(GT,PRED):  mean={np.nanmean(corr):.3f}  median={np.nanmedian(corr):.3f}  "
               f"min={np.nanmin(corr):.3f}  max={np.nanmax(corr):.3f}", flush=True)
         print(f"  top-mover ratio: mean={np.nanmean(ratio):.3f}  median={np.nanmedian(ratio):.3f}", flush=True)
+        print(f"  static-leakage:  mean={np.nanmean(lk):.4f}  median={np.nanmedian(lk):.4f}  (->0 with gate)", flush=True)
+        if np.isfinite(mpr).any():
+            print(f"  mover P/R(p_dyn): precision={np.nanmean(mpr):.3f}  recall={np.nanmean(mre):.3f}", flush=True)
         print(f"  frac>0.02r:      PRED mean={np.nanmean(fp):.3f}  GT mean={np.nanmean(fg):.3f}", flush=True)
         print(f"  language Δ_null:  mean={np.nanmean(dn):.3f}  median={np.nanmedian(dn):.3f}", flush=True)
         print(f"  language Δ_wrong: mean={np.nanmean(dw):.3f}  median={np.nanmedian(dw):.3f}", flush=True)

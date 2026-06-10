@@ -84,6 +84,34 @@ def trajectory_loss(pred, gt, vis, init, relevance=None, obj_focus: float = 0.0,
     return pos_loss, vel_loss
 
 
+def mover_magnitude_loss(pred, gt, init, vis, mover_thresh: float = 0.01, eps: float = 1e-3,
+                         steps=None):
+    """RELATIVE-magnitude loss on the movers' total displacement — fights the L1 heavy-tailed
+    UNDER-prediction (the stuck top-mover ratio ~0.46). plain L1 on positions is minimized by the
+    MEDIAN, so a few large movers (the cube) get systematically under-predicted no matter how much
+    obj_focus up-weights them (the weight scales the L1, but L1's argmin is still the median).
+    Here, for each control whose GT displacement (frame0->K) exceeds `mover_thresh`, we penalize the
+    FRACTIONAL magnitude error  |‖pred_disp‖ - ‖gt_disp‖| / (‖gt_disp‖ + eps)  — so a 50% under-shoot
+    of a LARGE mover costs as much as of a small one, directly pulling ‖pred_disp‖ -> ‖gt_disp‖ (the
+    ratio metric). Symmetric (over- and under-shoot both penalized), magnitude-only (direction stays
+    supervised by the L1 trajectory loss). pred,gt: [K,M,3]; init: [M,3]; vis: [K,M]."""
+    K = pred.shape[0]
+    # §54: evaluate the relative-magnitude error at MULTIPLE steps (default {K//2, K-1}) so the MID
+    # trajectory is constrained too — endpoint-only let the mover lag mid-rollout then snap at the end.
+    steps = steps if steps is not None else sorted({max(1, K // 2), K})
+    tot = pred.new_zeros(()); cnt = 0
+    for k in steps:
+        if k < 1 or k > K:
+            continue
+        pred_disp = (pred[k - 1] - init).norm(dim=-1)          # [M] predicted disp magnitude @ step k
+        gt_disp = (gt[k - 1] - init).norm(dim=-1)              # [M] GT disp magnitude @ step k
+        mover = (gt_disp > mover_thresh) & vis[k - 1].bool()
+        if int(mover.sum()) < 1:
+            continue
+        tot = tot + ((pred_disp[mover] - gt_disp[mover]).abs() / (gt_disp[mover] + eps)).mean(); cnt += 1
+    return tot / max(cnt, 1)
+
+
 def background_static_loss(traj, init, relevance, eps: float = 1e-6):
     """Module-E anti-drift: penalize ACCUMULATED displacement of LOW-relevance (background)
     control Gaussians from their start position (a real anti-drift signal, unlike the tiny
@@ -93,6 +121,79 @@ def background_static_loss(traj, init, relevance, eps: float = 1e-6):
     bg = (1.0 - relevance.clamp(0, 1))                        # [M]  (1=background)
     disp = (traj - init[None]).pow(2).sum(-1)                 # [K,M] squared drift from start
     return (bg[None] * disp).sum() / (bg.sum().clamp_min(eps) * traj.shape[0])
+
+
+def mover_bce_loss(p_dyn_logit, mover_label, vis=None, eps: float = 1e-6):
+    """Exp-1: supervise the per-control DYNAMICS GATE with the FREE sim mover label.
+
+    p_dyn_logit: [M] raw logit from the dyn-gate head (out["p_dyn"]).
+    mover_label: [M] float/bool — 1 where the control's GT clip displacement > thresh (a mover),
+      0 where it is static. Computed at TRAIN time from `traj` only; the head predicts it from the
+      Qwen patch feature, so at inference NO GT is needed (the whole point of the gate).
+    vis: optional [M] bool to mask controls that are never observed (sim = all visible -> None).
+    Returns the (masked, mean) binary cross-entropy. This is the explicit move/stay signal the
+    regression L1 never provided (notes Exp-1 §2.1/§2.2) and a classification target that does NOT
+    suffer the heavy-tailed-displacement median-collapse (so it generalizes; FlowBot3D/GAMMA recipe)."""
+    target = mover_label.float().reshape(-1)
+    logit = p_dyn_logit.reshape(-1)
+    per = F.binary_cross_entropy_with_logits(logit, target, reduction="none")   # [M]
+    if vis is not None:
+        w = vis.float().reshape(-1)
+        return (per * w).sum() / w.sum().clamp_min(eps)
+    return per.mean()
+
+
+def semantic_id_loss(e_sem, seg_ids, knn_idx, sem_proto=None, n_proto: int = 64, tau: float = 0.1,
+                     w_nn: float = 0.1, eps: float = 1e-6):
+    """Exp-1 #3 (OPTIONAL): per-control object-identity loss from the free `seg_per_g` entity ids.
+
+    e_sem: [M,S] per-control object embedding (out["e_sem"]).
+    seg_ids: [M] long entity id per control (from clip["seg_per_g"][ctrl_idx]).
+    knn_idx: [M,k] local-neighbour control indices (reuse the trainer's knn_idx).
+    sem_proto: [n_classes,S] LEARNABLE class-prototype bank (out["sem_proto"]); row `id` is entity
+      `id`'s prototype (indexed by the RAW sparse entity id, so a clip with ids {1,3,16} uses rows
+      1/3/16). This replaces the old DETACHED batch-mean prototypes.
+
+    Two terms (Gaussian-Grouping arXiv:2312.00732 + OpenGaussian):
+      (a) prototype CE: each control's normalized embedding is classified (cosine logits / tau) against
+          the LEARNABLE prototypes; CE target = the control's raw entity id. Both e_sem AND the
+          prototypes get gradient -> a real, stable identity classifier that pulls each control to its
+          entity and pushes from others (cannot collapse).
+      (b) 3D-NN consistency: pull k-NN controls' embeddings together (cosine), so spatially-adjacent
+          Gaussians of the same object share identity (the unsupervised regularizer).
+    Returns the summed loss (scalar). No external model — `seg_per_g` is the free sim label.
+
+    BUG HISTORY: prototypes used to be the batch-mean of `e_sem` then `.detach()`. With the head
+    zero-init -> e_sem=0 -> protos=0 -> logits=0 (uniform softmax, CE=log#entities) AND ∂logits/∂z =
+    protos.t() = 0, so the gradient to the head was EXACTLY zero — a dead saddle that pinned the loss
+    at ~2.7 forever. Learnable prototypes + a non-zero head init fix it."""
+    z = F.normalize(e_sem.float(), dim=-1)                       # [M,S]
+    seg_ids = seg_ids.long().reshape(-1)
+    # §54: fold the per-clip arm SUB-PART ids (50+c, assigned by per-clip k-means order) back to the
+    # arm id 8 so the prototype bank gets a CONSISTENT "arm" target across clips (id 51 is a different
+    # physical part in clip A vs B -> contradictory CE that kept seg loss high in v7).
+    seg_ids = torch.where(seg_ids >= 50, torch.full_like(seg_ids, 8), seg_ids)
+    ce = z.new_zeros(())
+    if sem_proto is not None:
+        # (a) CE against the LEARNABLE prototype bank, indexed by the RAW entity id (stable across steps).
+        protos = F.normalize(sem_proto.float(), dim=-1)          # [n_classes,S] (WITH grad)
+        logits = (z @ protos.t()) / tau                          # [M,n_classes]
+        ce = F.cross_entropy(logits, seg_ids.clamp(max=protos.shape[0] - 1))
+    else:
+        # Fallback (legacy, no learnable bank passed): cosine-logit CE against the per-batch entities,
+        # targets = dense column index. Kept so older callers still run; the trainer passes sem_proto.
+        uniq = torch.unique(seg_ids)
+        remap = {int(s): i for i, s in enumerate(uniq.tolist())}
+        tgt = torch.tensor([remap[int(s)] for s in seg_ids.tolist()], device=z.device)
+        # one normalized embedding per entity acts as the (with-grad) anchor row
+        anchors = F.normalize(torch.stack([z[seg_ids == s].mean(0) for s in uniq.tolist()], 0), dim=-1)
+        logits = (z @ anchors.t()) / tau
+        ce = F.cross_entropy(logits, tgt)
+    # (b) 3D-NN consistency (pull neighbours together in cosine space)
+    nn = z[knn_idx]                                               # [M,k,S]
+    nn_cos = (z[:, None, :] * nn).sum(-1)                         # [M,k]
+    nn_loss = (1.0 - nn_cos).mean()
+    return ce + w_nn * nn_loss
 
 
 def kabsch_rotation(P0: torch.Tensor, P1: torch.Tensor) -> torch.Tensor:
@@ -180,3 +281,79 @@ def velocity_smoothness(traj: list[torch.Tensor]) -> torch.Tensor:
     for t in range(1, len(traj) - 1):
         acc = acc + ((traj[t + 1] - 2 * traj[t] + traj[t - 1]) ** 2).mean()
     return acc / (len(traj) - 2)
+
+
+def entity_rigidity_loss(pred_ctrl, init, seg_ctrl, vis=None, min_pts: int = 4,
+                         max_entities: int = 24, eps: float = 1e-6):
+    """§49 RIGID-CONSENSUS prior — the learning-method fix for "the Gaussians explode/diffuse
+    instead of MOVING" (user review of libero_v4).
+
+    The per-control velocity head regresses each control INDEPENDENTLY; the L1 trajectory loss is
+    satisfiable by moving a fraction of an object's controls fully while the rest lag — which
+    renders as the object smearing/exploding along the path. Our GT is BY CONSTRUCTION rigid per
+    entity (per-object rigid PnP / sim rigid bodies), so we add the matching structural prior:
+    for every entity, the predicted control endpoints must agree with the BEST-FIT rigid motion
+    of that entity's own points (differentiable Kabsch on the predictions themselves). The loss
+    is the residual to the fitted SE(3) — invariant to WHAT the rigid motion is (does not fight
+    pos/magnitude supervision), penalizing only intra-entity inconsistency (the spread).
+
+    pred_ctrl [K,M,3] predicted control positions; init [M,3] frame-0 positions;
+    seg_ctrl [M] long entity ids; vis [K,M] optional. Evaluated at mid + final steps.
+    """
+    Kk = pred_ctrl.shape[0]
+    steps = sorted({Kk // 2, Kk - 1})
+    ids, counts = torch.unique(seg_ctrl, return_counts=True)
+    ids = ids[counts >= min_pts]
+    if ids.numel() > max_entities:                       # cap cost; keep the largest entities
+        order = torch.argsort(counts[counts >= min_pts], descending=True)[:max_entities]
+        ids = ids[order]
+    if ids.numel() == 0:
+        return pred_ctrl.new_zeros(())
+    tot = pred_ctrl.new_zeros(()); cnt = 0
+    for e in ids.tolist():
+        m = seg_ctrl == e
+        X = init[m].float()                              # [P,3] frame-0
+        if X.shape[0] < min_pts:
+            continue
+        for k in steps:
+            if vis is not None:
+                mv = vis[k][m].bool()
+                if int(mv.sum()) < min_pts:
+                    continue
+                Xk = X[mv]; Yk = pred_ctrl[k][m].float()[mv]
+            else:
+                Xk = X; Yk = pred_ctrl[k][m].float()
+            R = kabsch_rotation(Xk[None], Yk[None])[0]   # differentiable best-fit rotation
+            t = Yk.mean(0) - Xk.mean(0) @ R.T
+            res = (Yk - (Xk @ R.T + t)).norm(dim=-1)     # residual to the entity's OWN rigid fit
+            tot = tot + res.mean(); cnt += 1
+    return tot / max(cnt, 1)
+
+
+def relevance_bce_loss(p_rel, is_obj_ctrl, objmask, eps: float = 1e-6):
+    """§54 the language-causal supervision: push the per-control relevance logit r toward `is_obj`
+    (the instruction-named object's controls = 1, the OTHER objects = 0), ONLY over object-class
+    controls (objmask = 1 for seg ids 1..7). Arm/gripper/basket/background get NO relevance signal —
+    language selects among the manipulable OBJECTS, not whether the robot acts.
+    p_rel / is_obj_ctrl / objmask: [M]."""
+    w = objmask.float().reshape(-1)
+    if float(w.sum()) < 1:
+        return p_rel.new_zeros(())
+    tgt = is_obj_ctrl.float().reshape(-1)
+    per = F.binary_cross_entropy_with_logits(p_rel.reshape(-1), tgt, reduction="none")  # [M]
+    return (per * w).sum() / w.sum().clamp_min(eps)
+
+
+def counterfactual_gate_loss(p_dyn_wrong, p_rel_wrong, is_obj_ctrl, eps: float = 1e-6):
+    """§54 the LOAD-BEARING loss (breaks the gripper-proximity shortcut): under a WRONG instruction
+    the TRUE-named object must NOT be selected. Drive BOTH the pooled gate logit (visual+language)
+    AND the raw relevance toward 0 on the named object's controls (is_obj=1). Because the patch
+    features are identical to the true pass and only the text K/V differ, satisfying this is
+    impossible for a vision-only head — it forces r = f(patch, TEXT). p_*_wrong / is_obj_ctrl: [M]."""
+    m = is_obj_ctrl.float().reshape(-1)
+    if float(m.sum()) < 1:
+        return p_dyn_wrong.new_zeros(())
+    zeros = torch.zeros_like(m)
+    lg = F.binary_cross_entropy_with_logits(p_dyn_wrong.reshape(-1), zeros, reduction="none")
+    lr = F.binary_cross_entropy_with_logits(p_rel_wrong.reshape(-1), zeros, reduction="none")
+    return ((lg + lr) * m).sum() / m.sum().clamp_min(eps)

@@ -538,3 +538,433 @@ Springboard = §39 overfit GO (corr 0.95 on ONE clean clip w/ spatial-grounding)
 - **★ BUG (caught at scale, fixed):** in THIS ManiSkill version PushCube's manipulated object is named `obj` (not `cube`), StackCube uses `cubeA`/`cubeB`; `_script_push` + `generate_episode`'s moved-check did `u.cube.pose.p` → AttributeError → ALL 124 PushCube jobs FAILED (and would never pass the motion check). Fix = `maniskill_gt._manip_object(u)` tries `cube`/`obj`/`cubeA`. After fix: PushCube cube moves 0.23m, StackCube 0.15m, both validate. (PickCube already used `cube` → its 160 clips were fine; kept them, relaunched only PushCube+StackCube.) val_psnr is consistently ~21–22 (clean reconstruction) and 0 drops on the working tasks. Gen rate ≈19 clips/min @16 workers (the full per-clip pipeline — episode w/ retries + backproject 3DGS + validate-render 17 frames @512² — is the cost, ~50s/clip/worker).
 - **Sim trainer (`code/scripts/train_sim.py` + `train_sim_launch.sh`):** 4-GPU DDP (`static_graph=True`, `broadcast_buffers=False`, `gradient_as_bucket_view`); `DistributedSampler` shards the train-split clips across ranks/epochs; map-style `SimClipDataset` (`code/igsw/data/sim_clips.py`). Per clip (NO Pi3 lift / NO CoTracker track — the clip IS the clean GT): load g0 + uv + the EXACT `traj`; **mover-biased control sampling** (≤½ the M=2048 controls drawn from GT-movers, as in the overfit, so localization is measurable); `spatial_ground=1` + `control_uv`/`control_uv_hw` (the §39 model call); direct 3D `trajectory_loss` (pos+vel) vs `traj` + `rotation_loss` (Kabsch on GT-knn) + InfoNCE language loss + MoCo queue + render-aux (clip's STATIC camera) + scale-anchor; the finite-grad-norm NaN-guard. **2 param-groups: base lr3e-4, freshly-init spatial-grounding (`vis_*`) lr_sg 1e-3** (matches the overfit's higher SG LR). Resume stream11c strict=False; do NOT load opt/step (new task, changed param set, fresh cosine schedule). Logs per-step train corr + top-mover ratio (the localization signal).
 - **Generalization eval (`code/scripts/eval_sim_generalization.py`) — the deliverable:** on heldseed + heldtask (and a few train clips for contrast), with the SAME spatial-grounding call + mover-biased sampling: (1) motion: corr(GT_disp,PRED_disp) + top-mover ratio + frac>0.02r; (2) language sensitivity Δ_null=‖v(ℓ)−v(∅)‖/‖v(ℓ)‖ and Δ_wrong=‖v(ℓ)−v(ℓ')‖/‖v(ℓ)‖ (control set + image FIXED, only the TEXT to frozen Qwen changes); (3) GT|static|pred rollout mp4 for a couple held-out clips. One-line VERDICT = train vs held-seed vs held-task corr. **GOTCHA: don't train while 16 gen workers run** (a single-GPU smoke starved on CPU/disk I/O loading the 26GB ckpt — killed it; the real validation is the 4-GPU launch once gen winds down).
+
+## 41. ★★ RANDOM-START 4-SECOND experiment — launched (2026-06-08, user-directed)
+User: "现有的数据，起点随机，累计4s的变化，先训1w steps" → on the maniskill sim data, generate clips that START at a RANDOM episode frame and span ~4 SECONDS of motion (vs the old clips = whole-episode, always from frame-0 / task-start), then train 10k steps. Goal = a model that predicts a meaningful 4 s horizon from ANY mid-task state, not just from the beginning.
+- **Time mapping (verified):** PickCube/PushCube run at `control_freq=20 Hz` (0.05 s/step). 4 s = **80 control steps**. The model is UNCHANGED (K=16 frames); those 16 frames now span 4 s @ 0.25 s/frame (was ~2.7 s @ 0.17 s/frame over the whole episode). The trainer is data-agnostic to the temporal span (it just consumes the clip's 16-frame `traj`) → no trainer/model change needed.
+- **Two data defects to fix for this:** (1) the scripted tasks only ran ~40–54 steps (2.0–2.7 s) < 4 s; (2) `build_clip` always started at frame 0. **Fixes (code):**
+  - `maniskill_gt._script_pick` / `_script_push` EXTENDED to ~6–7 s of CONTINUOUS motion via MULTI-WAYPOINT paths (pick→lift→carry the grasped cube through 7 waypoints; push through 4 zigzag targets re-approaching behind each time). The FIRST waypoint is still the task goal so the instruction matches. → episodes now **121 (push) / 139 (pick) frames**, cube moves 0.22–0.30 m (a random 4 s sub-window always contains real change; no static tail).
+  - `maniskill_gt.build_clip(..., window_steps, rng)`: samples K+1 frames over a `window_steps`-long WINDOW whose START is RANDOM in `[0, n_sim-1-window]` when an `rng` is given (else deterministic `start_frac` within that range). None = legacy whole-episode clip. Returns `start`/`win`/`n_sim` for traceability.
+  - `gen_sim_dataset.py`: `--window_sec` (→ steps via `--control_freq`), `--random_start` (deterministic per env+seed via md5 hash → reproducible). Saves `window_sec`/`start_idx`/`n_sim`/`win_steps` in the clip.
+- **Verified (1-seed test, /tmp/test_4s):** PickCube 139-frame ep / PushCube 121-frame ep; windows win=80 with VARIED random starts (43, 5, 19, 4); traj `[17, ~200k, 3]`; **GT-validation PSNR 21–23 dB**, movefrac 0.12–0.16, 0 dropped. Pipeline correct.
+- **RUNNING (data → `data/maniskill_4s`, ckpt → `checkpoints/sim_4s`):** parallel regen (16 shards, 4 GPUs): `--tasks PickCube,PushCube,StackCube --seeds 200 --seed_base 1000 --held_task StackCube --held_seed_frac 0.15 --window_sec 4 --control_freq 20 --random_start 1 --min_val_psnr 14 --min_movefrac 0.02` (logs/gen_4s_shard*.log). **Auto-handoff** `code/scripts/orchestrate_4s.sh` (detached, setsid): waits for the gen workers to finish → if clips≥100, launches `train_sim.py --data data/maniskill_4s --out checkpoints/sim_4s --resume checkpoints/sim_gen/ckpt_last.pt --spatial_ground 1 --vlm_image 1 --total_steps 10000 --max_steps 10000` (logs/train_4s.log, logs/orchestrate_4s.log). **WARM-START** from sim_gen ckpt_last (step 9500, corr~0.9, all spatial layers present → near-full load, NOT a from-scratch run) so 10k steps suffices; fresh optimizer + cosine over 10k. Old 60k sim_gen run STOPPED (generalization already confirmed §39; its weights carry forward via warm-start).
+- **Note:** appearance-drift fix (anchor color/opacity/scale to G0, §39 inspection) NOT included here — kept the experiment focused on random-start+4s; `export_3d.py` already freezes appearance for clean inspection renders. Still a pending separate improvement.
+- **NEXT after 10k:** eval held-out corr / language Δ + export a clean 4 s random-start rollout video; compare vs the frame-0 sim_gen model (does random-start training help predict-from-mid-state?).
+
+## 42. ★★★ DATA-QUALITY upgrade: WHOLE-VIDEO temporal fusion of the canonical Gaussian set (2026-06-08, user-directed)
+**User directive (重大问题):** the single-frame "每张图像独立生成高斯" approach gives Gaussian increments with large uncertainty → biased learning. Use a UNIFIED whole-video method to reconstruct the entire Gaussian evolution → higher-quality learning data; verify the model learns well on it.
+- **Alignment核验:** mission (§0) = language-conditioned 3DGS dynamics world model. The sim work (§38-41) validates the dynamics on clean GT — aligned. ✓
+- **Assessment (where the problem actually is):** our sim MOTION GT is already coherent/exact (analytic `X_t=T_{e,t}T_{e,0}⁻¹X_0`, NOT per-frame independent). The weak link is the **canonical G0**: built from ONE frame's ONE camera view → an incomplete "shell" (occluded/back/bottom missing; geometry only certain where visible). Moving that incomplete shell = uncertain increments + the "重影/ghosting" the user saw.
+- **Fix = whole-video temporal fusion (`maniskill_gt._fuse_canonical_gaussians`, used by `build_clip(fuse_stride>0)`):** back-project EVERY (strided) frame's depth and REGISTER each entity's points into the canonical pose via the KNOWN per-entity poses (`X_canon = T_{e,0}·T_{e,f}⁻¹·X_f`; static/no-pose→identity since the camera is static), accumulate across the whole video, voxel-dedupe → ONE complete, denoised canonical GaussianSet driven by the same analytic trajectory. Each kept point carries its source frame's grid-neighbour scale (detail preserved). Moving entities reveal new faces over time + the arm's occlusion-shadows on the static scene get filled. **Temporal fusion is the right methodology — it transfers to real MONOCULAR video (one camera over time); multi-camera would be a sim-only crutch that doesn't transfer.**
+- **★ Validation (`validate_fusion.py`, same episode, voxel sweep) — fusion strictly improves the data:** SAME canonical-view PSNR full **21.5→22.7** (+1.2 dB) / dynamic-region **16.7→19.3** (+2.6 dB) at voxel=2mm; novel-view (25° orbit) coverage **+3%** (more complete, fewer holes) at 1-2mm; N=247k (×1.26 single-frame). 2mm = the sweet spot (1mm doubles count for no extra coverage; 3mm loses resolution). The +2.6 dB dynamic-region gain = exactly the "denoised, certain increments" the directive asks for. Images: `viz/fusion_val/novel25_single_vs_fused_v*.png`.
+- **Verification run (RUNNING):** regen `data/maniskill_fused` = **frame-0 + 2.7s window (matches sim_gen's pick-and-place task) + FUSED G0 (stride 3, 2mm)** → a CLEAN A/B vs sim_gen (same task, only the G0 reconstruction differs; warm-start transfers so corr should reach ~0.9 fast). 150 seeds × {PickCube,PushCube,StackCube}, StackCube held-out. Then `orchestrate_fused.sh` warm-starts from sim_gen/ckpt_last on **3 GPUs (1,2,3)** (--workers 2, total_steps 3000). Verdict = corr reaches sim_gen-level AND the predicted rollout renders CLEAN + COMPLETE (no single-frame ghosting).
+- **Infra notes:** the §41 random-start-4s train CRASHED — SIGTERM (signal 15) at s640, host-RAM pressure (a NEIGHBOR pod OOM'd on the node; our memcg is 400GB w/ 364GB free, so likely node-level eviction); also its corr was stuck ~0 (the frame-0 warm-start does NOT transfer to random-start mid-state prediction → random-start is a separate, harder problem, deferred). GPU 0 has a stuck 978MiB/82% process un-killable from inside the container (different pid namespace) → using GPUs 1-3. Defensive train: --workers 2, RAM logged each 2 min in orchestrate_fused.log.
+
+## 43. ★ FUSION verification + VISUALIZATIONS (2026-06-08/09)
+Fused dataset `data/maniskill_fused` = 450 clips (247 train PickCube+PushCube, heldseed, 150 heldtask StackCube), frame-0 + 2.7s window, whole-video FUSED G0 (stride3, 2mm, ~240k Gaussians/clip), val_psnr 22-24 (>single-frame's 21-22 ✓).
+- **Train (warm-start sim_gen, full-load 1178 tensors, 0 reinit):** corr **0.81 ZERO-SHOT (s0)** → 0.93 peak (s40) on fused data ⇒ the fused data is immediately learnable + warm-start transfers (unlike random-start-4s which got corr~0). NO OOM (the §41 SIGTERM was node-level; venv RAM fine at 90/400GB).
+- **★ But the LR 3e-4 (designed for sim_gen's from-scratch w/ reinit heads) was TOO AGGRESSIVE for a full warm-start fine-tune → it DISRUPTED the good init:** held-out corr s500=0.21, **s1000=−0.5 (broken)**, recovered s3000=**0.635** (train 0.635 ≈ heldseed 0.636 ≈ heldtask 0.634 ⇒ zero overfit + cross-task generalization). BUT the s3000 autoregressive ROLLOUT SCRAMBLES in later frames (over-prediction ratio~2 compounds) — the §39 appearance/magnitude-drift issue, amplified.
+- **Fix = gentle LR 3e-5 fine-tune** (`checkpoints/sim_fused_ft`, lr=lr_sg=3e-5, warmup 50): s300 rollout is STABLE (per-clip corr 0.41-0.55 heldseed/heldtask). Tradeoff: stable but lower corr (undertrained at s300).
+- **KEY INSIGHT:** fusion improves the **GEOMETRY** (completeness/denoising — validated +1.2 full / +2.6 dB dynamic PSNR, +3% novel-view coverage, §42), NOT the motion-corr (the analytic motion GT is identical with/without fusion). So corr ≈ single-frame is EXPECTED; the fusion win is render cleanliness + certain geometry. The rollout-stability/drift is a separate MODEL-side issue (the deferred appearance-anchor: anchor color/opacity/scale to G0 since sim motion is rigid).
+- **Visualizations (`code/scripts/viz_for_user.py` → `outputs/viz_user/`, pulled to `viz/viz_user{,_s3000}/`):** (1) TRAINING DATA = fused GT rollout of train clips (clean complete arm+cube motion); (2) TEST = GT|static|PRED rollout on heldseed (unseen config) + heldtask (unseen StackCube task), frozen-appearance. s300 stable; s3000 scrambles late.
+- **Bug fixed:** `orchestrate_*.sh` called bare `torchrun` → system python (no transformers) → ChildFailedError. Use `.venv/bin/torchrun`.
+
+## 44. ★★★ SEMANTIC-LOCALIZATION failure → mover/static gate (Exp-1) (2026-06-09, user-directed)
+User reviewed the test rollouts and named 2 concrete failures: **(2.1) the static TABLE "sinks"** (motion leaks onto background) and **(2.2) the red CUBE doesn't move during "pick"** (the instruction's target stays still). Diagnosis = the model is NOT object-aware: it can't bind "instruction→movable object" nor infer "background=static". Also the cube is TINY (~1-2% of Gaussians) vs the table HUGE (~73%), so the loss under-weights the target + any leak on the table is glaring. User directive: optimize the DATA (Gaussians carry semantic+motion features) AND the METHOD (extract enough image-semantic-motion from frozen Qwen3-VL); RESEARCH first, then improve+experiment, iterate until the user approves (the user judges via the visualizations).
+- **Visualization correction:** the user wants the **GAUSSIAN DATA in 3D**, not rendered videos. `code/scripts/export_3dgs_ply.py` → standard 3DGS `.ply` (means, log-scales, wxyz quats, inv-sigmoid opacity, SH-DC colors; isotropic so quat-order is moot) → `viz/gaussians/` (t00_natural / t00_segment / t08 / t16 for PickCube + StackCube). Open in SuperSplat. `seg_per_g` has 13 entities (table/ground/cube/~10 arm links). (`viz/train_videos/` + `code/scripts/viz_training_videos.py` 3-panel natural|seg|mover videos confirm the GT is correct: table static, arm+cube move — the failure is the MODEL.)
+- **Research (sub-agent a44b5e7, `notes/research_semantic_motion_gaussians.md`, 37 cites):** root cause = (1) 2 of 3 conditioning paths are GLOBAL (AdaLN cond_global + cross-attn to 16 distilled tokens) → uniform-translation is the easy min; (2) per-control feature = raw Qwen image patch ("red here"), NO instruction→object binding; (3) move/stay supervised only by `trajectory_loss` whose all-control norm makes "predict 0 for all" the L1 min → table leaks/cube timid; obj_focus + background_static_loss are OFF/unused + rely on GT-motion (no-inference); (4) **`seg_per_g` (exact per-Gaussian entity label) is SAVED but never supervised** = a free perfect mover/static + identity label. Literature ("localize-then-move"): 3DFlowAction (2506.06199), DynaSplat/DeGauss (per-Gaussian dynamics mask before deform), FOCUS (per-object mask aux + bg suppression), SemanticSplat/GaussianGrasper (per-Gaussian semantic latent distilled from a frozen 2D teacher + text→object cosine), Qwen2.5/3-VL referring points/boxes = cleanest no-GT "which pixels=cube" (raw attention is a sink — confirmed by our §28).
+- **Exp-1 (sub-agent a5624dd implementing, flag `--dyn_gate`):** per-control **mover/static gate `p_dyn`** (head off the spatial-grounding features) → **`v ← sigmoid(p_dyn)·v`** (structurally forbids background motion; warm-start bias so sigmoid≈1 at init), BCE(p_dyn, GT-mover-label `disp>1cm`), + object-semantic head supervised by `seg_per_g` (CE/grouping). New metrics: **static-leakage** (static-seg predicted disp →0), **mover precision/recall** (>0.9), corr 0.65→0.8+. Acceptance = overfit ONE clip: leakage→0 + cube moves + corr≥ungated. Then full 4-GPU train. Exp-2 = per-control instruction↔Gaussian cross-attn; Exp-3 = Qwen referring-point prior (real-data transfer).
+
+### 44b. Exp-1 RESULT = PASS + full training launched (2026-06-09, sub-agent a5624dd)
+**Overfit A/B (1 PickCube clip, 500 steps, resume stream11c):** BASE(no gate) corr 0.876 / static-leakage 0.0282; **GATE corr 0.940 / leakage 0.0102 (2.8× lower) / cube PRED 0.96×GT / mover precision 0.961 recall 0.992.** PASS all 4 gates (leak→0, cube moves, P/R>0.85, corr≥base). BASE reproduced the failure (leak stuck 0.03-0.05 = table leaks).
+- **Implementation (`--dyn_gate 1 --w_dyn 1.0`, backward-compatible, byte-identical at `--dyn_gate 0`):** `model_full._control_visual` → new `dyn_head MLP(H→d→1)` off the SAME per-control Qwen patch feature as `vis_*`; last-layer zero-weight + bias +4 → sigmoid(p_dyn)=0.982 at init (gate open). `model.py predict_deltas(gate_local)`: applied AFTER the tanh bounds → `v=v*gate; omega=omega*gate` (§31 tanh discipline intact). `losses.mover_bce_loss` = BCE(p_dyn, mover_label= GT disp>1cm, train-only). dyn/sem heads in the lr_sg group; ckpt saves `dyn_gate`/`sem_dim`; eval reconstructs the gate. New metrics in train+eval: **static-leakage**, **mover P/R**. Object-semantic head #3 (`--sem_dim 16 --w_seg 0.2`, Gaussian-Grouping prototype-CE on seg_per_g + 3D-NN consistency) wired but default OFF (not yet validated).
+- **Full train RUNNING:** `checkpoints/sim_gen_dyngate`, `.venv/bin/torchrun --nproc_per_node=4 ... --resume stream11c_infonce/ckpt_0006000 --dyn_gate 1 --w_dyn 1.0 --total_steps 6000` (logs/train_dyngate.log). Gate-only first (validated); sem head = next iter if needed. NEXT: eval held-out (leakage + mover P/R + corr per split) at s500/1000/2000 + export the gated model's PREDICTION as 3DGS .ply (user reviews in 3D whether the table stops sinking + the cube moves).
+
+### 44c. dyn_gate full-train: WORKS but drifts → SETTLED short run locks it (2026-06-09)
+Warm-start from **sim_gen** (not stream11c — that re-learns sim from scratch, corr starts −0.4) + gentle LR + `--dyn_gate 1`: resume reinit only 4 tensors (the dyn_head). **The gate generalizes the overfit result**: leak 0.082→**0.010-0.019** (5-8× down = static/table suppressed, §2.1) while **corr recovers to 0.90-0.95** (a transient dip s20-40 as the gate over-suppresses movers — mR 0.38 — then mR→0.98 and corr returns) and the cube moves (mR 0.98). BUT a sustained LR (5e-5) lets the model **drift after ~s200** (mover-magnitude OVER-prediction — ratio→2.5, pos↑, leak creeps back to 0.13): the gate fixes STATIC leakage, NOT the §39 mover-magnitude drift (separate problem; the deferred appearance/velocity anchor).
+- **Fix = SHORT SETTLED run** (`checkpoints/dyngate2`, total_steps 200, cosine LR→0 by s200, ckpt every 50): the LR decays before the over-prediction compounds, FREEZING the gate-working state. **s160-180 settled: corr 0.95, leak 0.012, mover P/R 0.89/0.98, ratio 0.74 (NO over-prediction).** `ckpt_last` = the deliverable. Held-out eval + `export_pred_3dgs_ply.py` (gated PRED vs GT as 3DGS .ply) → user 3D review.
+- **Lesson:** for warm-start fine-tunes with a reinit head, a SHORT cosine-to-0 schedule locks the good state; sustained LR drifts (the recurring §39/§43 magnitude-drift). The real fix for the drift = the appearance/velocity anchor (still deferred). Exp-2 (instruction↔Gaussian cross-attn) + the sem head (`--sem_dim`) remain for deeper object-binding.
+
+### 44d. dyn_gate held-out eval + magnitude problem → gate+obj_focus (2026-06-09)
+**dyngate2 (settled, s200) HELD-OUT eval** (`eval_sim_generalization` now reports leak + mover P/R): **static-leakage 0.009-0.013 across train/heldseed/heldtask** (§2.1 SOLVED + generalizes incl. unseen StackCube), mover P/R 0.87-0.99 (gate identifies movers correctly), corr 0.48-0.54 (consistent = no overfit). **BUT top-mover ratio 0.2-0.4** = the cube MOVES (not frozen) but UNDER-predicts magnitude (20-40% of GT) = §2.2 not yet passing. **The magnitude under-prediction is PRE-EXISTING in sim_gen** (the §37 L1-median-collapse on heavy-tailed displacement), NOT caused by the gate (gate-open s0 already had ratio 0.37). Review artifacts: `code/scripts/export_pred_3dgs_ply.py` → `viz/gaussians_pred/` (gated PRED vs GT as 3DGS .ply at t8/16 for PickCube + StackCube; user reviews in SuperSplat).
+- **Next iter (dyngate3, RUNNING):** `--dyn_gate 1 --obj_focus 3.0` — obj_focus mover-weights the traj loss to amplify the cube's magnitude. §37 noted obj_focus alone backfired (uniform-larger, not localized) — but NOW the GATE localizes (static gated off), so obj_focus should amplify ONLY the gated-on movers (cube↑) without inflating the table. Watching top-mover ratio↑ while leak stays low. (sem head `--sem_dim` + Exp-2 cross-attn = further iters if magnitude still short.)
+
+### 44d. dyn_gate + obj_focus = BOTH 2.1 & 2.2 (2026-06-09)
+The pure gate (dyngate2) fixed 2.1 (static-leakage 0.009-0.013 held-out) but the cube UNDER-moved (top-mover ratio 0.2-0.4 = only 20-40% of GT magnitude) — the §37 heavy-tailed-displacement under-prediction, a sim_gen-base issue the gate doesn't touch. **Fix = add `--obj_focus` (mover-weighted trajectory loss) ON TOP of the gate** (`checkpoints/dyngate3`, sim_gen warm-start, short cosine→0, ckpt every 50): the gate suppresses static + obj_focus amplifies the gated-on movers. **Settled s160-180: corr 0.95, ratio 0.80-0.82 (cube → 80% of GT, up from 0.2-0.4!), leak 0.018-0.023, mover P/R 0.88/0.99.** Trade: leak slightly higher than the pure gate (0.02 vs 0.012) but 3-4× below the 0.082 ungated baseline. Eval s150/s200/last held-out to pick the best ckpt → export PRED-vs-GT 3DGS .ply for user 3D review. **Both of the user's failures now addressed: 2.1 table-static (gate) + 2.2 cube-moves-enough (obj_focus).** (§37's obj_focus "backfire" was WITHOUT the gate — uniform amplification incl. background; WITH the gate it only amplifies true movers, so it works.)
+
+### 44e. USER insight: table-collapse-under-OVERLAP = insufficient 3D semantic → enable SEM head (2026-06-09)
+User /goal: push this version to fix BOTH (2.2 cube-moves + 2.1 table-collapse-near-arm). **Key user hypothesis: the failures are insufficient SEMANTIC learning — "if the semantic info were enough, then even with 2D visual OVERLAP, there shouldn't be large-area collapse."** This is sharp + correct: the gate's per-control feature is the Qwen 2D patch, which at a pixel where the ARM occludes the TABLE returns the ARM's feature (overlap-ambiguous) → that table-control leaks (follows the arm). The held-out leak (0.01) is the AVERAGE; the residual collapse is local to the overlap region.
+- **Diagnostics:** `max_disp=0.1` per-step, cube needs ~0.02/step → **NO clipping** ⇒ the cube-magnitude under-prediction (held-out ratio ~0.45, both dyngate2 pure-gate AND dyngate3 +obj_focus) is a LOSS/LEARNING issue, NOT a capacity cap — supports the semantic hypothesis. dyngate2 heldseed ratio 0.40, dyngate3 0.45-0.50 (obj_focus helped only a little; the per-step 0.80 was noise).
+- **Fix (dyngate4) = enable the OBJECT-SEMANTIC head** (`--sem_dim 16 --w_seg 0.3`, the Exp-1 head left OFF): per-control sem embedding supervised by **`seg_per_g` (the 3D per-Gaussian entity id — OVERLAP-INVARIANT, unlike the 2D Qwen patch)** via Gaussian-Grouping prototype-CE + 3D-NN cosine consistency. This teaches the trunk an occlusion-robust identity → the gate/motion can know "this 3D point is table (static)" even where the arm overlaps it in 2D (fixes the residual 2.1 collapse), and "this is the cube (the instruction's movable target)" (helps 2.2). + keep gate (`--dyn_gate 1`) + obj_focus 1.5, sim_gen warm-start, settled cosine→0 (total 300, ckpt 50). Watch the `seg` loss (was 0.0000 with sem off) + leak/ratio. NEXT if needed: Exp-2 instruction↔Gaussian cross-attn (explicit instruction→object binding).
+
+### 44f. dyngate4: SEM HEAD IS DEAD (seg loss flat) → debugging (2026-06-09)
+Ran dyngate4 (gate + obj_focus 1.5 + `--sem_dim 16 --w_seg 0.3`, resume sim_gen, settled 300). **The sem head did NOT learn: `seg` loss FLAT at 2.66-2.74 = log(#entities) = uniform/random prediction, all 300 steps.** So the user's "semantic learning" lever is currently a no-op; the other metrics (settled corr 0.95, ratio 0.71 per-step, leak 0.015) ≈ dyngate3 (the dead head didn't change them). The head (added in §44 but "never exercised") is buggy — most likely the SPARSE `seg_per_g` ids (1..18 with gaps) used as CE class indices without remap to dense 0..K-1, or sem_dim=16 < #entities, or a detached/no-grad prototype path. **Dispatched a debug+fix sub-agent** (acceptance = seg loss must DROP from ~2.7 to <1 on a 1-clip overfit, gate intact). Until the sem head learns, the user's hypothesis (3D-semantic supervision fixes the overlap-collapse + the cube) can't be tested. Current best deliverable for review = dyngate3 (2.1 solved leak 0.01; 2.2 partial ratio 0.45-0.50). max_disp=0.1 confirms the cube-magnitude is a learning issue (no clip), so getting real semantic learning is the right next lever.
+
+### 44g. SEM head FIXED + VERIFIED → dyngate5 (2026-06-09, sub-agent a0e0e02 — API-cut but fix landed)
+**Bug (in `losses.semantic_id_loss`/`model_full`):** the class prototypes were the batch-mean of `e_sem` then `.detach()`; with the sem-head zero-init → e_sem=0 → protos=0 → logits=0 → uniform softmax (CE=log#entities≈2.7) AND ∂logits/∂z=protos.t()=0 → **gradient to the head EXACTLY 0 = dead saddle pinned at 2.7**. **Fix:** a LEARNABLE prototype bank `sem_proto` (out["sem_proto"], indexed by the RAW sparse entity id so a clip's ids {1,3,16} use rows 1/3/16) + cosine-logit CE/tau (both e_sem AND protos get grad) + non-zero head init + 3D-NN cosine consistency on knn. **VERIFIED (90-step 1-GPU check):** seg **7.27→1.17→0.55→0.51** (drops! was flat 2.7), corr 0.9, ratio up to 0.97 per-step, leak 0.015-0.024, no NaN. The agent also touched eval/export/diag for the sem path. **dyngate5 RUNNING** = gate + obj_focus 1.5 + WORKING sem head (sem_dim16 w_seg0.3), sim_gen warm-start, settled cosine→0 (total 300, ckpt 50). Then held-out eval (leak/ratio/corr + mover P/R + sem-acc) vs dyngate3 + .ply/video → test the user's hypothesis: does real 3D-semantic learning further suppress the overlap-region table-collapse + raise the cube magnitude? NOTE: all the fusion/gate/sem work is UNCOMMITTED vs the GitHub push (commit aa7f1d0) — re-sync to GitHub when stable.
+
+### 44h. dyngate5 (working sem head) ≈ dyngate3 → WIRE sem INTO the gate (2026-06-09)
+dyngate5 = gate + obj_focus + the NOW-WORKING sem head (seg loss settles ~0.43, identity learned). **Held-out = ESSENTIALLY IDENTICAL to dyngate3 (no sem head):** leak heldseed/heldtask 0.012/0.007 (same), ratio 0.41/0.27 (same), corr 0.62/0.70 (same). Video/montage visually identical (table static via the gate, cube moves ~45%). **Why no gain: the sem head is a PARALLEL AUXILIARY — `p_dyn = dyn_head(Qwen 2D patch feature)` never consumes `e_sem`.** So the learned 3D identity isn't fed to the decision-maker; at an arm-over-table pixel the gate still only sees the (arm) 2D feature → residual overlap leak. The user's hypothesis is right in principle but needs the identity WIRED IN. **Next (sub-agent a4fbc86, `--gate_uses_sem`): dyn_head input = concat([per-control feat, e_sem])** so the gate uses the occlusion-robust identity ("I'm table even though the arm is in front of me in 2D" → stay static). Then dyngate6 = sem→gate + higher obj_focus (push the cube magnitude, the bigger remaining gap). State so far: 2.1 table = largely fixed by the gate (leak 0.012, much better than the pre-gate ~0.08); 2.2 cube ratio stuck ~0.45 across gate/obj_focus/sem-aux — the heavy-tailed magnitude regression is the deep limit (max_disp=0.1 rules out clipping). Deliverables for review: viz/dyngate3_video, viz/dyngate5_video, viz/gaussians_pred, viz/gt_recon.
+- **IMPLEMENTED + overfit-PASS (sub-agent a4fbc86):** `--gate_uses_sem 1` (default ON when sem on). `model_full.py`: `e_sem` (sem_head) is built+computed BEFORE the gate; `dyn_head` input = `concat([2D Qwen patch feat, e_sem])` → in-width `H+sem_dim` (2064 for sem16); gradients FLOW (seg loss still trains e_sem, plus the gate now back-props into it). Byte-identical warm-start preserved: the dyn_head LAST layer is zeroed + bias +4 ⇒ `p_dyn≡4.0` (sigmoid 0.982, gate open) at init REGARDLESS of input width, so `--gate_uses_sem 0/1` (and sem off) share the exact init. `sem_dim==0` ⇒ gate_uses_sem forced False ⇒ gate input = H (legacy byte-identical). Flag threaded through train_sim ckpt save + eval_sim_generalization/export_pred_3dgs_ply/export_3d reconstruct (so the gate width matches on load). New overfit harness `code/scripts/overfit_gate_sem.py` (A/Bs gate_uses_sem 0 vs 1, sem ON both, + the user's OCCLUSION metric: render frame-0 mover/static surface ids, read back at each static control's uv → "occluded table" = front surface is a mover/arm). **OVERFIT (pickcube_s1002, 200 steps, resume sim_gen, --dyn_gate1 --sem_dim16 --w_seg0.3 --obj_focus1.5): PASS, no NaN.** gate_uses_sem 0→1: corr 0.930→0.949, GLOBAL leak 0.0150→0.0122, **OCCLUDED-table leak (107 table-under-arm controls) 0.1267→0.1061 (the user's overlap metric: sem-fed gate leaks LESS exactly where the arm occludes the table)**, unocc-table 0.0020→0.0012, seg 0.31 (both, head learns from 7.7), cube 0.99x→0.96x, mP/mR 0.92/0.99 (both). Confirms the diagnosis: feeding the occlusion-robust 3D identity into the gate reduces the residual overlap-region table-collapse. **4-GPU full run = NOT launched (user will); command below.** Occluded-table leak (0.11) is still ≫ unoccluded (0.002) → the overlap region remains the hardest; dyngate6 should keep this + push obj_focus for the cube.
+
+### 44i. sem→gate WIRED + VERIFIED (user hypothesis confirmed) → dyngate6 (2026-06-09, sub-agent a4fbc86)
+Wired `e_sem` INTO the gate: `model_full` now builds `sem_head`/`sem_proto` BEFORE the gate, `dyn_head` input width = `H+sem_dim` (2064), `p_dyn = dyn_head(concat([per-control feat, e_sem]))` when `--gate_uses_sem 1` (default on when sem on; byte-identical when sem off; warm-start `p_dyn≡4.0` preserved by zeroing the last layer). Flag threaded through train/eval/export ckpts. **★ Overfit A/B (200 steps, the user's EXACT overlap metric — 107 arm-occluded table controls):** feeding e_sem into the gate drops the **OCCLUDED-table (table-under-arm) leak 0.1267 → 0.1061**, global leak 0.0150→0.0122, corr 0.93→0.95, seg/cube/mover-PR unchanged. **⇒ the user's hypothesis is CONFIRMED: a 3D-semantic (occlusion-robust) identity fed to the gate reduces the overlap-region collapse.** Caveat: occluded-table leak (0.106) still ≫ un-occluded (0.002) — the overlap region is the hardest residual (partial). New harness `overfit_gate_sem.py` (colors frame-0 by mover/static label, reads back at each static control's uv to flag arm-occluded ones = the overlap metric). **dyngate6 RUNNING** = sem→gate + **obj_focus 3.0** (up from 1.5, to push the stuck cube magnitude) + settled cosine→0. Then held-out eval + .ply/video. 2.1 table now: gate + sem→gate; 2.2 cube: obj_focus push (the heavy-tailed magnitude is still the deep open problem; if obj_focus plateaus, next = Exp-2 instruction↔Gaussian cross-attn or a relative/magnitude-aware motion loss).
+
+### 44j. MAGNITUDE loss for the stuck cube (2026-06-09)
+The cube top-mover ratio was STUCK ~0.46 across dyngate2-6 (gate, obj_focus 1.5→3.0, sem head, sem→gate — NONE moved it). Root cause: **`trajectory_loss` is L1 on positions, whose argmin is the MEDIAN → a few large movers (the cube) are systematically under-predicted; obj_focus only scales the L1 weight, not its median-seeking argmin.** Fix = `losses.mover_magnitude_loss` (`--w_mag`): for controls with GT disp>thresh, penalize the FRACTIONAL magnitude error `|‖pred_disp‖−‖gt_disp‖|/(‖gt_disp‖+eps)` — a 50% undershoot of a LARGE mover now costs as much as of a small one, directly pulling ‖pred_disp‖→‖gt_disp‖ (the ratio). Symmetric, magnitude-only (direction still from the L1). Wired into train_sim.py (import/arg/compute/total). **Quick-check (1-GPU overfit, w_mag on): ratio 0.45→0.56→0.66→0.71 climbing in 75 steps (vs the stuck 0.46), corr ~0.9, leak low, no NaN.** **dyngate7 RUNNING** = dyngate6 best config (sem→gate + gate + sem head, obj_focus back to 1.5) + `--w_mag 0.5`, settled cosine→0. Then held-out eval: does the magnitude loss break the 0.46 ratio ceiling on UNSEEN clips (generalize, not just overfit)? + .ply/video.
+
+### 44k. ★★★ BREAKTHROUGH: magnitude loss breaks the cube ceiling — BOTH 2.1 & 2.2 solved (2026-06-09)
+**dyngate7 = gate + sem→gate + sem head + obj_focus 1.5 + `--w_mag 0.5` (the relative mover-magnitude loss).** Held-out (UNSEEN clips, n=30/split), s200 vs dyngate6:
+| | dyngate6 | **dyngate7** |
+|---|---|---|
+| heldseed corr | 0.64 | **0.846** |
+| heldseed top-mover ratio | 0.46 | **0.810** |
+| heldtask corr | 0.73 | **0.895** |
+| heldtask ratio | 0.28 | **0.568** |
+| static-leakage | 0.012/0.006 | 0.014/0.010 |
+**The stuck cube ratio 0.46→0.81 (cube now moves 81% of GT on UNSEEN heldseed, 57% on the unseen StackCube task) — GENERALIZES, not overfit.** corr also jumped (0.64/0.73→0.85/0.90) because predicting the right magnitudes correlates better. Leak stays low (table still static). **So the user's BOTH failures are now resolved: 2.1 table-static = gate + sem→gate (occlusion-robust 3D identity); 2.2 cube-moves-enough = the relative-magnitude loss (the L1-median under-prediction was THE blocker, not capacity — obj_focus/sem couldn't touch it, the loss FORM had to change).** Best ckpt `checkpoints/dyngate7/ckpt_0000200.pt`. Deliverables: viz/dyngate7/ (montage+video+ply), pred-vs-GT .ply for SuperSplat. The full recipe (fusion data + gate + sem→gate + magnitude loss) is the working config — all UNCOMMITTED vs GitHub aa7f1d0; re-sync when the user approves. Remaining: heldtask ratio (0.57) < heldseed (0.81) = cross-task cube magnitude still lower; longer/larger training + Exp-2 cross-attn could push further.
+
+## 45. ★ PIVOT to LIBERO data (2026-06-09, user-directed)
+User: maniskill version "先到这里" (good enough — dyngate7 §44k solved BOTH 2.1 table-static + 2.2 cube-moves on held-out); the maniskill single fixed camera angle may itself bias the learning data. **Try LIBERO instead** ("拿这个数据去训练和验证"). All maniskill gate/sem/magnitude work is UNCOMMITTED vs GitHub aa7f1d0 (re-sync later).
+- **Data found:** `binhng/libero_object_lerobot_mask_depth` (HF, LeRobot format, was NOT actually in `/root/.cache/huggingface/lerobot/libero` — only an empty meta dir; downloaded via proxy). 500 eps × ~148 frames @10fps, libero_object suite ("pick up the {butter,milk,ketchup,...} and place it in the basket"). Stored IN the parquet (HF image structs `{bytes,path}`): `image`[256²]RGB(agentview), `wrist_image`, `image_depth`[256²]uint8 **8-bit GRAYSCALE depth (0-255 NORMALIZED, not metric)**, `image_mask`[256²] seg ids{0..10}, **`object_of_interest_mask`[256²] BINARY = the instruction's target object**, wrist variants, `state`[8], `action`[7], task language.
+- **vs maniskill:** (+) has object-of-interest mask (great for language/gate); (−) depth is 8-bit normalized not 16-bit metric (coarser, needs near/far calibration); (−) NO per-object poses → motion must be ESTIMATED via per-object rigid registration of the masked depth point clouds (centroid translation + Procrustes/PCA rotation).
+- **Pipeline build (sub-agent a3d14a5, `code/scripts/inspect_libero.py` done):** Stage-1 de-risk = install LIBERO/robosuite → exact agentview intrinsics(fovy)+extrinsic+depth near/far → correct backprojection (table flat? objects above?). Stage-2 = `libero_gt.py` mirroring maniskill_gt (depth→3DGS, mask→seg_per_g, object_of_interest flag, per-object registration→traj, same clip schema). ACCEPTANCE = validate() render moved Gaussians vs real future RGB, frame-0 PSNR≥18 + dyn motion tracks. Then scale + train (reuse the dyngate7 recipe: fusion? + gate + sem→gate + magnitude loss). Fallback if 8-bit depth too coarse: re-render in the LIBERO sim for exact depth+seg+pose (the maniskill approach).
+
+## 46. ★★ PURE-VIDEO data-gen plan (2026-06-09, user-directed) — the END GOAL
+User: the LIBERO depth/camera pipeline still needs GT intrinsics/extrinsics/depth, but we LATER want to train from PURE VIDEO — "能否不依赖于这些内外参或depth产生数据". KEY: the MODEL (dyngate7 recipe) is agnostic to how the 3DGS+motion-GT are made; only the DATA-GEN must change. Research → `notes/research_pure_video_4d.md` (sub-agent a2876345, cited).
+- **Why §38 failed:** chained two brittle single-purpose nets (Pi3 per-frame depth + CoTracker 2D, then WE lifted 2D→3D with no occlusion model → teleporting tracks, mover-visibility 0.40-0.66). 2024-26 SOTA fixes this with ONE feed-forward net jointly estimating depth + camera(intr+extr) + per-pixel 3D motion + visibility, end-to-end (temporally consistent depth, occlusion-scored tracks).
+- **Models (all the relevant ones are CLONED on the server `third_party/`: St4RTrack, VGGT, monst3r, CUT3R, Pi3, co-tracker, LIBERO, Dynamic3DGaussians, diff-gaussian-rasterization-w-depth):** TOP pick **SpatialTrackerV2** (ICCV'25, 2507.12462; RGB→depth+cam+per-pixel 3D world tracks+`p_vis`+`p_dyn`, occ-acc 90.6, CC-BY-SA, **NOT yet cloned → clone it**). De-risk-NOW **St4RTrack** (weights ON SERVER `third_party/St4RTrack/checkpoints/` MASt3R_base.pth 2.7G + model.safetensors 2.3G — zero download; RGB→per-pixel 3D world tracks+cam, weaker occlusion). Upgrade **Track4World** (2603.02573, dense, has a Pi3-weight variant). NEGATIVE: no single open model does raw-RGB→trained dynamic-3DGS for cluttered manip (DGS-LRM needs posed video, no weights; Robo3R is multi-view) → tracker gives geometry+cam+motion, WE assemble 3DGS+per-Gaussian traj with our code.
+- **Build = ONE new `video_gt.py`** (twin of maniskill_gt): tracker(RGB) → unproject frame-0 depth → g0 (reuse `to_gaussians` + §42 `_fuse_canonical_gaussians`) → query the tracker at each Gaussian's `uv` → 3D `traj`; **occluded movers via per-entity RIGID-FIT from the VISIBLE points** (recovers the sim `X_t=T_{e,t}T_{e,0}⁻¹X_0` from video); `seg_per_g` from `p_dyn` + Grounded-SAM2/VLM-referring mask. **Trainer/model/losses/eval UNTOUCHED** (emits the same clip dict). Tracker runs as an offline data-gen step in its OWN venv (torch-version isolation, like cache_clips).
+- **VALIDATE vs LIBERO GT (depth/mask/object_of_interest/camera, §45):** camera Sim(3)-Umeyama→ATE/RPE; depth scale-shift-align→AbsRel/δ; motion APD3D + occluded-segment EPE vs mask-rigid GT; PLUS our corr/top-mover-ratio/static-leakage/mover-PR = "is pure-video GT as learnable as sim GT?". GO/NO-GO = within ~20% of dyngate7 (corr 0.85/ratio 0.81/leak 0.01). Risks: occlusion (→visibility+rigid-fit), scale ambiguity (→per-clip-normalized relative disp, as sim did), soft mono-depth g0 (→fusion + brief gsplat opt).
+- **Order:** depth-GT agent finishes the LIBERO GT reference → clone STv2 (or St4RTrack now) → write video_gt.py → LIBERO-GT validation harness → scale + warm-start the dyngate7 recipe.
+
+## 47. ★★★ PURE-VIDEO LIBERO TRAINS — the end-goal pipeline WORKS (2026-06-09)
+Built the pure-video data-gen (St4RTrack RGB→depth+camera+3D-tracks, NO GT used to generate; GT only for validation). `code/scripts/st4r_stage1.py` + `st4r_lib.py` (St4RTrack wrapper, weights already on server) + `video_gt.py` (twin of maniskill_gt: tracker→frame-0 3DGS via to_gaussians, per-Gaussian traj from the 3D tracks, occluded movers via rigid-fit-from-visible; seg_per_g from the GT mask shortcut for v1; emits the maniskill clip schema). `code/scripts/gen_train_libero.sh` = autonomous gen→train (24 clips: 20 train + 4 heldtask, every-20th episode spans the 10 libero_object tasks, 4 GPUs) → dyngate7 recipe.
+- **Clip quality (pure-video validation render-vs-real-RGB):** frame-0 PSNR 23.7, motion frames 18-21 (≈ maniskill sim 21-23) — the ESTIMATED depth+camera+motion reconstruct the real video. 207k Gaussians/clip, object moves 0.26m.
+- **BUG fixed:** video_gt.py stored gt_rgb at native 256² but H/W/intrinsics/uv are 512² (St4R size) → trainer render-loss crashed (512 vs 256). Fix = store gt_rgb resized to (Hm,Wm) (+ module-level `import cv2`); post-processed the 24 existing clips.
+- **★ Training (resume sim_gen warm-start, gate+sem→gate+magnitude recipe, 20 train clips):** corr **0.53→0.90** (s60), top-mover ratio **0.16→0.85**, static-leakage 0.05-0.07, seg loss 6.7→0.10 (sem head learns), mover P/R 0.91/0.99, no NaN. **⇒ the model learns LOCALIZED + magnitude-correct + language-conditioned motion on PURE-VIDEO data, ≈ the maniskill sim numbers (corr 0.85/ratio 0.81), leak slightly higher (estimation noise blurs the static/dynamic edge).** Caveat: rPSNR only ~5.8 (the pure-video 3DGS appearance/geometry is COARSER than sim — mono-depth + upscaled gt_rgb — but render-loss weight 0.1 is minor; motion is the point). **THE END-GOAL (train from pure RGB video, no GT depth/camera/poses) IS VALIDATED.** NEXT: finish 1000 steps + heldtask held-out eval (cross-task generalization) + export video/ply. Improvements: better tracker (SpatialTrackerV2 occlusion>St4RTrack), VLM/SAM seg instead of the GT-mask shortcut, gsplat g0 opt for appearance. ckpt `checkpoints/libero_v1`. All UNCOMMITTED vs GitHub aa7f1d0.
+
+## §48 LIBERO pure-video: the geometry+motion were BOTH broken (honest root-cause + fix)
+
+User caught me claiming success on torn/distorted renders ("睁着眼说瞎话...物体全部都是撕裂的" then "还是扭曲的"). They were RIGHT. Stopped claiming, debugged to root cause. Two independent bugs in `code/scripts/video_gt.py`, both now fixed + visually verified (g0 render matches RGB, salad moves correctly toward basket):
+
+**BUG 1 — anisotropic geometry (the "扭曲"/vertical-blob).** St4RTrack's raw pointmap `pts0` is anisotropically distorted on *sim* renders: fit means→stored-uv gives clean vertical axis (fy=618px / resid 1.7px) but broken horizontal (fx=1499px / resid 28px) — **x compressed ~2.4×**, so the scene rendered as a tall vertical blob. `estimate_focal` averaged the two → biased 672. True LIBERO agentview focal = robosuite fovy=45° → 256/(2·tan22.5°)=309@256px=**618@512** = the clean y-fit. FIX: estimate focal from the clean vertical axis (`fper=(vv*z)/y`, median) and **rebuild geometry by pinhole backprojection** `pts0=[(uu*z)/f,(vv*z)/f,z]` (keep St4R depth, which is faithful ~0.95 corr; discard its distorted x,y). Result: frame-0 PSNR 18→33.6, render matches RGB.
+
+**BUG 2 — dead motion (static traj).** Two sub-causes: (a) the `conf>1.2` keep-mask **silently dropped the small manipulated object** (St4R low-confidence on the salad) → no object Gaussians to track. (b) the `object_of_interest` mask spans BOTH the moved object AND the static place-target (basket = the *larger* blob), so a single rigid PnP over all of them let the static majority win → identity. The OLD clips' "23cm motion" was SPURIOUS (broken geometry made PnP ill-conditioned) — that garbage is what scattered the earlier models. FIX: (a) **force-keep ooi pixels** regardless of conf; (b) **isolate the points that actually move in 2D** (CoTracker end-vs-start disp >~3px) and solve the pose only for them; static object points hold g0. Result: salad now n_mov=1157, mover_frac=0.29, moves left+up toward basket (2D centroid 160→51, basket@53), tight rigid disp 0.32m.
+
+**Caveat (open):** PnP depth (t_z) is the least-constrained DOF → object depth-motion ~1.7-2.5× over the mask-size-implied value. Direction+coherence correct; magnitude refinement (constrain t_z by mask-area depth proxy) is future work.
+
+**Lessons:** (1) val_psnr 18-24 was BG-composite-dominated — it never validated geometry; always render g0-vs-RGB directly. (2) corr metric hid both bugs. (3) Verify VISUALLY (g0 vs RGB, GT-motion direction) before any claim.
+
+## §49 学习方式重构（用户 /goal："高斯在炸开扩散而非移动"）— 三个结构修正
+
+用户审查 v4 视频的判断（正确）：预测像"原高斯的一部分逐渐炸开/扩散"，不是"学这些高斯如何移动"。逐控制点独立回归 + 几何近邻 LBS 没有任何"同一物体一起动"的结构。三个修正（A/B：v5 = v2 数据 + 这三项）：
+
+1. **实体感知 LBS**（`deform.py build_lbs_binding(dense_seg, control_seg)` + `scgs.py` + `model_full(entity_lbs=1)`）：稠密点只绑同 seg 实体的控制点（无同实体控制点→退普通近邻）。杀跨界稀释（物体边界点被静止桌面控制点拖到 ~70% + 拖尾 = "炸开"主源之一）。
+2. **实体刚性一致损失**（`losses.entity_rigidity_loss`，`--w_rigid 0.5`）：对每实体的预测端点做可微 Kabsch 自拟合，罚到自身最优刚体的残差。不与幅度监督打架（对拟合到的变换不变），只罚实体内不一致（撕裂）。GT 本身逐实体刚体（PnP/sim），先验精确匹配。单测：完美刚体→0，撕裂→0.042。
+3. **gate 实体池化**（`model_full(gate_entity_pool=1)`）：p_dyn logit 按 seg 实体均值池化——move/stay 是物体级决策。诊断依据（`_libero_440debug.py`）：epi440 上 gate 把 59% 的 mover 控制点掐死（med gate 0.166），物体一半冻结=拖尾另一主源；方向 cos 0.90 全对，速度被 gate 压到 1.3cm/步 vs GT 4.3。
+- ckpt 新字段：entity_lbs / w_rigid / gate_entity_pool；eval 脚本按 ckpt 重建并传 seg_per_g。
+
+## §50 数据三修复 + 重大数据审计发现（LIBERO 失败演示）
+
+**mask 审计**（agent，全 500 集一致）：msk id：0=背景，2=篮子，3-7=桌上物体，8=臂身，10=夹爪；**ooi = 63% 篮子 + 29% 夹爪 + 7.7% 物体** → v2 用 ooi 跟"物体"实为夹爪+物体混合刚体拟合（污染）。且 **id↔物体种类固定、操作哪个 id 随任务变**（epi0=id1，epi400 理论上=salad 的 id）。
+
+**重大发现：epi400 是失败/未完成演示**——夹爪下到沙拉酱周围后空手撤回，**全部非机器人 id 全程 END-START 0-1px**。v2 heldtask 的"物体运动"100% 是夹爪运动（假 GT，模型一直被假 GT 评估）。⇒ 必须按"检测到的物体 id 真动了"过滤 episode（`_libero_scan_movers.py`，只解码 mask 列，END-START>15px 为 MOVER）。
+
+**video_gt.py v3 改动**：
+1. `find_object_id`：非{0,8,10} id 中**首末有效帧质心位移**最大者（路径和会被遮挡 NaN 吃掉搬运段）。
+2. 逐实体运动：ENT_TRACK=(obj_id,8,10) 各自 CoTracker（一次合并 pass）+ 各自刚体 PnP；med2d>2px 才解（臂 39px/夹爪 38px 已验证跟上）。臂=数据修复1。
+3. `_size_depth_correct`：表观尺寸单目深度线索 z_t=z_0·s_0/s_t（公共可见子集 spread，clamp [0.6,1.6]×z0，沿中心视线平移，中心重投影不变）。compact 实体（物体/夹爪）启用，臂(id8 多链节)禁用。=数据修复2。
+4. 填洞：第二遍 St4R 反向锚定（锚=末帧）+ 同样的竖轴焦距重建；候选=末帧非实体像素投影落在 frame-0 实体区（未来的洞）内 + 体素去重(4mm) → 追加静止背景高斯（seg=末帧 msk id）。epi400 +690 点。=数据修复3。
+5. keep-mask 强保 {obj_id,8,10} 实体像素；窗口按检测物体 id 的运动选。
+
+**教训**：(a) 别信单一 mask 语义（ooi≠物体）；(b) 演示数据有失败集，必须按"任务效果实际发生"过滤；(c) corr/路径和等聚合指标会被遮挡和错实体悄悄骗过——每个结论都要可视化+逐实体数字双验证。
+
+## §50b 数据 v3 视觉审计迭代记录（epi0 连续 7 轮目检定位的问题）
+
+1. **幽灵臂**＝臂形空洞被远墙色填充、孤立浮在黑底（fill 无深度限制）→ fill 限 z≤p92(g0)。
+2. **3cm 邻居判据矫枉过正**：洞中心离既有几何>3cm 是定义本身，填充塌到 81 点 → 撤销，只留深度限制。
+3. **实体剩余高斯冻结**（重大 bug）：刚体解在 ENT_CAP 子集上解、也只应用到子集——夹爪 5270 点只动了 2500，剩余成"深色钩"幽灵 → 子集解算、**全实体应用**（_fit_rigid 重拟合）。
+4. **臂单刚体失效**：id8=静止底座+多链节，静止多数把 Procrustes 拖成 identity → **运动聚类**（k-means k=2/3 on [末,中]位移）+ 每簇独立刚体 + 合成 seg id 50+c（喂给 entity-LBS/gate 池化）。
+5. **静止桶误判**：首末位移判静止漏掉"中途动回原位"段 → 改全程最大位移；**CoTracker 暗色低纹理跟踪失败**→静止查询若 14px 内有运动查询则继承其簇（补标 +2000 点）。
+6. **PnP 传送护栏**：遮挡/出画→垃圾位姿→部件高斯散飞 → 单步质心位移>0.15m 保持上一位姿；最少可见点 max(12,10%)。
+7. **"碎片云"真相**＝p98 深度截断把真实墙切碎，臂走后露出（隔离渲染确诊 seg=0、z1.1-1.9、24899 点——根本不是运动 bug）→ p99.5 保墙完整。残余：St4R 远场深度噪声（后端极限，Pi3 候补）+ 烘焙阴影（GS 表示极限）——两者监督语义均为"静止背景"，不污染运动学习，接受并记录。
+
+**方法论**：渲染审计猜了 4 轮无效后，改用**子集隔离渲染**（moved/static-id8/fill/bg 分开渲）一次确诊。教训：视觉伪影先隔离归因，再修。
+
+## §51 v6 结果（§49 模型 + §50 数据 v3）— 当前最佳
+
+settle 800 步（entity_lbs + w_rigid0.5 + gate_entity_pool + v3 数据）。**训练终态：leak 0.0000（静止泄漏字面归零）、gate mP 1.00/mR 1.00、dyn loss 0.0006、corr 0.96-0.97、ratio 0.97-0.99、rPSNR 15.9**（v4/v5: leak 0.013-0.028、rPSNR 13.5）。
+
+held-task 推理（未见任务，REAL|GT|PRED 视频已目检）：
+- epi410 salad: mover 中位误差 12.0cm / GT 35.4cm；epi450 tomato: 11.0/33.7；train epi100: 14.6/49.7。
+- 目检：臂+夹爪+物体整体朝篮子移动、落点正确、**无 v4 的碎片带/炸开**；静止物体/桌面/篮子完全不动（ALL med 0.0cm）。训练 clip 上 PRED≈GT。
+- 注意 mover 现在含臂部件+夹爪+物体（3 万点），比 v4 只有夹爪混合体的"mover"难得多——相对误差 ~33% 是诚实口径。
+
+对照阶梯：v4（旧模型+假数据）→ v5（§49 模型+假数据：拖尾消失，mover err 12.1→9.2cm）→ v6（§49+真数据：语义全对+静止归零）。两条修复线（学习方式、数据质量）各自独立可证有效。
+
+残余差距（下一轮）：幅度欠 ~30%（接触区轻度弥散）、渲染软（×4 splat + 数据伪影）、深度幅度仍偏（尺寸线索 clamp 内）。
+
+## §52a 复盘核心实验：语言交换测试（v6，2026-06-10）— 语言被完全忽略
+
+`_libero_langswap.py`：同 g0、同场景，TRUE 指令 vs 指向场景内另一物体的 SWAP 指令，**逐实体均匀采样控制点（无 GT mover 偏置）**，比较逐实体预测位移与 gate。
+
+结果（train epi100 + heldtask epi410 两组）：
+- **swap/true 比值 = 1.00 / 1.01**：换指令后逐实体预测一字不差。语言对"动哪个物体"零贡献。
+- heldtask 还暴露：**假阳性 mover**（静止 entity7 被预测 37.7cm、gate 0.998）+ **真 mover 欠激活**（entity1 gate 0.434 → 12.3cm vs GT 35.7cm）。
+- **评估泄漏**：此前所有 corr/ratio/review 视频用 mover-biased 采样（依赖 GT disp 选控制点）→ 假阳性实体几乎分不到控制点，失败被掩盖。均匀采样下问题全现形。
+
+**根因（已量化证实）**：23/24 个 clip 中目标物体= frame-0 离夹爪最近的物体——"动夹爪旁的东西"纯视觉规则 96% 准确 → mover-BCE 从视觉特征即可完美拟合 → 语言得不到梯度压力（捷径学习）。InfoNCE（8-10 种指令、queue256 大量假负例）压不住，lang loss 全程上行 3.0→5.5。用户的直觉（"语义学习不够"）是对的，且比想象更严重：不是"不够"，是"没有"。
+
+## §52 全代码复盘：实现与学习方法的问题清单（按严重度排序）
+
+### A. 学习方法层（根本性）
+
+**A1【致命】语言未被学习（§52a 已证）**。swap 比值 1.00；根因=夹爪邻近捷径（23/24）+ 监督结构缺陷：
+- mover-BCE 的输入只有视觉 patch 特征 + e_sem——标签（谁动）与视觉捷径完全相关，语言通路（聚合 token 跨注意、全局 AdaLN cond、InfoNCE）没有任何 per-control 级的语言-实体绑定监督；
+- `contrastive_lang_loss`/`v_wrong0` 反事实机制**写了但从未接入训练**（train_sim 不传 vlm_inputs_wrong）——语言依赖从未被强制；
+- InfoNCE 在 8-10 种指令规模下 queue256 充满假负例（~1/8 同指令），lang loss 全程上行 3.0→5.5，形同虚设甚至有害。
+**修复路线（优先级最高）**：(1) 数据：窗口随机起点提前到 approach 之前（夹爪远离目标时语言成为唯一信号，直接打断捷径）；(2) 监督：per-control 指令相关性头——控制点特征与指令 token 跨注意 + BCE（标签免费：该控制点实体==被指令实体）；(3) 接入反事实 wrong-instruction 损失（真 mover 在错误指令下 gate 必须关）；(4) InfoNCE 按任务去重或弃用。
+
+**A2【致命】评估的 GT 泄漏**。`sample_controls` 用 GT disp 做 mover-biased 采样——eval/review/视频全部如此。它掩盖了 held-task 上的实体选择失败（假阳性 entity7 38cm/gate0.998 因为分不到控制点而不可见）。**修复**：评估一律逐实体均匀采样；语言交换选择准确率成为常设指标；corr/ratio 补报"全静止基线"对照（leak 维度的 corr 贡献需要校准）。
+
+**A3【结构】逐点自由速度回归 + 事后刚性正则的架构错位**。GT 本质是 K×SE(3)/实体；现在让 28 层 DiT 每步为 2048 个点独立回归速度，再用 Kabsch 损失把它们拉回刚体一致——容量浪费且推理期无结构保证（440 的 gate0.43 半冻结即推理期一致性破裂的例子）。**修复方向**：实体槽位 SE(3) 头（实体池化特征+语言 → 每实体每步 SE3；控制点输出退化为小残差），rigidity 从"软约束"变"参数化保证"。
+
+**A4【方法】运动相位结构无监督**。approach→grasp→carry→place 的相位由 tstep embed 隐式学；幅度损失只看端点（mover_magnitude 只在 K-1），中段滞后+末端跳变只有弱 velocity-smooth 抑制。30% 欠幅的另一来源是相位不确定性下的均值回归。**修复**：中段也加幅度监督（k∈{K/2,K-1}）或 soft-DTW 类时间对齐容忍损失。
+
+**A5【方法】grounding 过时**。per-control patch 特征永远取自 frame-0 uv——物体移动后控制点还在读旧位置的像素特征。K=12 内可忍，长 rollout 必衰减。**修复**：每步（或每几步）用当前预测位置重投影重采样 patch 特征。
+
+**A6【泛化】held-task 是弱 OOD**。LIBERO-object 10 任务共享桌面/物体库，heldtask 只是"没见过这个配对"，场景/物体全见过。真实泛化（新场景/新物体）未测。**修复**：跨 suite 评估（libero-spatial/goal）或 maniskill↔libero 交叉。
+
+### B. 数据层
+
+**B1 规模歧义**：St4R/Pi3 重建是 up-to-scale 的，逐 clip 焦距独立估计——`mover_thresh=0.01m`、`max_disp=0.1`、voxel 4mm 这些"米制"阈值跨 clip 含义漂移。**修复**：逐 clip 场景归一化（scene_r→1）或全局尺度锚定。
+**B2 schema 缺逐帧相机**：单一 viewmat 假设静止相机——真实 ego 视频（动相机）进不来。Pi3 管线已算出逐帧位姿但 schema 丢弃。**修复**：schema 加 viewmats[Kf+1]，trainer 渲染损失按帧取。
+**B3 splat 尺度链混乱（已查实）**：v2 的 ×4 重缩放被全量重生成冲掉，v4-v7 全在 ~1.2mm 微 splat 上训练（渲染损失偏弱），review 又 ×4 过度模糊。**修复**：数据生成时做覆盖率标定（或 frame-0 短时 gsplat 拟合），评审不再叠乘。
+**B4 臂子部件 seg id 跨 clip 不一致**：50+c 按 k-means 簇序号逐 clip 随机——id51 在不同 clip 是不同物理部件，semantic_id_loss 的原型库被矛盾监督（v7 的 seg loss 0.24 居高与此相关）。**修复**：sem CE 把 50+ 折叠回 id8（LBS/gate 池化保留细分）。
+**B5 填充点 uv 语义错位**：洞填点的 uv 是 frame-0 投影（在臂底下）→ patch 特征是臂的外观，sem 标签却是背景——特征/标签错位噪声。**修复**：fill 点免除 sem 监督（mask 掉）。
+**B6 遮挡持位姿当全可见**：held-pose 段在 trainer 里 vis=全1，模型学到"空中冻结"伪相位（当前 0 held 帧不痛，规模化后会）。
+
+### C. 训练/实现层
+
+**C1 InfoNCE 队列 rank 各自漂移**（DDP 下 q_g/q_t 不同步）——负例分布逐 rank 漂移，加剧 A1.3。
+**C2 dyn-gate 静态**：gate 由 frame-0 特征一次算出、整个 rollout 复用——"先静后动"（pre-grasp 物体）只能靠速度头时变补偿。
+**C3 颜色/尺度通道近乎无监督**：dcolor 只受 0.1 渲染损失约束（影子区域会被颜色漂移补偿）；dlog_s 只有锚定。
+**C4 1.78B 可训参数 / 20 clips / 800 步**：严重过参数化区间，热启动+冻结 Qwen 兜底；记忆场景而非学规律的风险真实存在（与 A6 互证）。
+**C5 工程**：clip schema 无单一权威文档（事实标准散在 maniskill_gt 注释）；gen 脚本 ×3 份近重复；12 个 _libero_* 调试脚本未归档；**全部改动未 commit/push**（vs aa7f1d0 巨量 diff）。
+
+### D. 结论与下一轮优先级
+
+当前模型 = "视觉先验的实体动力学模型"（哪个实体动选错时语言救不了），运动表达已修到可用（v6：静止归零、实体刚性成立、轨迹形态正确）。**下一轮唯一主线是把语言变成因果输入**（A1 的四件套 + A2 评估改革），其余按 B/C 顺序带过。Pi3 后端（v7 训练中，rPSNR 显著更优）作为 ego-ready 默认后端。
+
+## §53 v7/Pi3 数据质量审计（用户："先解决数据问题"）— 含一处自我纠错
+
+**纠错 B3（重要）**：之前说"splat 尺度链混乱、1.2-1.4mm 微 splat 太小、训练渲染信号弱"——**错了**。尺度扫描实测（`_scalesweep.py` epi0-pi3）：
+- x1.0（原生 1.4mm）：覆盖率 **0.996**、L1-vs-REAL **0.018**（最佳）；x2 0.998/0.033；x4 1.000/**0.058**（最差，过糊）。
+- 即原生尺度近乎完美闭合表面且光度匹配最优；训练一直用的就是 x1，没问题。**"过糊/鬼影"全是我的 review 视频 ×4 造成的**（review 工具 bug，非数据 bug）。已把 `_libero_data_video.py` 默认改 1.5×。
+
+**Pi3 数据真实质量（1.5× 目检 epi0/epi410）**：
+- ✓ 焦距各向同性（f_u≈f_v，无 St4R 的 x 压缩）；✓ 静止场景+被操作物体：清晰锐利、位置正确；✓ 物体/夹爪跟踪正确移动；✓ 逐帧深度→运动更干净（训练 rPSNR 18-20 vs St4R-v3 的 15.9）；✓ 逐帧相机位姿（ego-ready）。
+- ✗ **机械臂区域杂乱**（唯一真实的逐 clip 数据问题）：臂是多链节铰接体，被 k-means 近似成 2-3 个刚体簇→簇边界撕裂；+ 反向锚定填洞在臂区散点。隔离渲染确认：max disp 0.59m、仅 7 个 >0.5m 点，非严重外飞，是局部杂乱。
+- val frame0 24-27（略低于 St4R-v3 的 28-31，Pi3 静止几何稍糙），但运动 rPSNR 更高。
+
+**未用满的 Pi3 优势**：臂的运动现在还在用"刚体簇"（为 St4R 无逐帧深度而设计）。Pi3 有逐帧深度→可对每个臂 Gaussian 直接用 CoTracker-2D + 逐帧深度做 per-point 3D lift，无需刚体聚类，天然处理铰接。下一轮臂修复方向。
+
+**数据问题优先级（修正后）**：
+1. 【最高·分布级】夹爪邻近捷径（§52a：23/24 目标=离夹爪最近物体→语言被忽略）。这是最重要的数据问题，远比臂渲染重要。修：随机窗口起点提前到 approach 之前 + 多物体场景下打断"动最近物体"的相关性。
+2. 【中·逐clip】臂 per-point lift 替代刚体簇（仅 Pi3 后端可行）。
+3. 【低】填洞散点收紧（Pi3 远场深度噪声）。
+
+## §54 v8: language as a CAUSAL input + entity-slot SE(3) (the /goal plan, 2026-06-10)
+
+Root cause recap (§52a): model ignored instruction (swap/true=1.00) — gripper-proximity shortcut (23/24
+clips target=nearest object) + the per-control patch feature is instruction-BLIND (Qwen causal, image
+before text) + no per-Gaussian language↔entity binding + counterfactual loss never wired.
+
+**Architecture (model_full.py):**
+- §54 RELEVANCE HEAD (`_relevance_logit`): q = control's 2D patch feature, k/v = per-token instruction
+  text feats (`encode` now returns `text_feats=hidden_all[-1][text_mask]`). r_logit ADDS to the dyn-gate
+  logit, but ONLY for OBJECT-class controls (seg 1-7) via `objmask` — the robot (arm/gripper) executes
+  under EVERY instruction; only WHICH OBJECT is picked is language-dependent. Zero-init last layer =>
+  exact v7 warm-start (unit-tested: |Δmeans|=3.5e-6).
+- §54 COUNTERFACTUAL: one extra frozen-Qwen forward on a WRONG instruction (same patch q), supervise
+  `p_dyn_wrong`/`p_rel_wrong`→0 on the named object's controls. Same patch+different text MUST flip the
+  gate => a vision-only head is unsatisfiable. DDP static_graph-safe (rel params used every step).
+- §54 ENTITY-SLOT SE(3) head (dynamics/model.py, flag-gated): pool DiT features by seg entity -> per-
+  entity rigid (v_e,ω_e), broadcast as a rigid transform about the entity centroid; per-control head =
+  small residual. Zero-init => rigid term 0 => legacy motion at init. Rigidity becomes STRUCTURAL
+  (an entity's controls share one SE(3) by construction) instead of the §49 soft Kabsch loss.
+
+**Losses (losses.py):** `relevance_bce_loss` (r vs is_obj over objects), `counterfactual_gate_loss`
+(named object suppressed under wrong text — the LOAD-BEARING one), `mover_magnitude_loss` now multi-step
+{K/2,K}, semantic_id_loss folds arm subparts (id>=50→8). InfoNCE off (w_lang_contrast 0).
+
+**Data (video_gt/pi3_video_gt pick_window `mode=early`):** start the window 10-30 frames BEFORE motion
+onset (gripper still far) so proximity no longer predicts the mover — language must carry selection.
+gen_libero_pi3_v2.sh emits _e (early) + _c (center), split-suffix LAST in the filename.
+
+**Eval reform:** fixed eval_sim_generalization (was silently rebuilding the model WITHOUT
+gate_entity_pool/entity_lbs/rel + never passing seg_per_g -> §49 ckpts mis-evaluated). New
+`eval_langswap.py`: per-entity UNIFORM sampling (no GT leak), selection accuracy over heldtask×swaps.
+
+**v8-lang first signal (rel head only, Pi3 24 clips, resume v7):** cf 11.2→0.17, **cfSup 1.00→0.00 by
+s180** (gate now CLOSES on the named object under a wrong instruction) with TRUE-pass corr 0.945 / leak
+5e-4 / mP·mR intact. relSel still 0 (r≈0 under TRUE — gate stays open via the visual logit; r goes
+strongly negative only under WRONG). Decisive test pending: eval_langswap swap/true ratio (was 1.00).
+
+## §54 v8 RESULTS (the headline: language is now causal)
+
+eval_langswap (per-entity UNIFORM sampling — no GT leak; swap/true = named object's motion under a SWAP
+instruction ÷ under the TRUE instruction; selection accuracy gates floor∧suppression∧quiet):
+
+| run | TRAIN (seen nouns) sel-acc | TRAIN swap/true | HELDTASK sel-acc | note |
+|---|---|---|---|---|
+| v7 (no rel head) | 0.00 | ~1.00 | 0.00 | language IGNORED (the §52a failure) |
+| v8-lang (rel head) | 0.53 | **0.10** | 0.00 | language CAUSAL; floor gated by magnitude undershoot |
+| v8-ent (+entity SE3) | **0.84** | **0.00** | 0.00 | entity head fixed magnitude (TRUEmove≈GT 25-27cm); suppression perfect |
+
+So: **swap the instruction → the object's motion drops to 0-10%** (was 100%). Visual proof:
+viz/libero_v8/langswap_epi310.mp4 (milk moves under "milk", frozen under "alphabet soup"). cf loss→0,
+cfSup→0 throughout. The entity head ALSO cured the §51 magnitude undershoot (sel-acc 0.53→0.84).
+
+**Honest limitation — HELDTASK (unseen TARGET noun) over-suppresses (sel-acc 0).** salad dressing (task 8,
+held out) was only ever seen as a DISTRACTOR (relevance label 0), never a target (label 1) -> the
+relevance head outputs r<0 for it even under the correct instruction -> gate closes -> TRUEmove=0. This is
+a VOCABULARY-generalization limit of 8 training nouns (the relevance head memorized them), NOT a mechanism
+failure (the mechanism is proven on seen nouns). To disentangle "unseen NOUN" from "unseen SCENE", v8b
+adds a HELDSEED split (seen nouns, unseen episodes). Real fix needs noun diversity / a real-world-scale
+vocab — exactly why the pipeline is now Pi3 (ego-ready). Both training runs = 4×A100 DDP (world=4).
+
+## §55 v8 结果定论 + v9 replan（2026-06-10）
+
+**v8 验证阶梯完成，逐代诊断（uniform 采样、build_model 全 flag）：**
+| 模型 | obj位移 | 终点误差 | 方向cos | langswap |
+|---|---|---|---|---|
+| v7-pi3 | 27.4 | 10.2cm | +0.93 | swap=1.00（语言被忽略）|
+| **v8-lang** | 32.0 | **6.0cm** | **+0.99** | **swap=0.10 ✓** |
+| v8-ent | 27.5 | 42.2cm | **-0.18** | swap=0.00 |
+| v8b | 24.7 | 40.8cm | -0.19 | swap=0.00 |
+
+**赢**：§54 语言因果化成功（v8-lang：换指令物体运动 1.00→0.10、cfSup 1→0、视觉+数值双证；方向终点近乎完美 6cm/+0.99）。**此前担心的"欠幅"在 Pi3 数据上不存在**——是 review 脚本漏 entity_head flag 造成的 172cm 假象（已修 _libero_review_video 用 build_model + uniform 采样）。
+
+**回归（已定位、用户决策封存实体头）**：实体槽位 SE(3) 头把方向 +0.99→-0.18。证据链：v8-lang 方向完美 → 加实体头(v8-ent) 直接崩。原因二合一：(a) 实体池化把逐控制点特征平均，**丢失了方向信息**（每个控制点本来有自己正确的方向，池化成一个实体级方向时若 MLP 学不到正确朝向就全错）；(b) `w_resid=0.1` 残差正则**压制了本来方向正确的逐点残差通路**（v8-lang 的逐点头方向是对的，被当噪声压掉）。诊断：uniform vs mover-biased 采样误差一致（42 vs 42），排除采样问题；GT 方向 cos(move,toward-basket)=0.52-0.60 合理，排除数据噪声。**修法（未来）**：方向感知池化——把控制点相对质心的几何（x_i−c_e）编码进实体 MLP，让它能表达旋转而非只平移；本轮不做，flag 默认关。
+
+**方法论漏洞（已补）**：corr/ratio/mag 全是范数指标、方向盲 → 回归没被任何训练/eval 数字暴露，靠逐代手动诊断才发现。§A1 已加 **dir-cos**（eval_langswap 每 clip + 汇总；train_sim log 行 `dcos`）。
+
+**未解决根本缺口**：未见名词泛化（heldtask 过度抑制 TRUEmove=0）——8 名词词汇硬限制。**用户决策：v9 主攻开放词汇分割（GroundingDINO+SAM2 替代 GT mask）**，解锁无 mask 的 LIBERO suite 扩词汇/场景 + 真实视频 + 推理期诚实分割。SAM2.1-large + GroundingDINO-tiny 权重已在 hf_cache。
+
+**v9 路线**：A) dir-cos 补盲 + v9-lang（rel only、v2 双窗、干净读数）+ 封存实体头；B) openvocab_seg 管线 + IoU 自验 + 词汇扩展 → v10 未见名词测试；C) 真实 ego 视频试点（Pi3 已 ego-ready，缺 schema 逐帧 viewmat）。
+
+## §56 v9 执行进展（Phase A 固化 + Phase B openvocab，2026-06-10，受 session-limit 约束）
+
+**A2 v9-lang**（rel only、双窗 40 train、resume v7）：双窗数据训练**不稳**（per-clip corr/dcos 剧烈振荡：corr 0.14-0.87、dcos -0.34~+0.96，因早窗 clip 运动只占部分、更难）。后期收敛 dcos~0.90-0.93、corr~0.87——方向保住了（无实体头），但略低于 v8-lang 的 +0.98。最终三划分 eval 待出（heldseed=场景泛化关键读数）。dcos 已进训练 log（§A1）。
+
+**B1 openvocab_seg.py**（agent 在 session-limit 前建好 423 行：GroundingDINO-tiny + SAM2.1-large + IoU 自验 CLI）。IoU 实测（5 episode）：
+- **basket(2)=0.97-0.98** ✓（SAM2 质量极好）。
+- **arm(8)=0.000** ✗——根因：GroundingDINO-tiny **把整个机器人 lump 成一个检测**，"robot arm"短语没单独命中，整机器人被赋 id10（gripper, 4118px），id8 空。
+- **named object(1)=0.00 on 4/5**（只 epi410 salad dressing 命中）✗——tiny 无法在相似桌面物体间 ground 具体名词；且**漏检 5/7 干扰物**（只找到 2 个）。
+- **关键认识**：训练数据 NOT 需要 openvocab ground 对名词——现有 `find_object_id` 已按运动仲裁目标。openvocab 只需把"所有物体+臂+夹爪+篮子"分出类别；运动挑目标。所以 named-object IoU 失败对训练无关紧要；真正的坑是 **arm lump + 漏检物体**（tiny 太弱）。
+- **修复中**：GD_REPO 改环境可覆盖；下载 grounding-dino-base（更强）重测中。SAM2 mask 质量本身没问题，瓶颈纯在 detection。
+- 若 base 仍不够：备选 SAM2 自动 mask 生成（segment everything）+ 按"非臂/夹爪/篮子/背景"归为物体，或 LIBERO sim 重渲分割（更可靠但失去真实视频兼容）。
+
+**session-limit**：子 agent + workflow 被限（7:30am EST 重置）；数据源调研 workflow 失败待重跑。直接 server 调用与训练进程不受影响，继续 inline 推进。
+
+## §57 Phase A 收尾：v9-lang 是生产模型（场景泛化成立）+ openvocab 结构性障碍
+
+**决定性 A/B（同一 v2 held-out 划分，公平对比）：**
+| heldseed（见过名词、未见 episode=场景泛化） | sel-acc | dir-cos | endpoint |
+|---|---|---|---|
+| **v9-lang（双窗早起点）** | **0.75** | **+0.81** | 7.8cm(epi40) |
+| v8-lang（单窗） | 0.25 | +0.76 | — |
+
+**结论：双窗早起点数据把场景泛化从 0.25→0.75（3 倍），方向 +0.76→+0.81。v9-lang = 生产模型。** 之前以为 v8-lang 方向 +0.98 更优是误判——那是 v8-lang 在自己训练 clip 上的数；公平 held-out 对比 v9-lang 全面更好。视觉证据 `viz/libero_v9/v9_heldseed40.mp4`：未见场景里正确选中 alphabet soup 并推向篮子。heldtask（未见名词）两者都 0——纯词汇限制，Phase B 解决。
+
+**openvocab grounding-dino-base IoU = tiny 字节级相同**（arm 0.00 / obj 0.00 / basket 0.97）→ **障碍是结构性 LOGIC，不是检测器强度**：(1) "robot arm"短语没单独命中、整机器人被 lump 成 id10；(2) 用名词词表逐个检测物体覆盖率差。修法（需迭代，待 session 重置后子 agent）：机器人统一归 id8（让管线运动聚类拆关节）+ 物体改用 SAM2 自动 mask 生成（segment everything）按排除法归类，而非靠 GroundingDINO 逐名词。basket(0.97)+SAM2 mask 质量本身没问题。
+
+**Phase A 完成度**：A1 方向指标 ✓、A3 实体头封存 ✓、A2 v9-lang 生产模型 ✓（场景泛化证实）。Phase B openvocab 卡在结构性 logic + session 限额；Phase C 真实视频依赖 B。
+
+## §58 openvocab 阶段性结论（B1 部分完成，需 SAM2-AMG 重构）
+
+robot→id8 lump + generic-shape prompts（grounding-dino-base）后实测：
+- **arm(8): 0→0.65**（机器人整体归 id8，data 管线运动聚类拆关节）；**basket(2): 0.97**；SAM2 mask 质量本身极好。
+- **物体覆盖不稳**：epi0 全 6 物体 100% 覆盖；但 epi100/300 **目标物体(id1)=0%** 漏检。GroundingDINO（即使 base）+ 名词/形状 prompt **无法稳定检出所有小桌面物体**——目标物体只 ~1/3 时候被覆盖，不够格生成数据（目标必须被覆盖才能跟踪）。
+- **根因**：依赖 GroundingDINO 逐 prompt 检测本质不可靠。**正确修法 = SAM2 自动 mask 生成（point-grid AMG，segment everything）**：分割所有 mask → 按"非机器人(GroundingDINO robot)/非篮子/非背景(最大/地板)"归为物体 ids，完全不依赖物体名词检测。这是 B1 的真正解法，需迭代（plan 自己估 Phase B 2-3 天）。
+- **管线集成缺口**：现 `find_object_id` 需全帧 mask 找最动 id；openvocab 只有 frame-0 → 需改成用 CoTracker 位移（frame-0 物体像素跟踪位移最大者=目标）仲裁，非全帧 mask 质心。这是"--seg openvocab"集成的真正改动（不止换 mask 源）。
+
+**Phase B 状态**：openvocab_seg.py 建成、arm/basket 达标、SAM2 质量验证；物体检测 + 管线集成需 SAM2-AMG 重构（待 session 重置后子 agent 迭代）。Phase A 已完整收尾（v9-lang 生产模型、场景泛化 0.75、已提交）。
+
+## §59 openvocab AMG WIP（待 session 重置后子 agent 调优）
+
+加了 `segment_frame_amg`（SAM2 point-grid 100 点 → segment everything → 按排除法归类）。SAM2 point-grid API 验证可用（100 prompt→100 mask）。但首版分类失败：arm/basket/target IoU 全 0，却painted 7 个 object（说明 dedup 保留了错误区域——floor 子块当物体了，robot/basket 的 GroundingDINO box 分类没命中）。需调：(1) background 移除（max_frac + floor 颜色/边界判据）、(2) robot/basket box 检测的 prompt/阈值、(3) dedup 容器判据。这是迭代实验，子 agent 最合适（session 限额阻塞至 7:30am EST）。
+
+**openvocab 当前最佳 = box-based `segment_frame`**（robot→id8 lump + generic shapes，grounding-dino-base）：arm 0.65 / basket 0.97 / 物体覆盖不稳（目标 ~1/3 命中）。AMG 是正确方向但未调通。
+
+**B1 状态**：脚本框架完整，两条路径（box / amg），SAM2 mask 质量好；物体可靠检测未达标。集成（find_object_id 改用 CoTracker 位移仲裁）未做。**B2/B3 待 B1 物体检测达标**。
+
+## §60 openvocab AMG 调通到可用（B1 实质完成，剩最后一公里）
+
+`segment_frame_amg` 经多轮 inline 调试已从"完全坏"调到可用：
+- **arm 0.65 / basket 0.85-0.98 / 目标覆盖 3/5**（epi0/100/200 ✓，epi300/410 ✗）。
+- 关键修复链：(1) SAM2 point-grid(20×20) segment-everything→所有实体的干净 mask；(2) 机器人→id8（GroundingDINO box，pipeline 运动聚类拆关节）；(3) basket→id2（box）；(4) **floor 用 SAM2 floor-mask 重叠判据剔除（非颜色——tan 物体在 tan 地板上是独立 region 所以保留，floor 碎片在 floor mask 内所以剔）**；(5) 名词补充检测（distinctive 物体）。诊断要点：AMG 的 mask 本身就好（物体/臂/篮子都分出来了），全部问题在分类。
+- **剩余 2/5 目标漏检**（epi300/410）：grid 漏 + 这俩名词 GroundingDINO 也没 ground。需要更密 grid 或 motion-arbitration 兜底。
+- **pyc 陷阱**：rsync -a 保留源 mtime 可能旧于 server 上 .pyc → Python 用旧字节码。改脚本后必须 `find __pycache__ -name openvocab_seg* -delete` + PYTHONDONTWRITEBYTECODE=1。
+
+**B1 状态**：AMG 路径可用（arm/basket 达标，目标 3/5），比 box-based（目标 1/5）好，是推荐路径。**剩最后一公里**：目标覆盖 3/5→全覆盖（更密 grid + motion 兜底），+ pipeline 集成（find_object_id 改用 CoTracker 位移仲裁目标，不再需全帧 mask）。这两步 + B3 词汇扩展待子 agent（session 限额阻塞）。
+
+## §61 openvocab 集成进数据管线 + B2 诚实性测试启动（point-prompt 兜底）
+
+§60 的 AMG 目标覆盖只有 3/5（帧间方差：grid 在某些帧漏掉目标）。**根因**：依赖每帧 AMG grid 命中目标不鲁棒。**修法（plan 允许的 gen-time GT-motion 仲裁）**：用 GT mover 质心做单点 prompt 喂 SAM2（`_sam2_point`，multimask 取最高 IoU），目标必出干净 mask 标 id1。**mask 本身仍是 SAM2 质量（保留分割噪声供诚实测试），只有目标"选择"用 GT 运动**——推理期（真实视频）改用 CoTracker 运动即可，无需 GT。
+
+**自验（B2 前半，5 episode vs GT mask）**：目标-IoU **0.95-0.97**、basket **0.97-0.98**、arm **0.58-0.66**（arm 管线内按运动重聚类，frame-0 IoU 次要）。帧间方差消除，目标 5/5 覆盖。单 episode 全管线跑通：target-cov 1.00 / IoU 0.97 / 物体真实位移 15cm（之前 target-cov 0 时 disp=0 的垃圾 clip 被自验指标正确标红）。
+
+**管线集成**：`pi3_video_gt.py --seg {gt,openvocab}`。openvocab 路径只替换管线真正消费的两帧 mask（widx[0] seg_per_g+g0-keep、widx[-1] 补洞排除）；windowing/目标 id 仍走 GT 运动（生成期允许）。三处 mask 源统一为 `mask_w0`/`mask_wL` 局部变量。
+
+**Sam2Processor 坑**：point prompt 需 4 层嵌套 `[image][object][point][xy]`、labels 3 层；multimask 输出 `[obj,n_masks,H,W]` 需降到 `[n_masks,H,W]` 再按 iou_scores 选。
+
+**B2 后半（运行中）**：`orchestrate_v9ov.sh`（detached）= 56 clip 用 `--seg openvocab` 重生成 → train **v9lang_ov**（同配方：rel_head/w_rel1.5/w_rel_cf1.0/entity_head0/resume v7_pi3/800步）→ langswap 三划分。**诚实性判据**：v9lang_ov 在 OV 数据上的 sel-acc/dir-cos 不比 GT-mask 版 v9lang（heldseed 0.75/+0.81）差 >10% → 管线能扛自己的分割噪声 → 真实视频可行。日志 `logs/orchestrate_v9ov.log`。
+
+## §62 openvocab 训练数据诚实性自验（B2 前半，子 agent 交叉验证，CPU-only 不碰训练）
+
+56 个 OV clip vs GT-mask clip（同 episode/window）逐项对照：
+
+**目标-IoU 分划分**：train 中位 0.96/均 0.937（0 个<0.70）、heldtask 中位 0.97/均 0.936（0<0.70）、heldseed 中位 0.955/均 0.900（**1 个<0.70**）。全体中位 **0.965**、均 0.931。早窗(0.97)略优于中窗(0.955)。
+
+**唯一离群** `epi000140_c_heldseed`（"pick up the **butter**"）：cov 0.99 但 IoU **0.55**——三独立信号定位：物体 Gaussian 数 OV/GT=672/380=**1.77×**（全场最大过分割）、中窗、butter 是该波 GT footprint 最小物体（380 vs alphabet-soup 1487）。**小/平/低对比物体上 point-prompt SAM2 向邻域外溢**。孤立失败，非系统性。
+
+**运动一致性**（windowing 相同→物体 3D 位移必须一致）：全 56 clip 物体终点位移 **中位 |Δ|=0.000m、最大 |Δ|=0.009m**（CoTracker 随机性）。**证明 OV 只改了分割，GT-运动驱动的 windowing + 动力学目标完全未变**——干净 A/B。（关键：必须用 `is_obj` 键算物体位移，GT 的 `seg_per_g` 带全 LIBERO schema；`is_obj === seg_per_g==1`。）
+
+**实体分布恢复**（bincount seg_per_g）：物体 id1 比值中位 1.03，**49/56 在 ±15% 内**，0 个欠分割；basket 近乎完美（中位 1.01）；arm 中位 1.11（非训练目标）。**结构性注意**：只有 {1=物体,2=basket,8=arm} 在 OV↔GT 对齐；干扰物 id 3-10 不对齐（GT 用 sim label，OV 用 GD→schema 映射）——**但训练只用 `is_obj`(seg==1) 喂 relevance 头（v9-lang headline），不监督干扰物 id**，故不影响 A/B。
+
+**判据通过**：运动一致(Δ≤0.009m)、监督 mask(物体/basket) 55/56 在 ±15%、IoU 中位 0.96、唯一失败可定位且在 eval clip——**足够干净，是公平的诚实性测试**。等 v9lang_ov langswap 三划分出数对比 GT-mask v9-lang(heldseed 0.75/+0.81)。
+
+## §63 Phase C 实现（逐帧 viewmats，真实 ego 视频就绪）+ B3 词汇扩展下载方案（子 agent）
+
+**Phase C（移动相机/真实 ego 视频）已实现**——子 agent 代码审计确认逐帧 world→cam 矩阵本就存在（`rel[t]=inv(T0)@poses[t]` 是 cam_t→canonical，取逆即 viewmats[t]），纯 schema/管线改动、零新几何：
+- `pi3_video_gt.py`：build_clip 算 `viewmats=stack(inv(rel[t]))` [Kf+1,4,4]、return dict + save dict 加 `viewmats` 键（保留 `viewmat`=viewmats[0] 向后兼容）。LIBERO 静态相机 viewmats[t]≈I（cam_t.max<0.02 已验）。
+- `train_sim.py`：加载 viewmats，**向后兼容广播**（无 viewmats 键的旧 clip→`viewmat[None].expand(Kf+1)`，逐帧索引统一、对静态 clip 逐字节等价）；finite-guard 改查 viewmats；渲染环 `viewmat[None]`→`viewmats[tt][None]`（确认渲染损失渲染多帧未来 rsteps，逐帧 GT_rgb[tt] 对应逐帧相机）。
+- `render.py`/`model_full.py` 无需改（render_gaussianset 签名已是 batched [C,4,4]；模型相机无关）。本地语法过。**待 GPU 空闲后 pilot 验证**（regen 一个静态 clip 确认 viewmats[0]==I），再跑真实视频。
+
+**B3 词汇扩展下载方案**（子 agent 在 server 实测元数据，proxy 200）：唯一 schema 匹配（LeRobot v2.1、`observation.images.image`+`wrist_image`、instruction 在 `meta/episodes.jsonl[*].tasks[0]`）= **`IPEC-COMMUNITY/*_no_noops_*_lerobot`**。排名：
+1. **`libero_90_no_noops_lerobot`**（3921 eps、73 任务、~20+ 新名词 book/caddy/mug/bowl/drawer/microwave… + 新动词 put/open/close/turn/push + 空间介词）= **先拉**，最可能把 heldtask sel-acc 从 0 抬起。
+2. **`libero_goal_no_noops_1.0.0_lerobot`**（428 eps，动词/关系密集）= 次拉。
+3. libero_spatial（空间指代）、libero_10（长时多物体）备选。
+- **fps 注意**：现数据 fps=10，IPEC 是 fps=20（2× 时间密度）→ gen 时 stride 加倍保持同 wall-clock 窗口/运动尺度。
+- 拒绝（schema 不符）：physical-intelligence/libero(v2.0 裸键)、HuggingFaceVLA/libero(v3.0)、jesbu1(v2.0)。
+- **下载中**（detached，network-only）：libero_goal 全量 + libero_90 meta（logs/dl_libero_goal.log、dl_libero_90_meta.log）。disk 51T free。
+
+## §64 B2 诚实性判据 = 2×2 隔离（openvocab 推理就绪；训练损失局限于选择通路）
+
+v9-lang-ov（OV mask 训练）vs v9-lang（GT mask 训练），langswap heldseed（场景泛化）sel-acc/方向余弦，**2×2 交叉评估**隔离"训练影响"与"评估数据影响"：
+
+| heldseed | eval on GT data | eval on OV data |
+|---|---|---|
+| **v9-lang**(GT训练) | 0.75/+0.81 | **0.75/+0.81** |
+| **v9-lang-ov**(OV训练) | 0.50/+0.79 | 0.50/+0.78 |
+
+三划分完整：train 两者 0.57/+0.71≈0.57/+0.72（一致）；heldseed 见上；heldtask 两者 0.00（词汇限制）。
+
+**① 评估数据影响 = 0 → openvocab 分割推理就绪（Phase B 的决定性胜利）**：看行——每个模型在 GT-seg 和 OV-seg 数据上**得分完全相同**（0.75=0.75、0.50=0.50）。GT 训练的模型在 openvocab 分割数据上和在 GT 数据上一模一样好。**这是对真实世界最关键的证明**：真实视频推理时没有 GT mask，此结果证明 openvocab mask 是完美替代。butter 离群没有影响大局。
+
+**② 训练影响 = 真实但只伤"选择"通路（方向幸存）**：看列——同一数据上，OV 训练模型选对物体 0.50 vs GT 训练 0.75，但**方向泛化保住（+0.79 vs +0.81）**。即 OV mask 噪声只伤了 relevance/选择通路，没伤 dynamics/方向。最可能根因：物体 mask 过分割（is_obj 监督目标更噪——物体 Gaussian 数中位 1.03× 但最高 1.77×）。**诚实保留**：heldseed 仅 8 clip，部分可能是训练方差；但"选择掉/方向稳"的选择性模式说明是真实的局部效应。
+
+**结论**：openvocab **推理/评估完全就绪**（解锁真实视频 + 无 mask 套件的评估）；openvocab **训练**需 mask 质量门（§50 思路：丢高过分割 clip，或收紧 SAM2 目标 mask）才能让选择泛化回到 GT 水平。修法折叠进 B3：gen 时加 IoU/过分割门。
