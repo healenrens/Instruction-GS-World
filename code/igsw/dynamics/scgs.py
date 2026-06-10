@@ -26,6 +26,7 @@ class SCGSRollout:
         sigma_scale: float = 2.0,
         generator: torch.Generator | None = None,
         ctrl_idx: torch.Tensor | None = None,
+        dense_seg: torch.Tensor | None = None,   # [N] entity id -> ENTITY-AWARE LBS binding (§49)
     ):
         self.dense0 = dense_g0
         n = len(dense_g0)
@@ -41,8 +42,12 @@ class SCGSRollout:
             dense_g0.means[ctrl_idx], dense_g0.quats[ctrl_idx], dense_g0.scales[ctrl_idx],
             dense_g0.opacities[ctrl_idx], dense_g0.colors[ctrl_idx], ctrl_feats,
         )
+        if dense_seg is not None:
+            dense_seg = dense_seg.to(dense_g0.device).long()
         self.knn_idx, self.knn_w = build_lbs_binding(
-            dense_g0.means, self.control0.means, k=k, sigma_scale=sigma_scale
+            dense_g0.means, self.control0.means, k=k, sigma_scale=sigma_scale,
+            dense_seg=dense_seg,
+            control_seg=(dense_seg[ctrl_idx] if dense_seg is not None else None),
         )
 
     @property

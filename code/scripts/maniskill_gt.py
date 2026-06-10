@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from igsw.gaussians.types import GaussianSet
 from igsw.gaussians.render import render_gaussianset, psnr
-from igsw.lifting.to_gaussians import points_to_gaussians
+from igsw.lifting.to_gaussians import points_to_gaussians, _per_view_neighbor_scale
 
 
 # --------------------------------------------------------------------------- #
@@ -102,6 +102,102 @@ def backproject_to_world(depth_m: torch.Tensor, K: torch.Tensor, viewmat_w2c: to
     pts_world = pts_cam @ R.T + t                                        # [H,W,3]
     mask = torch.isfinite(z) & (z > 1e-4)
     return pts_world, mask
+
+
+# --------------------------------------------------------------------------- #
+# WHOLE-VIDEO temporal fusion -> ONE complete canonical Gaussian set
+# --------------------------------------------------------------------------- #
+def _voxel_first_indices(P: torch.Tensor, voxel: float) -> torch.Tensor:
+    """Indices that keep ONE point per `voxel`-sized cell (the first in input order). Used to dedupe
+    the multi-frame point pile; with the canonical frame placed FIRST, its points win each cell."""
+    q = torch.floor(P / voxel).to(torch.int64)
+    q = q - q.min(dim=0).values
+    nx = int(q[:, 0].max().item()) + 1
+    ny = int(q[:, 1].max().item()) + 1
+    key = q[:, 0] + q[:, 1] * nx + q[:, 2] * (nx * ny)
+    ks, order = torch.sort(key, stable=True)
+    first = torch.ones_like(ks, dtype=torch.bool)
+    first[1:] = ks[1:] != ks[:-1]
+    return order[first]
+
+
+def _project_to_canonical_px(P: torch.Tensor, K: torch.Tensor, viewmat: torch.Tensor) -> torch.Tensor:
+    """Project canonical world points P[N,3] into the canonical camera -> pixel uv[N,2] (OpenCV)."""
+    Ph = torch.cat([P, torch.ones(P.shape[0], 1, device=P.device)], dim=-1)
+    cam = (Ph @ viewmat.T)[:, :3]
+    z = cam[:, 2].clamp_min(1e-6)
+    u = K[0, 0] * cam[:, 0] / z + K[0, 2]
+    v = K[1, 1] * cam[:, 1] / z + K[1, 2]
+    return torch.stack([u, v], dim=-1)
+
+
+def _fuse_canonical_gaussians(rec, start_idx: int, device: str, exclude_seg, depth_max: float,
+                              fuse_stride: int = 3, voxel: float = 0.004, scale_factor: float = 0.6,
+                              scale_pct=(0.01, 0.7), opacity_init: float = 0.9):
+    """★ The unified whole-video reconstruction (replaces the single-frame G0). Back-project EVERY
+    (strided) frame's depth, and for each entity REGISTER its points into the canonical (start_idx)
+    pose via the KNOWN per-entity poses (`X_canon = T_{e,0} · T_{e,f}^{-1} · X_f`; static/no-pose ->
+    identity since the camera is static), accumulate across the whole video, then voxel-dedupe into
+    ONE complete, denoised canonical GaussianSet. Each kept point carries its source frame's grid-
+    neighbour scale (so detail quality matches the single-frame path). Moving entities reveal new
+    faces over time and the arm's occlusion-shadows on the static scene get filled -> a COMPLETE,
+    low-uncertainty canonical geometry that the analytic trajectory then drives. The temporal-fusion
+    methodology transfers to real monocular video (one camera over time), unlike multi-camera tricks.
+    Returns (GaussianSet, uv[N,2], seg_per_g[N])."""
+    n_sim = len(rec.frames)
+    fcanon = rec.frames[start_idx]
+    K = fcanon["K"].to(device).float()
+    viewmat = extrinsic_to_viewmat(fcanon["extrinsic_cv"].to(device).float())
+    poses0 = rec.entity_poses[start_idx]
+    exclude_seg = set(int(s) for s in (exclude_seg or set()))
+    # canonical frame FIRST (wins the per-voxel dedupe), then the rest of the video
+    fuse_idx = [start_idx] + [f for f in range(0, n_sim, max(1, fuse_stride)) if f != start_idx]
+    P_all, C_all, S_all, SC_all = [], [], [], []
+    for f in fuse_idx:
+        fr = rec.frames[f]
+        depth = fr["depth"].to(device).float() / 1000.0
+        Kf = fr["K"].to(device).float()
+        vmf = extrinsic_to_viewmat(fr["extrinsic_cv"].to(device).float())
+        pts_w, dmask = backproject_to_world(depth, Kf, vmf)            # [H,W,3] world at frame f
+        seg = fr["seg"].to(device).long()
+        rgb = fr["rgb"].to(device).float() / 255.0                    # [H,W,3]
+        scl = _per_view_neighbor_scale(pts_w[None])[0]                # [H,W] grid spacing (rotation-invariant)
+        keep = dmask & (seg > 0) & (depth < float(depth_max)) & torch.isfinite(scl)
+        for sid in exclude_seg:
+            keep &= (seg != sid)
+        if not bool(keep.any()):
+            continue
+        Pk = pts_w[keep]; Ck = rgb[keep].clamp(0, 1); Sk = seg[keep]; SCk = scl[keep]
+        posef = rec.entity_poses[f]
+        Xc = Pk.clone()
+        for sid in torch.unique(Sk).tolist():
+            sid = int(sid)
+            rp0 = poses0.get(sid); rpf = posef.get(sid)
+            if rp0 is None or rpf is None:
+                continue                                               # static / no pose -> identity
+            T0 = pose_to_matrix(rp0.to(device).float())
+            Tf = pose_to_matrix(rpf.to(device).float())
+            T_rel = T0 @ torch.linalg.inv(Tf)                          # frame-f world -> canonical world
+            m = (Sk == sid)
+            Xh = torch.cat([Pk[m], torch.ones(int(m.sum()), 1, device=device)], dim=-1)
+            Xc[m] = (Xh @ T_rel.T)[:, :3]
+        P_all.append(Xc); C_all.append(Ck); S_all.append(Sk); SC_all.append(SCk)
+    P = torch.cat(P_all); C = torch.cat(C_all); S = torch.cat(S_all); SC = torch.cat(SC_all)
+    idx = _voxel_first_indices(P, voxel)                              # dedupe overlapping points
+    P, C, S, SC = P[idx], C[idx], S[idx], SC[idx]
+    if SC.numel() >= 16:                                              # same robust scale clamp as points_to_gaussians
+        lo = torch.quantile(SC, scale_pct[0]); hi = torch.quantile(SC, scale_pct[1])
+        SC = SC.clamp(min=max(1e-4, float(lo)), max=float(hi)) * scale_factor
+    else:
+        SC = SC.clamp_min(1e-4) * scale_factor
+    N = P.shape[0]
+    quats = torch.zeros(N, 4, device=device); quats[:, 0] = 1.0
+    g0 = GaussianSet(means=P.contiguous(), quats=quats,
+                     scales=SC[:, None].repeat(1, 3).contiguous(),
+                     opacities=torch.full((N,), float(opacity_init), device=device),
+                     colors=C.contiguous()).validate()
+    uv = _project_to_canonical_px(P, K, viewmat)
+    return g0, uv, S
 
 
 # --------------------------------------------------------------------------- #
@@ -176,8 +272,11 @@ def _ee_action(env, target_p, grip, gain=8.0, target_q_delta=None):
 
 
 def _script_pick(env, rec, goal_offset=(0.0, 0.0, 0.0)):
-    """Scripted grasp-and-move for PickCube / StackCube (no mplib): approach above the cube,
-    descend, close gripper, lift+carry to the goal (or atop the green cube for stacking)."""
+    """Scripted grasp-and-CARRY for PickCube / StackCube (no mplib): approach above the cube,
+    descend, grasp, lift, then carry the grasped cube through a MULTI-WAYPOINT path so the scene
+    has ~6-7 s of CONTINUOUS 3D motion (=> a random 4 s sub-window always contains real change).
+    The first carry target is the task goal, so 'pick & move to goal' still matches the motion;
+    the extra waypoints keep the grasped cube travelling through the workspace (lateral + vertical)."""
     u = env.unwrapped
     OPEN, CLOSE = 1.0, -1.0
     target = u.cube if hasattr(u, "cube") else u.cubeA   # PickCube: cube; StackCube: cubeA
@@ -187,29 +286,38 @@ def _script_pick(env, rec, goal_offset=(0.0, 0.0, 0.0)):
 
     # phase 1: hover above the cube (open gripper)
     for _ in range(14):
-        tp = cube_p() + np.array([0, 0, 0.06])
-        rec.step(_ee_action(env, tp, OPEN))
+        rec.step(_ee_action(env, cube_p() + np.array([0, 0, 0.06]), OPEN))
     # phase 2: descend onto the cube
     for _ in range(10):
-        tp = cube_p() + np.array([0, 0, 0.005])
-        rec.step(_ee_action(env, tp, OPEN, gain=6.0))
+        rec.step(_ee_action(env, cube_p() + np.array([0, 0, 0.005]), OPEN, gain=6.0))
     # phase 3: close the gripper to grasp
     for _ in range(6):
         rec.step(_ee_action(env, cube_p() + np.array([0, 0, 0.005]), CLOSE, gain=4.0))
     # phase 4: lift straight up
-    for _ in range(8):
-        tp = cube_p() + np.array([0, 0, 0.10])
-        rec.step(_ee_action(env, tp, CLOSE, gain=6.0))
-    # phase 5: carry to the goal / target
+    for _ in range(10):
+        rec.step(_ee_action(env, cube_p() + np.array([0, 0, 0.12]), CLOSE, gain=6.0))
+    # task goal = FIRST carry waypoint (so the instruction still describes the motion)
     if hasattr(u, "goal_site"):
         goal = u.goal_site.pose.p[0].cpu().numpy()
     elif hasattr(u, "cubeB"):
         goal = u.cubeB.pose.p[0].cpu().numpy() + np.array([0, 0, 0.04])
     else:
-        goal = cube_p() + np.array([0.1, 0.1, 0.10])
+        goal = cube_p() + np.array([0.10, 0.10, 0.12])
     goal = goal + np.array(goal_offset)
-    for _ in range(16):
-        rec.step(_ee_action(env, goal, CLOSE, gain=6.0))
+    # phase 5+: multi-waypoint carry of the GRASPED cube -> ~5 s of continuous 3D motion
+    base = cube_p()                                       # lifted cube position
+    waypoints = [
+        goal,
+        base + np.array([ 0.09,  0.00, 0.02]),
+        base + np.array([ 0.09,  0.10, 0.07]),
+        base + np.array([-0.07,  0.10, 0.01]),
+        base + np.array([-0.07, -0.09, 0.07]),
+        base + np.array([ 0.07, -0.09, 0.01]),
+        base + np.array([ 0.00,  0.00, 0.05]),
+    ]
+    for wp in waypoints:
+        for _ in range(14):
+            rec.step(_ee_action(env, wp, CLOSE, gain=6.0))
 
 
 def _manip_object(u):
@@ -222,22 +330,34 @@ def _manip_object(u):
 
 
 def _script_push(env, rec):
-    """Scripted push for PushCube: lower behind the cube then push it toward the goal."""
+    """Scripted MULTI-SEGMENT push for PushCube: push the cube through a sequence of targets
+    (re-approaching behind it before each segment) so the scene has ~6 s of continuous motion
+    (=> a random 4 s sub-window always contains real change). The first target is the task goal;
+    the rest zigzag in a bounded area around it so the cube stays in the workspace."""
     u = env.unwrapped
     CLOSE = -1.0
     obj = _manip_object(u)
-    cube = obj.pose.p[0].cpu().numpy()
+    cube0 = obj.pose.p[0].cpu().numpy()
     goal = u.goal_region.pose.p[0].cpu().numpy() if hasattr(u, "goal_region") else (
-        u.goal_site.pose.p[0].cpu().numpy() if hasattr(u, "goal_site") else cube + np.array([0.1, 0, 0]))
-    direction = goal[:2] - cube[:2]
-    direction = direction / (np.linalg.norm(direction) + 1e-6)
-    behind = cube + np.array([-direction[0] * 0.04, -direction[1] * 0.04, 0.02])
-    for _ in range(16):
-        rec.step(_ee_action(env, behind, CLOSE))
-    for _ in range(24):
+        u.goal_site.pose.p[0].cpu().numpy() if hasattr(u, "goal_site") else cube0 + np.array([0.10, 0, 0]))
+    # sequence of push targets: start at the goal, then zigzag in a bounded region around it
+    targets = [
+        np.array([goal[0],        goal[1],        cube0[2]]),
+        np.array([goal[0] + 0.07, goal[1] + 0.08, cube0[2]]),
+        np.array([goal[0] - 0.07, goal[1] + 0.08, cube0[2]]),
+        np.array([goal[0] - 0.07, goal[1] - 0.05, cube0[2]]),
+    ]
+    for tgt in targets:
         cube = obj.pose.p[0].cpu().numpy()
-        tp = np.array([goal[0], goal[1], cube[2] + 0.0])
-        rec.step(_ee_action(env, tp, CLOSE, gain=5.0))
+        direction = tgt[:2] - cube[:2]
+        direction = direction / (np.linalg.norm(direction) + 1e-6)
+        behind = cube + np.array([-direction[0] * 0.04, -direction[1] * 0.04, 0.02])
+        for _ in range(10):                              # re-approach behind the cube
+            rec.step(_ee_action(env, behind, CLOSE))
+        for _ in range(20):                              # push it to this segment's target
+            cube = obj.pose.p[0].cpu().numpy()
+            tp = np.array([tgt[0], tgt[1], cube[2]])
+            rec.step(_ee_action(env, tp, CLOSE, gain=5.0))
 
 
 def generate_episode(env_id: str, seed: int, cam_w: int, cam_h: int, max_retries: int = 8):
@@ -291,17 +411,28 @@ EXCLUDE_NAMES = {"goal_site"}     # translucent goal marker = not real geometry
 
 
 def build_clip(rec: _ObsRecorder, K_frames: int, device: str, exclude_seg: set[int] | None = None,
-               depth_max: float = 2.0, start_frac: float = 0.0):
-    """Subsample to K_frames+1 evenly, backproject the FIRST sampled frame -> GaussianSet, attach
-    per-Gaussian entity (seg) id, and compute the analytic per-Gaussian world trajectory over all
-    K+1 frames. start_frac>0 anchors the clip at a MID-EPISODE frame (predict the continuation from
-    a mid-manipulation state, not from the task start). Returns everything for validation + overfit."""
+               depth_max: float = 2.0, start_frac: float = 0.0,
+               window_steps: int | None = None, rng=None, fuse_stride: int = 0,
+               fuse_voxel: float = 0.002):
+    """Subsample to K_frames+1 frames over a WINDOW of the episode, backproject the FIRST sampled
+    frame -> GaussianSet, attach per-Gaussian entity (seg) id, and compute the analytic per-Gaussian
+    world trajectory over the window. The window is `window_steps` sim steps long (None = to the end of
+    the episode = the legacy whole-episode clip). Its START is RANDOM in [0, n_sim-1-window] when an
+    `rng` (np.random.Generator) is given, else placed deterministically by `start_frac` within the same
+    valid range. This yields 'predict the next ~window-seconds of change from a RANDOM mid-episode state'
+    clips (vs always starting at the task beginning)."""
     n_sim = len(rec.frames)
-    start = int(round(max(0.0, min(0.85, start_frac)) * (n_sim - 1)))   # MID-EPISODE anchor
-    idx = np.linspace(start, n_sim - 1, K_frames + 1).round().astype(int)
+    win = (n_sim - 1) if window_steps is None else int(min(max(1, window_steps), n_sim - 1))
+    max_start = max(0, (n_sim - 1) - win)
+    if rng is not None:                                                  # RANDOM start within the episode
+        start = int(rng.integers(0, max_start + 1))
+    else:                                                                # deterministic start_frac within the valid range
+        start = int(round(max(0.0, min(1.0, start_frac)) * max_start))
+    end = start + win
+    idx = np.linspace(start, end, K_frames + 1).round().astype(int)
     idx = np.unique(idx)
-    if len(idx) < K_frames + 1:                                          # pad if the episode is short
-        idx = np.linspace(start, n_sim - 1, K_frames + 1).round().astype(int)
+    if len(idx) < K_frames + 1:                                          # pad if the window is short
+        idx = np.linspace(start, end, K_frames + 1).round().astype(int)
     frames = [rec.frames[i] for i in idx]
     poses = [rec.entity_poses[i] for i in idx]
     Kf = len(idx) - 1                                                    # actual K used
@@ -322,31 +453,30 @@ def build_clip(rec: _ObsRecorder, K_frames: int, device: str, exclude_seg: set[i
         if nm in EXCLUDE_NAMES:
             exclude_seg.add(int(sid))
 
-    pts_world, dmask = backproject_to_world(depth0, K, viewmat)          # [H,W,3], [H,W]
-    keep = dmask.clone()
-    for sid in exclude_seg:
-        keep &= (seg0 != sid)
-    # also drop the "background"/no-hit (seg id 0) if present
-    keep &= (seg0 > 0)
-    # workspace crop: drop FAR ground points (grazing ground stretches to >10m), which (a) inflate
-    # the scene radius used to normalize displacements and (b) carry huge grazing-angle neighbor
-    # scales. The manipulation workspace is ~within `depth_max` m of the camera.
-    depth_cam = depth0                                                    # already meters, [H,W]
-    keep &= (depth_cam < float(depth_max))
-
-    # build the dense GaussianSet from the kept frame-0 pixels (reuse our scale/opacity init).
-    # points_to_gaussians expects [N,H,W,3] / [N,3,H,W] / [N,H,W] with an N (view) axis; use N=1 and
-    # fold the keep-mask into its mask argument.
-    # tighter scale clamp (0.01..0.7 pct) + 0.6 factor: the neighbor-scale upper tail comes from the
-    # grazing ground plane and would smear the scene; this band gives a clean reconstruction (~22 dB
-    # frame-0) while still filling most inter-surfel gaps. (Verified by a frame-0 PSNR sweep.)
-    g0, uv = points_to_gaussians(
-        pts_world[None], rgb0[None], keep[None],
-        opacity_init=0.9, scale_factor=0.6, scale_pct=(0.01, 0.7), return_uv=True,
-    )
-    # the kept pixels, in the SAME order points_to_gaussians used (its mask is applied row-major)
-    seg_per_g = seg0[keep]                                               # [M]
-    g0 = g0.to(device)
+    if fuse_stride > 0:
+        # ★ WHOLE-VIDEO unified reconstruction: ONE complete canonical Gaussian set fused over the
+        # whole video (registers every frame's per-entity points into the canonical pose). Fills the
+        # occluded/back geometry the single-frame shell leaves UNCERTAIN -> certain increments.
+        g0, uv, seg_per_g = _fuse_canonical_gaussians(
+            rec, int(idx[0]), device, exclude_seg, depth_max, fuse_stride=fuse_stride, voxel=fuse_voxel)
+        g0 = g0.to(device)
+    else:
+        # legacy single-frame canonical G0 (one view of the start frame only)
+        pts_world, dmask = backproject_to_world(depth0, K, viewmat)          # [H,W,3], [H,W]
+        keep = dmask.clone()
+        for sid in exclude_seg:
+            keep &= (seg0 != sid)
+        keep &= (seg0 > 0)                                                   # drop background/no-hit
+        # workspace crop: drop FAR ground points (grazing ground stretches to >10m) that inflate the
+        # scene radius + carry huge grazing-angle scales. Workspace is ~within depth_max m of the cam.
+        keep &= (depth0 < float(depth_max))
+        # tighter scale clamp (0.01..0.7 pct) + 0.6 factor (verified ~22 dB frame-0 reconstruction).
+        g0, uv = points_to_gaussians(
+            pts_world[None], rgb0[None], keep[None],
+            opacity_init=0.9, scale_factor=0.6, scale_pct=(0.01, 0.7), return_uv=True,
+        )
+        seg_per_g = seg0[keep]                                               # [M]
+        g0 = g0.to(device)
 
     # ---- analytic per-Gaussian trajectory ----
     # group gaussians by entity; T_rel(e,t) = T(e,t) @ inv(T(e,0)); X_t = (T_rel @ X0_homog)
@@ -382,6 +512,7 @@ def build_clip(rec: _ObsRecorder, K_frames: int, device: str, exclude_seg: set[i
         "K_intr": K, "viewmat": viewmat, "H": H, "W": W, "Kf": Kf,
         "frames": frames, "poses": poses, "img_hw": (H, W),
         "name_by_sid": name_by_sid, "uniq_seg": uniq,
+        "start": int(start), "win": int(win), "n_sim": int(n_sim),
     }
 
 

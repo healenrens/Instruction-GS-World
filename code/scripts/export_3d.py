@@ -21,7 +21,9 @@ Ki = clip["K_intr"].to(dev).float(); vm = clip["viewmat"].to(dev).float()
 ck = torch.load(CKPT, map_location="cpu", weights_only=False)
 cfg = DynamicsConfig(**ck["cfg"])
 model = InstructGSWorldModel(cfg, n_control=ck.get("M", 2048), n_query=ck.get("n_query", 16),
-                             cond_mode="aggregator", spatial_ground=True).to(dev).eval()
+                             cond_mode="aggregator", spatial_ground=True,
+                             dyn_gate=bool(ck.get("dyn_gate", 0)), sem_dim=ck.get("sem_dim", 0),
+                             gate_uses_sem=bool(ck.get("gate_uses_sem", 1))).to(dev).eval()  # §44h
 miss, unexp = model.load_state_dict(ck["model"], strict=False)
 gen = torch.Generator(device=dev).manual_seed(0)
 disp = (traj[K] - traj[0]).norm(dim=-1)
