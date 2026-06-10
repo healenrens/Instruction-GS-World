@@ -443,8 +443,8 @@ if __name__ == "__main__":
 # pipeline picks the manipulated object by MOTION). GroundingDINO is used ONLY for the reliable
 # robot/basket categories; every other distinct mask is a table object.
 # --------------------------------------------------------------------------- #
-def _amg_masks(models, pil, grid: int = 12, min_px: int = 40, max_frac: float = 0.5,
-               dedup: float = 0.7, score_thr: float = 0.6):
+def _amg_masks(models, pil, grid: int = 20, min_px: int = 40, max_frac: float = 0.5,
+               dedup: float = 0.7, score_thr: float = 0.5):
     import numpy as np, torch
     W, H = pil.size
     gy, gx = np.meshgrid(np.linspace(H * 0.12, H * 0.96, grid),
@@ -472,7 +472,9 @@ def _amg_masks(models, pil, grid: int = 12, min_px: int = 40, max_frac: float = 
         if any((np.logical_and(m, km).sum() / max(1, a)) > dedup for km in kept):
             continue
         kept.append(m)
-    return kept
+    # background/floor = the LARGEST mask overall (the table surface, filtered out of `kept` by max_frac)
+    bg = ms[int(np.argmax([int(m.sum()) for m in ms]))] if len(ms) else None
+    return kept, bg
 
 
 def _box_overlap_frac(mask, box):
@@ -485,34 +487,58 @@ def _box_overlap_frac(mask, box):
     return float(inb.mean())
 
 
-def segment_frame_amg(rgb_uint8, instruction, device: str | None = None):
-    """AMG variant of segment_frame: SAM2 segment-everything + GroundingDINO robot/basket -> schema."""
+def segment_frame_amg(rgb_uint8, instruction, device: str | None = None, floor_thr: float = 30.0):
+    """AMG variant: SAM2 segment-everything gives clean masks of EVERY entity (verified: objects, arm,
+    basket all segmented). The only work is CLASSIFICATION: (1) robot -> id8 via GroundingDINO box(es);
+    (2) basket -> id2 via box; (3) reject FLOOR-COLORED leftover masks (SAM2 also returns floor frags);
+    (4) the rest are table objects -> ids 1..7 by centroid-x. The named-object identity is NOT needed
+    (the data pipeline picks the manipulated object by MOTION)."""
     import numpy as np
     device = device or _device()
     models = load_models(device)
     H, W = rgb_uint8.shape[:2]
     pil = Image.fromarray(rgb_uint8.astype(np.uint8))
-    obj_masks = _amg_masks(models, pil)
-    dets = _gd_detect(models, pil, ["robotic arm", "robot", "basket"], box_thresh=0.18, text_thresh=0.18)
+    masks, bg = _amg_masks(models, pil)
+    dets = _gd_detect(models, pil, ["robotic arm", "robot", "robot gripper", "basket"],
+                      box_thresh=0.18, text_thresh=0.18)
 
-    def best(phrase):
-        cs = [d for d in dets if _phrase_matches(d["label"], phrase)]
-        return max(cs, key=lambda d: d["score"])["box"] if cs else None
-    robot_box = best("robot") or best("robotic arm")
-    basket_box = best("basket")
+    def boxes_for(words):
+        return [d["box"] for d in dets if any(_phrase_matches(d["label"], w) for w in words)]
+    robot_boxes = boxes_for(["robotic arm", "robot", "robot gripper", "arm", "gripper"])
+    basket_boxes = boxes_for(["basket"])
+
+    def in_any(m, boxes, thr=0.5):
+        return any(_box_overlap_frac(m, b) > thr for b in boxes)
 
     id_map = np.zeros((H, W), dtype=np.uint8)
     objs = []
-    for m in obj_masks:
-        if robot_box is not None and _box_overlap_frac(m, robot_box) > 0.6:
+    for m in masks:
+        if in_any(m, robot_boxes):
             id_map[m] = ID_ARM          # whole robot -> id8 (pipeline motion-clusters the joints)
             continue
-        if basket_box is not None and _box_overlap_frac(m, basket_box) > 0.6:
+        if in_any(m, basket_boxes):
             id_map[m] = ID_BASKET
+            continue
+        # FLOOR rejection by the SAM2 floor mask (NOT colour — a tan object on a tan floor is a SEPARATE
+        # region, so it survives; a floor fragment is mostly INSIDE the floor mask, so it is dropped).
+        if bg is not None and float(np.logical_and(m, bg).sum()) / max(1, int(m.sum())) > 0.5:
             continue
         ys, xs = np.where(m)
         objs.append((float(xs.mean()), m))
-    objs.sort(key=lambda e: e[0])       # left -> right
+    # SUPPLEMENT: ensure the instruction's NAMED object is covered even if the AMG grid missed it
+    # (distinctive objects ground well by noun even when small). De-dup vs the AMG objects.
+    noun = parse_noun(instruction)
+    if noun:
+        nd = [d for d in _gd_detect(models, pil, [noun], box_thresh=0.12, text_thresh=0.12)
+              if _phrase_matches(d["label"], noun)]
+        if nd:
+            nm = _sam2_masks(models, pil, [max(nd, key=lambda d: d["score"])["box"]])[0]
+            a = int(nm.sum())
+            on_floor = bg is not None and np.logical_and(nm, bg).sum() / max(1, a) > 0.5
+            dup = any(np.logical_and(nm, om).sum() / max(1, min(a, int(om.sum()))) > 0.5 for _, om in objs)
+            if a >= 20 and not on_floor and not dup and not in_any(nm, robot_boxes) and not in_any(nm, basket_boxes):
+                objs.append((float(np.where(nm)[1].mean()), nm))
+    objs.sort(key=lambda e: e[0])       # left -> right -> ids 1..7
     nid = ID_OBJ
     for cx, m in objs:
         if nid > ID_DISTRACTOR_HI:

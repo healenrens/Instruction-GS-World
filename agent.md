@@ -900,3 +900,13 @@ robot→id8 lump + generic-shape prompts（grounding-dino-base）后实测：
 **openvocab 当前最佳 = box-based `segment_frame`**（robot→id8 lump + generic shapes，grounding-dino-base）：arm 0.65 / basket 0.97 / 物体覆盖不稳（目标 ~1/3 命中）。AMG 是正确方向但未调通。
 
 **B1 状态**：脚本框架完整，两条路径（box / amg），SAM2 mask 质量好；物体可靠检测未达标。集成（find_object_id 改用 CoTracker 位移仲裁）未做。**B2/B3 待 B1 物体检测达标**。
+
+## §60 openvocab AMG 调通到可用（B1 实质完成，剩最后一公里）
+
+`segment_frame_amg` 经多轮 inline 调试已从"完全坏"调到可用：
+- **arm 0.65 / basket 0.85-0.98 / 目标覆盖 3/5**（epi0/100/200 ✓，epi300/410 ✗）。
+- 关键修复链：(1) SAM2 point-grid(20×20) segment-everything→所有实体的干净 mask；(2) 机器人→id8（GroundingDINO box，pipeline 运动聚类拆关节）；(3) basket→id2（box）；(4) **floor 用 SAM2 floor-mask 重叠判据剔除（非颜色——tan 物体在 tan 地板上是独立 region 所以保留，floor 碎片在 floor mask 内所以剔）**；(5) 名词补充检测（distinctive 物体）。诊断要点：AMG 的 mask 本身就好（物体/臂/篮子都分出来了），全部问题在分类。
+- **剩余 2/5 目标漏检**（epi300/410）：grid 漏 + 这俩名词 GroundingDINO 也没 ground。需要更密 grid 或 motion-arbitration 兜底。
+- **pyc 陷阱**：rsync -a 保留源 mtime 可能旧于 server 上 .pyc → Python 用旧字节码。改脚本后必须 `find __pycache__ -name openvocab_seg* -delete` + PYTHONDONTWRITEBYTECODE=1。
+
+**B1 状态**：AMG 路径可用（arm/basket 达标，目标 3/5），比 box-based（目标 1/5）好，是推荐路径。**剩最后一公里**：目标覆盖 3/5→全覆盖（更密 grid + motion 兜底），+ pipeline 集成（find_object_id 改用 CoTracker 位移仲裁目标，不再需全帧 mask）。这两步 + B3 词汇扩展待子 agent（session 限额阻塞）。
