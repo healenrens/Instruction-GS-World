@@ -1005,3 +1005,22 @@ def entity_rigid_aggregate(pos0, pos_pred, ent_id, w=None, min_pts=4, eps=1e-7):
 **验证阶梯（批准后执行）**：单元测试（合成刚性场→恒等；散开场→extent 1.0 且方向不变）→ resume v9-lang settle 800 步 → langswap 三划分+coherence 指标。判据：heldseed sel≥0.75、dir≥+0.8 持平，extent-ratio 1.00±0.05，刚性残差<0.5cm。
 
 **B3 数据状态**：libero_goal 下载完整并校验（428 eps、856/856 mp4、428 parquet、fps20、双相机键、10 条新指令含新动词 put-on/open/put-inside + 新名词 bowl/plate/wine bottle/rack/drawer）；libero_90 仅 meta（全量 ~3921 eps 待拉）。IPEC loader（mp4+episodes.jsonl，区别于 binhng parquet 图像）待写——排在 v10-rigid 拍板后。
+
+## §67 v10-rigid 实现 + V1 单元 + V2 推理 A/B（散开问题在 v9-lang 上零重训即解）
+
+按 plan（adaptive-giggling-crescent.md）实现 batched weighted-Kabsch 实体聚合，branch `v10-rigid`：
+- `igsw/dynamics/rigid_agg.py` `entity_rigid_aggregate`：逐点投票 x→x+v → 每实体加权 Kabsch（index_add×2 + einsum 互协方差 + 批量 3×3 SVD）→ 回写 v̂=R_e·x+t_e−x, ω̂=axisangle(R_e)。fp32 island、reflection 守卫、退化(<4点/共线)→纯平移 fallback（torch.where，DDP 安全）、参数自由。
+- 接线：model.py predict_deltas gate 后调用；model_full.py `--rigid_agg` flag + seg_local 在 rigid_agg||entity_head 时下传 + entity_lbs warn 守卫；train_sim.py flag + 自动归零 w_rigid + ckpt 双存键；eval_langswap/eval_sim_generalization build_model 读 flag；eval_langswap 加 `--force_rigid_agg`（零重训推理 A/B）+ **coherence 指标**（extent-ratio、刚性残差）堵盲区。
+- **附带修复**：rigid_agg 把实体刚性运动应用到**全部**控制点（含 gate 关闭的），结构性解决 §49"半个物体冻住"。
+
+**V1 单元（test_rigid_agg.py 5/5 PASS）**：刚性场→恒等(2.4e-7)、散开 1.22→1.00 方向 cos 1.000、退化→纯平移、bf16+梯度有限、bg passthrough。
+
+**V2 推理 A/B（v9-lang 现有权重，heldseed，force_rigid_agg 0 vs 1，零重训）**：
+| heldseed | OFF | FORCED-ON |
+|---|---|---|
+| selection | 0.75 | **0.75**（不变）|
+| direction | +0.81 | **+0.81**（不变）|
+| **刚性残差** | **2.15cm** | **0.01cm** |
+| extent-ratio 中位 | 1.04 | 1.00 |
+
+**散开消除（刚性残差 2.15→0.01cm）且 selection/方向逐字节不变** → 散开在生产模型上**零重训即解**。extent 中位 1.04 是 8 clip 中位（cream-cheese 3.73 离群被中位洗掉），刚性残差更敏感、清楚显示修复。V2 判据全过。train/heldtask split + 刚性可视化进行中；V3 训练（让投票适应投影）随后。
