@@ -1052,3 +1052,30 @@ v10-rigid 代码全部保留（flag 默认关、可回退）；test_rigid_agg 5/
 **生产推理/评估/可视化一律指向此 ckpt**。旧 v9-lang ckpt 保留（含 opt，可续训）。代码全 flag 门控默认关——任何旧 ckpt 行为不变。
 
 **这条线（散开/coherence）正式收尾。** 完整链：用户目检发现散开 → §65 调研4家族+16clip数据核查 → §66 设计 → §67 实现+V1单元5/5+V2零重训解决 → §68 V3训练在环回归方向（诚实记录，投影该后处理不该回训）→ §69 固化 V2 为生产。branch v10-rigid。
+
+## §70 v11 计划（用户：效果未达标，只列计划不执行）— 独立失败分析 + 3D-first 指标 + 真实视频 + scale-up
+
+**用户判断**（2026-06-11）：模型效果未达标；刚体约束未充分解决；真实视频（实操/ego）未开始；2D/视频指标无意义（变化只占画面小部分，仅可作辅助约束），核心看 3D 指标。**本节=计划，未执行。**
+
+### A. 独立失败分析（挖现有 eval 日志，零新计算）
+1. **幅度塌缩 = 主要矛盾**：c-窗 train clips epi100/110/130/150/160 整簇 GT 26-32cm 只走 2-4cm（**比例 ~0.1×**），方向却 +0.95-1.00。train sel 0.57 的真相：40% 对子败在 0.25×GT 幅度地板，不是选错。heldseed butter 同样 0.10×。**塌缩 clip 的 swap/true 0.3-0.44（健康 clip 0.00-0.03）→ rel-gate 在这些场景对真/假指令都半开 = relevance 校准失败**，gate 半开直接缩 v。叠加：L1 轨迹损失 median-seeking（仅 ~5% 控制点动）、w_mag 未入 v9 配方、800 步 settle + 40 clip 过小。
+2. **训练指标共谋**：corr 是范数相关（全局缩小 0.1× 仍高）→ corr 0.93 与幅度 0.1× 并存；rPSNR 渲染整帧而动区 ~5% 像素 → 背景主导。**现指标体系系统性掩盖幅度塌缩**（与方向盲区、散开盲区同构，第三次）。
+3. **刚体未真正解决（用户正确）**：V2 投影=推理期遮症状；模型原始投票仍散（投影前残差 2.15cm）；**旋转正确性从未测过**（LIBERO pick-place 近平移、R_e≈I 没暴露）；V3 训练在环失败。表示层不"懂"刚体。
+4. **数据规模荒谬**：40 train clips、1 相机、1 suite、8-10 名词、fps10、纯 sim。heldseed n=8（±0.09 二项噪声）——一切结论都在噪声区。
+5. 早窗方向差（+0.11-0.63，§57）：pre-contact 时机歧义。6. heldtask=0（词汇）。7. 长时域 v8 后未测。
+
+### B. 调研结论（真实视频 + 3D 指标 + scale）
+- **真实视频伪 GT 提取器**：**SpatialTrackerV2**（ICCV'25，前馈统一 2D 跟踪+单目深度+相机位姿，世界系 3D 轨迹分解为 geometry/ego/object，10-20s/段，比 SOTA 3D 跟踪 +30%、与动态重建持平快 50×）= 主提取器，替代 CoTracker+Pi3 拼接；**MegaSaM**（CVPR'25，动态视频相机+深度，可微 BA）= 位姿/深度备选；**MoSca**（CVPR'25，离线 4D Motion Scaffolds 高保真）= 慢但准，作 5-10 clip 黄金子集校验伪 GT 自身。
+- **3D 指标标准（取代自创）**：TAPVid-3D 的 **3D-AJ / APD / OA**（含全局中位数尺度归一）；场景流 **EPE3D / Acc3DS(≤5cm或5%) / Acc3DR(≤10cm或10%) / 离群率**（Gojcic CVPR'21 标准）；实体位姿 **5°5cm**（旋转测量首次引入）+ 平移/幅度比直方图（中位数+P10，杜绝被均值洗掉）。2D/渲染指标全部降级为辅助约束。
+- **真实数据源**：**DROID**（真机、ZED 双目深度+标定+语言，CC-BY-4.0，gs://gresearch/robotics/droid）= 首选（真深度可校准单目管线的尺度）；**AgiBot-world-beta**（已在服务器！137k ep、8 cam 30fps、语言标注）= 零下载成本的 ego/多视角试点；**EgoDex**（829h Vision Pro ego 操作+3D 手部）/ EPIC-KITCHENS / EgoExo4D = 后续规模。
+- 表示升级参照：Shape-of-Motion/HiMoR 低秩运动基（v11-bases）；GWM/ManiGaussian 无刚性保证（前车之鉴）。
+
+### C. 计划（R0→R4，每阶段 3D 指标门禁）
+- **R0 指标改革 + 诚实重基线（~1天）**：实现 3D 套件（EPE3D/Acc3DS/Acc3DR、3D-AJ/APD、5°5cm、幅度比中位+P10、逐步方向曲线、coherence 已有、长时域复活）进 eval_langswap/新 eval_3d.py；训练 log 加幅度比中位（替 corr 主位）；v9lang_rigid 在全部 56 clip 重基线（含首次旋转误差）。**门禁：暴露面完整（预期难看，就要难看）。**
+- **R1 幅度/gate 校准修复（~2-3天）**：先诊断塌缩簇（rel logit/p_dyn 分布 vs 健康簇；是否名词相关）；候选修法（按证据择 1-2）：(a) rel-BCE pos_weight/温度重校准 + 塌缩场景过采样，(b) w_mag（已存在）入配方 + per-entity 位移损失（实体级幅度直接监督，对 ~0.1× 塌缩比逐点 L1 敏感），(c) 训练加长（800→3-5k settle）+ lr 微调。**门禁：train 幅度比中位 ≥0.85 且无 clip <0.5；heldseed sel ≥0.75 / dir ≥+0.8 不回退。**
+- **R2 刚性表示真解决（~3天，R1 后）**：保留推理投影为底线；表示层试 **v11-structured-decode**：每实体 SE(3) 由实体控制点特征 **输出空间 cross-attention 学习聚合**（≈可学习加权 Kabsch，端到端可微、无 SVD 反向问题；区别于失败的 V3-detach 与特征池化 entity head），arm 逐子部件；用 LIBERO-goal 的开抽屉/旋钮动作补**旋转丰富数据**。**门禁：投影前原始投票残差 <0.5cm；旋转 5°5cm 在旋转 clip 上 ≥0.7；方向/选择不回退。**
+- **R3 真实视频管线试点（~1周，可与 R2 并行）**：SpatialTrackerV2 集成（伪 GT：世界系 3D 轨迹+相机+深度）→ 既有 ego-ready schema（§63 viewmats 已验证）+ openvocab（§64 推理就绪，目标选择改 CoTracker/StV2 运动仲裁，无 GT）→ **先 DROID 20 clip**（真深度校尺度）→ AgiBot 20 clip（已在服务器）→ 人工目检 + MoSca 黄金子集校验伪 GT → v12 sim+real 共训 → 真实 heldout 用 3D-AJ/APD 评。**门禁：伪 GT 黄金子集 EPE3D <3cm；真实 heldout 模型 APD@10cm 显著 > static 基线。**
+- **R4 Scale-up（~2周+，R1-R3 收敛后）**：数据：LIBERO-90/goal/spatial openvocab 重生成（B3，4k+ ep、fps20 stride2、词汇 30+ 名词）+ 真实视频扩 DROID→EgoDex；训练：batch>1 ragged（segment-op 已就绪）、sim:real 课程混采、settle→长训（≥20k 步）；按需 v11-bases（关节/柔性）。**门禁：heldtask（未见名词）sel 显著 >0（首次）；真实视频 3D-AJ 持续提升；长时域 10s 漂移有界。**
+
+### 风险
+伪 GT 尺度歧义（单目）→ DROID 真深度先校准；StV2 非商用许可核查；塌缩簇若是数据(失败演示残留)非模型 → §50 过滤复用；R2 若再伤方向 → 即回退推理投影底线（已 ship）；真实视频遮挡重 → StV2 遮挡感知 + 可见性掩码已在损失。
