@@ -882,3 +882,13 @@ vocab — exactly why the pipeline is now Pi3 (ego-ready). Both training runs = 
 **openvocab grounding-dino-base IoU = tiny 字节级相同**（arm 0.00 / obj 0.00 / basket 0.97）→ **障碍是结构性 LOGIC，不是检测器强度**：(1) "robot arm"短语没单独命中、整机器人被 lump 成 id10；(2) 用名词词表逐个检测物体覆盖率差。修法（需迭代，待 session 重置后子 agent）：机器人统一归 id8（让管线运动聚类拆关节）+ 物体改用 SAM2 自动 mask 生成（segment everything）按排除法归类，而非靠 GroundingDINO 逐名词。basket(0.97)+SAM2 mask 质量本身没问题。
 
 **Phase A 完成度**：A1 方向指标 ✓、A3 实体头封存 ✓、A2 v9-lang 生产模型 ✓（场景泛化证实）。Phase B openvocab 卡在结构性 logic + session 限额；Phase C 真实视频依赖 B。
+
+## §58 openvocab 阶段性结论（B1 部分完成，需 SAM2-AMG 重构）
+
+robot→id8 lump + generic-shape prompts（grounding-dino-base）后实测：
+- **arm(8): 0→0.65**（机器人整体归 id8，data 管线运动聚类拆关节）；**basket(2): 0.97**；SAM2 mask 质量本身极好。
+- **物体覆盖不稳**：epi0 全 6 物体 100% 覆盖；但 epi100/300 **目标物体(id1)=0%** 漏检。GroundingDINO（即使 base）+ 名词/形状 prompt **无法稳定检出所有小桌面物体**——目标物体只 ~1/3 时候被覆盖，不够格生成数据（目标必须被覆盖才能跟踪）。
+- **根因**：依赖 GroundingDINO 逐 prompt 检测本质不可靠。**正确修法 = SAM2 自动 mask 生成（point-grid AMG，segment everything）**：分割所有 mask → 按"非机器人(GroundingDINO robot)/非篮子/非背景(最大/地板)"归为物体 ids，完全不依赖物体名词检测。这是 B1 的真正解法，需迭代（plan 自己估 Phase B 2-3 天）。
+- **管线集成缺口**：现 `find_object_id` 需全帧 mask 找最动 id；openvocab 只有 frame-0 → 需改成用 CoTracker 位移（frame-0 物体像素跟踪位移最大者=目标）仲裁，非全帧 mask 质心。这是"--seg openvocab"集成的真正改动（不止换 mask 源）。
+
+**Phase B 状态**：openvocab_seg.py 建成、arm/basket 达标、SAM2 质量验证；物体检测 + 管线集成需 SAM2-AMG 重构（待 session 重置后子 agent 迭代）。Phase A 已完整收尾（v9-lang 生产模型、场景泛化 0.75、已提交）。

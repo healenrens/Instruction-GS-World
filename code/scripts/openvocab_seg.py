@@ -224,8 +224,13 @@ def segment_frame(rgb_uint8, instruction, distractor_vocab=None,
 
     # ---- 2) detect the table objects (distractors) with the full LIBERO noun vocab ----
     # query every candidate noun (minus the named one is fine to keep — we de-dup spatially later)
-    distr_dets = _gd_detect(models, pil, distractor_vocab,
-                            box_thresh=box_thresh, text_thresh=text_thresh)
+    # cast a wider net: the specific LIBERO nouns often miss (GroundingDINO can't tell "alphabet
+    # soup" from "cream cheese"), so also query GENERIC SHAPES at a low threshold — every tabletop
+    # object IS a bottle/can/box. NMS + size-filtering below dedup. (Identity-by-noun isn't needed:
+    # the data pipeline picks the manipulated object by MOTION, not by which noun matched.)
+    GENERIC = ["bottle", "can", "box", "carton", "jar", "container"]
+    distr_dets = _gd_detect(models, pil, list(distractor_vocab) + GENERIC,
+                            box_thresh=0.15, text_thresh=0.15)
 
     # ---- helper: pick the single best box matching a phrase from a det list ----
     def best_box(dets, phrase):
@@ -320,12 +325,21 @@ def segment_frame(rgb_uint8, instruction, distractor_vocab=None,
     if "obj" in mask_of and mask_of["obj"].sum() >= 4:
         id_map[mask_of["obj"]] = ID_OBJ
 
-    # 5d) arm body, then gripper LAST (gripper sits inside the arm box -> gripper wins).
-    if "arm" in mask_of and mask_of["arm"].sum() >= 8:
-        id_map[mask_of["arm"]] = ID_ARM
-    if "grip" in mask_of and mask_of["grip"].sum() >= 8:
-        id_map[mask_of["grip"]] = ID_GRIPPER
-
+    # 5d) robot: GroundingDINO usually LUMPS the whole robot into ONE box (the "robot arm" phrase
+    # rarely fires separately from "robot gripper") -> the data pipeline only needs the robot as ONE
+    # entity it can motion-cluster (§50 arm-clustering splits the articulated parts). So: if BOTH arm
+    # and gripper fired distinctly, keep id8/id10 separate; otherwise assign the single robot mask to
+    # id8 (arm) and leave id10 empty (the pipeline's id8 branch handles articulation).
+    arm_m = mask_of.get("arm"); grip_m = mask_of.get("grip")
+    arm_ok = arm_m is not None and arm_m.sum() >= 8
+    grip_ok = grip_m is not None and grip_m.sum() >= 8
+    # treat gripper as DISTINCT only if it is much smaller than the arm box (a real end-effector,
+    # not the whole-robot lump mislabelled "gripper")
+    distinct = arm_ok and grip_ok and grip_m.sum() < 0.6 * arm_m.sum()
+    if arm_ok:
+        id_map[arm_m] = ID_ARM
+    if grip_ok:
+        id_map[grip_m] = ID_GRIPPER if distinct else ID_ARM   # lumped robot -> id8
     return id_map
 
 
