@@ -1044,3 +1044,11 @@ def entity_rigid_aggregate(pos0, pos_pred, ent_id, w=None, min_pts=4, eps=1e-7):
 **结论 = 生产用 V2**：rigid_agg 作为 v9-lang 的**推理期投影**（`--force_rigid_agg 1`，参数自由、零重训）→ 散开解决（2.15→0.01cm）+ 方向/选择/终点全保住（+0.81/0.75/14cm）。**不发 V3 训练版**（方向回归）。salvage 选项（更少步/保留逐控制点梯度/更低 lr）留待需要时；V2 已达成 plan 目标。
 
 v10-rigid 代码全部保留（flag 默认关、可回退）；test_rigid_agg 5/5；推理投影是干净增量。
+
+## §69 v10-rigid 收尾：生产模型 = libero_v9lang_rigid（v9-lang + 推理刚性投影）
+
+按用户决策 A 固化 V2。**生产模型 = `checkpoints/libero_v9lang_rigid/ckpt_last.pt`** = v9-lang 权重 + `rigid_agg=1` flag（推理期参数自由投影，opt 已丢、12GB）。加载即自动刚性投影（build_model 读 ckpt flag，无需 --force）。验证（heldseed，无 --force）：rigid_agg=ON、**sel 0.75 / dir +0.81 / endErr 13cm**（= v9-lang 质量）+ **coherence 1.00 / 0.01cm**（刚性）。
+
+**生产推理/评估/可视化一律指向此 ckpt**。旧 v9-lang ckpt 保留（含 opt，可续训）。代码全 flag 门控默认关——任何旧 ckpt 行为不变。
+
+**这条线（散开/coherence）正式收尾。** 完整链：用户目检发现散开 → §65 调研4家族+16clip数据核查 → §66 设计 → §67 实现+V1单元5/5+V2零重训解决 → §68 V3训练在环回归方向（诚实记录，投影该后处理不该回训）→ §69 固化 V2 为生产。branch v10-rigid。
