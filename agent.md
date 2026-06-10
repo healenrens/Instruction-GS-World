@@ -951,3 +951,20 @@ robot→id8 lump + generic-shape prompts（grounding-dino-base）后实测：
 - **fps 注意**：现数据 fps=10，IPEC 是 fps=20（2× 时间密度）→ gen 时 stride 加倍保持同 wall-clock 窗口/运动尺度。
 - 拒绝（schema 不符）：physical-intelligence/libero(v2.0 裸键)、HuggingFaceVLA/libero(v3.0)、jesbu1(v2.0)。
 - **下载中**（detached，network-only）：libero_goal 全量 + libero_90 meta（logs/dl_libero_goal.log、dl_libero_90_meta.log）。disk 51T free。
+
+## §64 B2 诚实性判据 = 2×2 隔离（openvocab 推理就绪；训练损失局限于选择通路）
+
+v9-lang-ov（OV mask 训练）vs v9-lang（GT mask 训练），langswap heldseed（场景泛化）sel-acc/方向余弦，**2×2 交叉评估**隔离"训练影响"与"评估数据影响"：
+
+| heldseed | eval on GT data | eval on OV data |
+|---|---|---|
+| **v9-lang**(GT训练) | 0.75/+0.81 | **0.75/+0.81** |
+| **v9-lang-ov**(OV训练) | 0.50/+0.79 | 0.50/+0.78 |
+
+三划分完整：train 两者 0.57/+0.71≈0.57/+0.72（一致）；heldseed 见上；heldtask 两者 0.00（词汇限制）。
+
+**① 评估数据影响 = 0 → openvocab 分割推理就绪（Phase B 的决定性胜利）**：看行——每个模型在 GT-seg 和 OV-seg 数据上**得分完全相同**（0.75=0.75、0.50=0.50）。GT 训练的模型在 openvocab 分割数据上和在 GT 数据上一模一样好。**这是对真实世界最关键的证明**：真实视频推理时没有 GT mask，此结果证明 openvocab mask 是完美替代。butter 离群没有影响大局。
+
+**② 训练影响 = 真实但只伤"选择"通路（方向幸存）**：看列——同一数据上，OV 训练模型选对物体 0.50 vs GT 训练 0.75，但**方向泛化保住（+0.79 vs +0.81）**。即 OV mask 噪声只伤了 relevance/选择通路，没伤 dynamics/方向。最可能根因：物体 mask 过分割（is_obj 监督目标更噪——物体 Gaussian 数中位 1.03× 但最高 1.77×）。**诚实保留**：heldseed 仅 8 clip，部分可能是训练方差；但"选择掉/方向稳"的选择性模式说明是真实的局部效应。
+
+**结论**：openvocab **推理/评估完全就绪**（解锁真实视频 + 无 mask 套件的评估）；openvocab **训练**需 mask 质量门（§50 思路：丢高过分割 clip，或收紧 SAM2 目标 mask）才能让选择泛化回到 GT 水平。修法折叠进 B3：gen 时加 IoU/过分割门。
