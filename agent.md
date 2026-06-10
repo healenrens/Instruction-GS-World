@@ -968,3 +968,15 @@ v9-lang-ov（OV mask 训练）vs v9-lang（GT mask 训练），langswap heldseed
 **② 训练影响 = 真实但只伤"选择"通路（方向幸存）**：看列——同一数据上，OV 训练模型选对物体 0.50 vs GT 训练 0.75，但**方向泛化保住（+0.79 vs +0.81）**。即 OV mask 噪声只伤了 relevance/选择通路，没伤 dynamics/方向。最可能根因：物体 mask 过分割（is_obj 监督目标更噪——物体 Gaussian 数中位 1.03× 但最高 1.77×）。**诚实保留**：heldseed 仅 8 clip，部分可能是训练方差；但"选择掉/方向稳"的选择性模式说明是真实的局部效应。
 
 **结论**：openvocab **推理/评估完全就绪**（解锁真实视频 + 无 mask 套件的评估）；openvocab **训练**需 mask 质量门（§50 思路：丢高过分割 clip，或收紧 SAM2 目标 mask）才能让选择泛化回到 GT 水平。修法折叠进 B3：gen 时加 IoU/过分割门。
+
+## §65 刚体一致性问题：调研 + 数据核查 + 设计方案（用户发现的 coherence 盲区；方案待拍板）
+
+**问题（用户目检发现）**：v9-lang 预测的物体高斯球会散开（cream cheese extent ×3.73），不是刚体整体移动。所有现有指标（corr/ratio/dir-cos/endpoint）都是聚合量、对散开盲视——与早前"方向盲区"同性质的指标盲区。根因：主 loss `trajectory_loss` 逐控制点独立 L1（点间零耦合）；`entity_rigidity_loss`（可微 Kabsch 残差，w_rigid=0.5）只是训练期软惩罚，在 held-out 场景失效（软先验不泛化，推理期无结构保证）。
+
+**文献调研（四家族）**：① 软刚性损失（Dynamic 3D Gaussians 3DV'24 local-rigidity、SC-GS CVPR'24 ARAP）= 我们现状，逐场景优化够用、前馈泛化失效；② 低秩运动基（Shape of Motion 2024：共享 SE(3) bases × 逐点系数 = "软分解成刚性组"；HiMoR CVPR'25 层级化）= 用户直觉的通用形式，柔性/关节的远期路线，刚体阶段超配；③ 硬性逐物体 SE(3)（DreMa、机器人 GS 世界模型）= 被封存的 entity head，特征池化丢方向（+0.99→-0.18 教训）；④ **逐点投票→网络内可微刚性聚合**（Gojcic CVPR'21 Oral, Rigid 3D Scene Flow：逐点 flow → 物体级刚性抽象，端到端，提升精度+泛化）= 最适配。ManiGaussian/GWM 等 GS 操作世界模型用形变场、无刚性保证（同样会散，非答案）。
+
+**数据核查（16 clip 只读诊断 `_diag_rigid_survey.py`）**：GT 刚性残差 **0.00cm（16/16）**——GT 构造性刚性，刚性应是硬参数化非软惩罚；每实体控制点 146-171（Kabsch 充足）；预测 extent-ratio 中位 1.11、**4/16 >1.2**、最差 3.73，预测刚性残差中位 2.45cm（物体仅 6-11cm，同量级=视觉散架）；**Kabsch 投影后方向 16/16 完全不变**（+0.86→+0.86）——输出空间聚合保方向，与特征空间池化（entity head 失败）形成实测对照。附带：`_e` 早窗方向本身差（+0.25~0.54）= §57 已知双窗不稳问题，正交于刚性。
+
+**方案（等用户拍板）**：A（推荐）= predict_deltas 后、LBS 前加**逐实体 weighted-Kabsch 聚合层**（权重=p_dyn；刚性 by construction、方向从投票继承、warm-start 恒等、w_rigid 退役、eval 加 extent-ratio/刚性残差堵盲区；SVD 退化→eps+小实体纯平移 fallback；arm 用 50+c 子部件）；B（零成本 stopgap）= 纯推理期投影（已验证 3.73→1.00 方向不变）；C（远期）= motion bases 升级路径。验证阶梯：①coherence 指标进 eval → ②方案B A/B 基线 → ③方案A + resume v9-lang settle 800 步 → ④判据：heldseed sel≥0.75 且 dir≥+0.8 持平、extent-ratio→1.00±0.05。
+
+**Phase C viewmats pilot 验证（§63 收尾）**：pilot clip（epi0, --seg gt）`viewmats[13,4,4]` ✓、`viewmats[0]==I`（1e-16）✓、静态相机逐帧偏差 0.0054/平移 0.0064m（与 camera-static sanity 一致）✓、旧 clip 广播逐行等价 ✓；新旧两路 trainer smoke 见 log。
