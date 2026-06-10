@@ -980,3 +980,28 @@ v9-lang-ov（OV mask 训练）vs v9-lang（GT mask 训练），langswap heldseed
 **方案（等用户拍板）**：A（推荐）= predict_deltas 后、LBS 前加**逐实体 weighted-Kabsch 聚合层**（权重=p_dyn；刚性 by construction、方向从投票继承、warm-start 恒等、w_rigid 退役、eval 加 extent-ratio/刚性残差堵盲区；SVD 退化→eps+小实体纯平移 fallback；arm 用 50+c 子部件）；B（零成本 stopgap）= 纯推理期投影（已验证 3.73→1.00 方向不变）；C（远期）= motion bases 升级路径。验证阶梯：①coherence 指标进 eval → ②方案B A/B 基线 → ③方案A + resume v9-lang settle 800 步 → ④判据：heldseed sel≥0.75 且 dir≥+0.8 持平、extent-ratio→1.00±0.05。
 
 **Phase C viewmats pilot 验证（§63 收尾）**：pilot clip（epi0, --seg gt）`viewmats[13,4,4]` ✓、`viewmats[0]==I`（1e-16）✓、静态相机逐帧偏差 0.0054/平移 0.0064m（与 camera-static sanity 一致）✓、旧 clip 广播逐行等价 ✓；新旧两路 trainer smoke 见 log。
+
+## §66 v10-rigid 接口设计（batched weighted-Kabsch 聚合层；设计文档，未实现，等拍板）
+
+**定位**：§65 方案 A 的向量化形式 = "运动低秩"通用表示（方案 C / Shape-of-Motion 形态）在刚体+有 seg 条件下的硬归属特例。v10-rigid（seg 硬归属）→ v11-bases（可学习系数）同一套数学渐进放松。设计判据（用户）：可 scale、GPU 利用率不掉、优雅（删 loss 而不是加 loss）。
+
+```python
+# igsw/dynamics/rigid_agg.py（拟新建）
+def entity_rigid_aggregate(pos0, pos_pred, ent_id, w=None, min_pts=4, eps=1e-7):
+    """把逐控制点预测位置投影到逐实体 SE(3) 轨道上。全程批量、零 Python 循环。
+    pos0[M,3] 帧0位置; pos_pred[K,M,3] 原始逐点预测（=方向投票场）; ent_id[M] 压缩实体id
+    （objects 1-7、arm 子部件 50+c 各自一个、gripper 10；背景/静态 id 不聚合=passthrough）;
+    w[M] 投票权重（p_dyn × vis；None=均匀）。
+    返回 [K,M,3] 刚性一致位置 + (R[K,E,3,3], t[K,E,3])。"""
+```
+每步 k（K·E 个拟合一次批量解）：① 加权质心 μX_e/μY_e：两次 index_add；② 互协方差 H_e=Σw(x−μX)(y−μY)^T：einsum('m,mi,mj->mij')+index_add→[E,3,3]；③ 批量 SVD [K·E,3,3]，R=V·diag(1,1,det(VUᵀ))·Uᵀ（反射守卫）；④ t=μY−RμX，out=R[ent_id]x+t[ent_id]。退化守卫：Σw<min_pts 或 σ₂/σ₁<eps → 纯平移 R=I（torch.where，无数据依赖分支，DDP static_graph 安全）。
+
+**集成点**：dynamics/model.py predict_deltas 逐点积分出 ctrl 位置后、返回前投影；实体成员的逐点 quat 改由 R_e 给出 → entity_lbs 的 dense 自动继承刚性。flag `--rigid_agg`（默认 0）；开启时 w_rigid 自动归 0（冗余删除——loss 表净缩短）。**warm-start 恒等**：对已刚性场投影=恒等 ⇒ 从 v9-lang 精确续训。开销：O(M) scatter + ≤288 个 3×3 SVD（K=12·E≤24）≈ 微秒级，对 0.17-0.27it/s 的主开销（Qwen+DiT+渲染）不可见；ragged batch 天然支持（实体 id 偏移）。
+
+**同 PR 指标**（堵 coherence 盲区）：extent-ratio + 刚性残差(cm) 进 eval_langswap 汇总与训练 log。
+
+**v11-bases 放松路径**：ent_id one-hot → 可学习系数 [M,Kb]（softmax），H 改系数加权，seg 早期 CE 监督系数、后期放开。内核形状不变。
+
+**验证阶梯（批准后执行）**：单元测试（合成刚性场→恒等；散开场→extent 1.0 且方向不变）→ resume v9-lang settle 800 步 → langswap 三划分+coherence 指标。判据：heldseed sel≥0.75、dir≥+0.8 持平，extent-ratio 1.00±0.05，刚性残差<0.5cm。
+
+**B3 数据状态**：libero_goal 下载完整并校验（428 eps、856/856 mp4、428 parquet、fps20、双相机键、10 条新指令含新动词 put-on/open/put-inside + 新名词 bowl/plate/wine bottle/rack/drawer）；libero_90 仅 meta（全量 ~3921 eps 待拉）。IPEC loader（mp4+episodes.jsonl，区别于 binhng parquet 图像）待写——排在 v10-rigid 拍板后。
