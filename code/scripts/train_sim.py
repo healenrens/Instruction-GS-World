@@ -154,6 +154,10 @@ def main():
                     help="§54: entity-slot SE(3) head (per-entity rigid v_e,omega_e + small per-control residual)")
     ap.add_argument("--w_resid", type=float, default=0.1,
                     help="§54: residual-magnitude reg (push motion through the entity SE(3) channel)")
+    ap.add_argument("--rigid_agg", type=int, default=0,
+                    help="§66 v10-rigid: project per-control motion votes onto one weighted-Kabsch SE(3) "
+                         "per entity (parameter-free, identity on a rigid field). Auto-zeros w_rigid (the "
+                         "soft prior it replaces). Needs --entity_lbs 1 for clean dense rigidity.")
     ap.add_argument("--feature_dim", type=int, default=0)
     ap.add_argument("--render_steps", type=int, default=2)
     ap.add_argument("--checkpoint_every", type=int, default=1)
@@ -195,7 +199,15 @@ def main():
                                  gate_entity_pool=bool(args.gate_entity_pool),
                                  entity_lbs=bool(args.entity_lbs),
                                  rel_head=bool(args.rel_head),
-                                 entity_head=bool(args.entity_head)).to(dev)
+                                 entity_head=bool(args.entity_head),
+                                 rigid_agg=bool(args.rigid_agg)).to(dev)
+    if args.rigid_agg and args.w_rigid > 0:
+        if is_main:
+            print(f"[v10-rigid] rigid_agg on -> w_rigid {args.w_rigid} auto-zeroed "
+                  f"(structural rigidity replaces the soft prior).", flush=True)
+        args.w_rigid = 0.0
+    if is_main and args.rigid_agg and not args.entity_lbs:
+        print("[WARN] --rigid_agg 1 without --entity_lbs 1: dense motion may not be cleanly rigid.", flush=True)
     if is_main and args.spatial_ground and not args.vlm_image:
         print("[WARN] --spatial_ground 1 needs --vlm_image 1 (per-control Qwen-image features).", flush=True)
     if is_main:
@@ -485,6 +497,7 @@ def main():
                         "gate_uses_sem": args.gate_uses_sem, "entity_lbs": args.entity_lbs,
                         "w_rigid": args.w_rigid, "gate_entity_pool": args.gate_entity_pool,
                         "rel_head": args.rel_head, "entity_head": args.entity_head,
+                        "rigid_agg": args.rigid_agg,
                         "w_rel": args.w_rel, "w_rel_cf": args.w_rel_cf}
                 torch.save(ckpt, os.path.join(args.out, f"ckpt_{step:07d}.pt"))
                 torch.save(ckpt, os.path.join(args.out, "ckpt_last.pt"))
@@ -501,6 +514,7 @@ def main():
                 "gate_uses_sem": args.gate_uses_sem, "entity_lbs": args.entity_lbs,
                 "w_rigid": args.w_rigid, "gate_entity_pool": args.gate_entity_pool,
                 "rel_head": args.rel_head, "entity_head": args.entity_head,
+                "rigid_agg": args.rigid_agg,
                 "w_rel": args.w_rel, "w_rel_cf": args.w_rel_cf}
         torch.save(ckpt, os.path.join(args.out, "ckpt_last.pt"))
         print(f"[done] step {step}", flush=True)

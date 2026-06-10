@@ -57,6 +57,10 @@ class InstructGSWorldModel(nn.Module):
                                         # scatter-pooled DiT features (+ pooled relevance feature); the
                                         # per-control head degrades to a small residual. Rigidity by
                                         # construction (LBS reproduces the entity transform EXACTLY).
+        rigid_agg: bool = False,        # §66 v10-rigid: project the per-control motion VOTES onto one
+                                        # weighted-Kabsch SE(3) per entity (parameter-free; identity on a
+                                        # rigid field => exact warm-start). Unlike entity_head it aggregates
+                                        # in OUTPUT space (votes), so direction survives. Needs entity_lbs.
     ):
         super().__init__()
         self.encoder = QwenVLEncoder(qwen_path)   # frozen feature extractor (no LoRA)
@@ -82,7 +86,7 @@ class InstructGSWorldModel(nn.Module):
             self.layer_id_emb = nn.Parameter(torch.randn(n_l, d) * 0.02)
             self.aggregator = CrossAttention(d, agg_heads, ctx_dim=d)   # shared across layers
             self.agg_norm = nn.LayerNorm(d, eps=1e-6)
-        self.dynamics = GaussianDynamics(dyn_cfg, entity_head=bool(entity_head))
+        self.dynamics = GaussianDynamics(dyn_cfg, entity_head=bool(entity_head), rigid_agg=bool(rigid_agg))
         self.n_control = n_control
         self.lbs_k = lbs_k
         # ---- per-control SPATIAL visual grounding (agent.md §37): each control samples the
@@ -150,6 +154,12 @@ class InstructGSWorldModel(nn.Module):
         # ---- §54 entity-slot SE(3) head lives in the dynamics module (needs the DiT features);
         # here we only record the flag so forward() routes seg + pooled relevance feats down.
         self.entity_head_on = bool(entity_head)
+        self.rigid_agg = bool(rigid_agg)                         # §66 v10-rigid
+        if self.rigid_agg and not self.entity_lbs:
+            import warnings
+            warnings.warn("rigid_agg=True without entity_lbs=True: control-level rigidity will NOT "
+                          "propagate to a clean DENSE rigid motion (dense points may bind cross-entity "
+                          "controls). Set entity_lbs=1.")
         # §44h: feed the OCCLUSION-ROBUST 3D identity e_sem into the gate. Only meaningful when the gate
         # AND the sem head are both on; otherwise it is a no-op (the gate sees only the 2D Qwen patch).
         self.gate_uses_sem = bool(gate_uses_sem) and self.dyn_gate and self.sem_dim > 0
@@ -359,7 +369,8 @@ class InstructGSWorldModel(nn.Module):
 
         # §54 entity-slot routing: pass the per-control seg ids + relevance feature so the dynamics can
         # pool a per-entity rigid SE(3) each step. resid_accum collects the per-step residual magnitude.
-        ent_seg = seg_c if (self.entity_head_on and seg_c is not None) else None
+        # seg ids feed the entity head AND the §66 rigid-agg layer (both need per-entity grouping).
+        ent_seg = seg_c if ((self.entity_head_on or self.rigid_agg) and seg_c is not None) else None
         ent_rel = rel_feat if (self.entity_head_on and rel_feat is not None) else None
         resid_accum = []
 

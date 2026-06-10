@@ -61,9 +61,12 @@ class GaussianState:
 
 
 class GaussianDynamics(nn.Module):
-    def __init__(self, cfg: DynamicsConfig, entity_head: bool = False):
+    def __init__(self, cfg: DynamicsConfig, entity_head: bool = False, rigid_agg: bool = False):
         super().__init__()
         self.cfg = cfg
+        # §66 v10-rigid: project per-control motion votes onto per-entity SE(3) (weighted Kabsch).
+        # Parameter-free => no DDP/ckpt impact; identity on a rigid field => exact warm-start.
+        self.rigid_agg = bool(rigid_agg)
         d = cfg.d_model
         self.tokenizer = GaussianTokenizer(d, num_freqs=cfg.num_freqs, feature_dim=cfg.feature_dim)
         self.tstep = TimestepEmbed(d)
@@ -183,6 +186,12 @@ class GaussianDynamics(nn.Module):
             # ~0 motion, which the rollout accumulates to ~0. gate≈1 at warm-start => no-op at init.
             v = v * gate_local                           # [B,N,1] broadcasts over the 3 xyz channels
             omega = omega * gate_local
+        # §66 v10-rigid: per-entity weighted-Kabsch aggregation of the (gated) motion votes.
+        # AFTER the gate so static entities vote ~0 -> fit ~= identity -> they stay static.
+        if self.rigid_agg and seg_local is not None:
+            from .rigid_agg import entity_rigid_aggregate
+            wv = gate_local[0, :, 0] if gate_local is not None else None
+            v, omega = entity_rigid_aggregate(state.means[0], v, omega, seg_local, w=wv)
         return v, omega, dlog_s, dlogit_o, dcolor, dfeat
 
     def num_params(self) -> int:
