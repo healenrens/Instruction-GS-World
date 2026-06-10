@@ -90,6 +90,12 @@ def entity_rigid_aggregate(x: torch.Tensor, v: torch.Tensor, omega: torch.Tensor
         degen = (npts < float(min_pts)) | (S[:, 1] <= sv_eps * S[:, 0].clamp_min(1e-12))
         I3 = torch.eye(3, device=dev).expand(E, 3, 3)
         R = torch.where(degen[:, None, None], I3, R)
+        # §67 STABILITY: stop-grad the rotation. torch.linalg.svd has an UNSTABLE backward when singular
+        # values coincide — which is EXACTLY the static entities (votes ~0 -> H ~ 0 -> sigma_i all equal)
+        # -> non-finite grad -> every step skipped. The forward is unchanged (R still applied); only the
+        # rotation's gradient is cut. The translation stays differentiable through muy (the weighted mean
+        # of votes), so the model still learns the per-entity displacement (the meaningful signal).
+        R = R.detach()
         t = muy - torch.einsum("eij,ej->ei", R, mux)
         y_hat = torch.einsum("nij,nj->ni", R[eM], x32) + t[eM]
         v_hat32 = y_hat - x32
