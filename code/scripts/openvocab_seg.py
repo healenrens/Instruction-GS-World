@@ -186,6 +186,28 @@ def _sam2_masks(models, pil_img, boxes):
     return masks.bool().cpu().numpy()
 
 
+def _sam2_point(models, pil_img, xy):
+    """Segment the object UNDER a single (x,y) pixel. Returns one boolean mask [H,W] (or None)."""
+    device = models["device"]
+    sam_proc, sam_model = models["sam_proc"], models["sam_model"]
+    # Sam2Processor points: 4-level nesting [image][object][point][xy]; labels 3-level [image][object][point]
+    inputs = sam_proc(images=pil_img, input_points=[[[[float(xy[0]), float(xy[1])]]]],
+                      input_labels=[[[1]]], return_tensors="pt").to(device)
+    with torch.no_grad():
+        outputs = sam_model(**inputs, multimask_output=True)        # 3 candidate masks
+    masks = sam_proc.post_process_masks(outputs.pred_masks, inputs["original_sizes"], binarize=True)[0]
+    masks = masks.bool().cpu().numpy()
+    while masks.ndim > 3:                                            # [obj, n_masks, H, W] -> [n_masks, H, W]
+        masks = masks[0]
+    if masks.ndim == 2:
+        masks = masks[None]
+    if masks.shape[0] == 0:
+        return None
+    scores = outputs.iou_scores.reshape(-1).cpu().numpy()
+    k = int(scores.argmax()) if scores.size == masks.shape[0] else 0
+    return masks[k]                                                  # highest-IoU candidate
+
+
 # --------------------------------------------------------------------------- #
 # the main entry point
 # --------------------------------------------------------------------------- #
@@ -487,12 +509,18 @@ def _box_overlap_frac(mask, box):
     return float(inb.mean())
 
 
-def segment_frame_amg(rgb_uint8, instruction, device: str | None = None, floor_thr: float = 30.0):
+def segment_frame_amg(rgb_uint8, instruction, device: str | None = None, floor_thr: float = 30.0,
+                      target_xy=None):
     """AMG variant: SAM2 segment-everything gives clean masks of EVERY entity (verified: objects, arm,
     basket all segmented). The only work is CLASSIFICATION: (1) robot -> id8 via GroundingDINO box(es);
     (2) basket -> id2 via box; (3) reject FLOOR-COLORED leftover masks (SAM2 also returns floor frags);
     (4) the rest are table objects -> ids 1..7 by centroid-x. The named-object identity is NOT needed
-    (the data pipeline picks the manipulated object by MOTION)."""
+    (the data pipeline picks the manipulated object by MOTION).
+
+    target_xy: optional (x,y) pixel of the manipulated object (gen-time GT-motion arbitration, which the
+    plan allows). When given, SAM2 is point-prompted there so the target is ALWAYS covered as id1 with a
+    clean openvocab-quality mask, regardless of whether the AMG grid happened to land on it. The mask is
+    still SAM2's (segmentation noise preserved for the honesty test); only target SELECTION uses GT."""
     import numpy as np
     device = device or _device()
     models = load_models(device)
@@ -525,24 +553,39 @@ def segment_frame_amg(rgb_uint8, instruction, device: str | None = None, floor_t
             continue
         ys, xs = np.where(m)
         objs.append((float(xs.mean()), m))
-    # SUPPLEMENT: ensure the instruction's NAMED object is covered even if the AMG grid missed it
-    # (distinctive objects ground well by noun even when small). De-dup vs the AMG objects.
-    noun = parse_noun(instruction)
-    if noun:
-        nd = [d for d in _gd_detect(models, pil, [noun], box_thresh=0.12, text_thresh=0.12)
-              if _phrase_matches(d["label"], noun)]
-        if nd:
-            nm = _sam2_masks(models, pil, [max(nd, key=lambda d: d["score"])["box"]])[0]
-            a = int(nm.sum())
-            on_floor = bg is not None and np.logical_and(nm, bg).sum() / max(1, a) > 0.5
-            dup = any(np.logical_and(nm, om).sum() / max(1, min(a, int(om.sum()))) > 0.5 for _, om in objs)
-            if a >= 20 and not on_floor and not dup and not in_any(nm, robot_boxes) and not in_any(nm, basket_boxes):
-                objs.append((float(np.where(nm)[1].mean()), nm))
-    objs.sort(key=lambda e: e[0])       # left -> right -> ids 1..7
-    nid = ID_OBJ
+    # TARGET: gen-time GT-motion arbitration -> point-prompt SAM2 at the mover centroid -> guaranteed
+    # clean id1 mask (preferred). Else fall back to noun-grounding (inference path, no GT motion).
+    tgt_mask = None
+    if target_xy is not None:
+        tm = _sam2_point(models, pil, target_xy)
+        if tm is not None and int(tm.sum()) >= 20:
+            tgt_mask = tm
+            ta = int(tm.sum())
+            objs = [(cx, m) for cx, m in objs                    # drop AMG objs that ARE the target
+                    if np.logical_and(tm, m).sum() / max(1, min(ta, int(m.sum()))) <= 0.5]
+    else:
+        # SUPPLEMENT: ensure the instruction's NAMED object is covered even if the AMG grid missed it
+        # (distinctive objects ground well by noun even when small). De-dup vs the AMG objects.
+        noun = parse_noun(instruction)
+        if noun:
+            nd = [d for d in _gd_detect(models, pil, [noun], box_thresh=0.12, text_thresh=0.12)
+                  if _phrase_matches(d["label"], noun)]
+            if nd:
+                nm = _sam2_masks(models, pil, [max(nd, key=lambda d: d["score"])["box"]])[0]
+                a = int(nm.sum())
+                on_floor = bg is not None and np.logical_and(nm, bg).sum() / max(1, a) > 0.5
+                dup = any(np.logical_and(nm, om).sum() / max(1, min(a, int(om.sum()))) > 0.5 for _, om in objs)
+                if a >= 20 and not on_floor and not dup and not in_any(nm, robot_boxes) and not in_any(nm, basket_boxes):
+                    objs.append((float(np.where(nm)[1].mean()), nm))
+    objs.sort(key=lambda e: e[0])       # left -> right
+    nid = ID_DISTRACTOR_LO if tgt_mask is not None else ID_OBJ   # id1 reserved for the target when known
     for cx, m in objs:
         if nid > ID_DISTRACTOR_HI:
             break
+        if nid == ID_BASKET:            # never relabel a table object as basket
+            nid = ID_DISTRACTOR_LO
         id_map[m] = nid
         nid += 1
+    if tgt_mask is not None:
+        id_map[tgt_mask] = ID_OBJ       # paint the target LAST -> highest priority
     return id_map

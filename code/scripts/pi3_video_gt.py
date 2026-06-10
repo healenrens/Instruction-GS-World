@@ -165,12 +165,42 @@ def entity_pose_traj_pi3(X0q, te, ve, zmaps, rel, K_model, s_to_model, zmax_t,
 # --------------------------------------------------------------------------- #
 # build one clip
 # --------------------------------------------------------------------------- #
-def build_clip(epi, K, win, device, lifter, model_ct, window_mode="center"):
+ID_OBJ_OV = 1                                                     # open-vocab target id (== GT named-object id)
+
+
+def _mask_iou(a, b):
+    inter = np.logical_and(a, b).sum()
+    union = np.logical_or(a, b).sum()
+    return float(inter / union) if union else 0.0
+
+
+def build_clip(epi, K, win, device, lifter, model_ct, window_mode="center", seg_mode="gt"):
     rgb_all, msk_all, ooi_all, instruction, n = load_episode_full(epi)
     obj_id, obj_path = find_object_id(msk_all, n)
     print(f"[dbg] manipulated object id={obj_id} (centroid path {obj_path:.0f}px) window_mode={window_mode}", flush=True)
     widx = pick_window((msk_all == obj_id).astype(np.uint8), n, win,
                        mode=window_mode, rng=np.random.default_rng(epi))
+    # ---- mask SOURCE: GT, or open-vocab (GroundingDINO+SAM2) for the two frames we actually use ----
+    # The pipeline only consumes masks at widx[0] (seg_per_g + g0-keep) and widx[-1] (hole-fill exclusion).
+    # Windowing / target-id selection stays on GT motion — generation-time label arbitration the plan allows.
+    if seg_mode == "openvocab":
+        from openvocab_seg import segment_frame_amg
+
+        def _gt_centroid(frame):                                  # gen-time GT-motion arbitration (plan-allowed)
+            ys, xs = np.where(msk_all[frame] == obj_id)
+            return (float(xs.mean()), float(ys.mean())) if xs.size else None
+        mask_w0 = segment_frame_amg(rgb_all[widx[0]], instruction, device=device,
+                                    target_xy=_gt_centroid(widx[0]))
+        mask_wL = segment_frame_amg(rgb_all[widx[-1]], instruction, device=device,
+                                    target_xy=_gt_centroid(widx[-1]))
+        gt0 = msk_all[widx[0]]
+        tcov = float(((mask_w0 == ID_OBJ_OV) & (gt0 == obj_id)).sum() / max(1, int((gt0 == obj_id).sum())))
+        iou_t = _mask_iou(mask_w0 == ID_OBJ_OV, gt0 == obj_id)
+        print(f"[ov] open-vocab seg: target-cov={tcov:.2f} target-IoU={iou_t:.2f} vs GT "
+              f"(point-prompted at GT mover centroid; mask is SAM2-quality)", flush=True)
+    else:
+        mask_w0 = msk_all[widx[0]]
+        mask_wL = msk_all[widx[-1]]
     sub = np.linspace(0, len(widx) - 1, K + 1).round().astype(int)
     sub = np.unique(sub)
     Kf = len(sub) - 1
@@ -205,7 +235,7 @@ def build_clip(epi, K, win, device, lifter, model_ct, window_mode="center"):
     pts0 = _pinhole(z0, focal)                                    # canonical == frame-0 camera frame
 
     # ---- g0 keep mask: valid geometry & (confident | tracked-entity pixel) ------------------
-    ent0 = np.isin(msk_all[widx[0]], (obj_id, 8, 10)).astype(np.uint8)
+    ent0 = np.isin(mask_w0, (obj_id, 8, 10)).astype(np.uint8)
     ent_model = cv2.resize(ent0, (Wm, Hm), interpolation=cv2.INTER_NEAREST) > 0
     z0fin = z0[np.isfinite(z0)]
     zmax0 = np.percentile(z0fin, 99.5) if z0fin.size else 2.0
@@ -219,7 +249,7 @@ def build_clip(epi, K, win, device, lifter, model_ct, window_mode="center"):
     N = len(g0)
 
     # ---- seg_per_g from GT mask (§46-allowed shortcut) at each Gaussian's source pixel ------
-    msk0 = msk_all[widx[0]]
+    msk0 = mask_w0
     uv_src = (uv.cpu().numpy() / s_to_model)
     ui = np.clip(uv_src[:, 0].round().astype(int), 0, W0 - 1)
     vi = np.clip(uv_src[:, 1].round().astype(int), 0, H0 - 1)
@@ -353,7 +383,7 @@ def build_clip(epi, K, win, device, lifter, model_ct, window_mode="center"):
         ptsL_cam = _pinhole(zL, focal)
         PL = rel[Kf]
         ptsL = ptsL_cam @ PL[:3, :3].T + PL[:3, 3]                  # camera_Kf -> canonical
-        mskL = cv2.resize(msk_all[widx[-1]], (Wm, Hm), interpolation=cv2.INTER_NEAREST)
+        mskL = cv2.resize(mask_wL, (Wm, Hm), interpolation=cv2.INTER_NEAREST)
         msk0_m = cv2.resize(msk0, (Wm, Hm), interpolation=cv2.INTER_NEAREST)
         cand = (np.isfinite(ptsL).all(-1) & (zL > 1e-4) & (ptsL[..., 2] > 1e-4)
                 & (confL > 0.1) & (~np.isin(mskL, ENT_TRACK)))
@@ -481,6 +511,8 @@ def main():
     ap.add_argument("--split", default="train")
     ap.add_argument("--window_mode", default="center", choices=["center", "early"],
                     help="§54: 'early' starts the window PRE-contact (gripper far) to break the shortcut")
+    ap.add_argument("--seg", default="gt", choices=["gt", "openvocab"],
+                    help="mask source: GT sim masks, or open-vocab GroundingDINO+SAM2 (honest inference-time seg)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--g0_png", default="", help="optional REAL|g0 side-by-side render path")
     ap.add_argument("--motion_png", default="", help="optional REAL|GT-motion grid render path")
@@ -492,7 +524,8 @@ def main():
     from cotracker.predictor import CoTrackerPredictor
     model_ct = CoTrackerPredictor(checkpoint="checkpoints/cotracker/scaled_offline.pth",
                                   v2=False, offline=True).to(dev)
-    clip = build_clip(args.epi, args.K, args.win, dev, lifter, model_ct, window_mode=args.window_mode)
+    clip = build_clip(args.epi, args.K, args.win, dev, lifter, model_ct,
+                      window_mode=args.window_mode, seg_mode=args.seg)
     print(f"[pi3_video_gt] instruction={clip['instruction']!r}", flush=True)
     print(f"[pi3_video_gt] N={len(clip['g0'])} Kf={clip['Kf']} focal={clip['focal']:.1f} "
           f"n_obj_gauss={clip['n_obj']} scene_r={clip['scene_r']:.3f} "

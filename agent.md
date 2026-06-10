@@ -910,3 +910,15 @@ robot→id8 lump + generic-shape prompts（grounding-dino-base）后实测：
 - **pyc 陷阱**：rsync -a 保留源 mtime 可能旧于 server 上 .pyc → Python 用旧字节码。改脚本后必须 `find __pycache__ -name openvocab_seg* -delete` + PYTHONDONTWRITEBYTECODE=1。
 
 **B1 状态**：AMG 路径可用（arm/basket 达标，目标 3/5），比 box-based（目标 1/5）好，是推荐路径。**剩最后一公里**：目标覆盖 3/5→全覆盖（更密 grid + motion 兜底），+ pipeline 集成（find_object_id 改用 CoTracker 位移仲裁目标，不再需全帧 mask）。这两步 + B3 词汇扩展待子 agent（session 限额阻塞）。
+
+## §61 openvocab 集成进数据管线 + B2 诚实性测试启动（point-prompt 兜底）
+
+§60 的 AMG 目标覆盖只有 3/5（帧间方差：grid 在某些帧漏掉目标）。**根因**：依赖每帧 AMG grid 命中目标不鲁棒。**修法（plan 允许的 gen-time GT-motion 仲裁）**：用 GT mover 质心做单点 prompt 喂 SAM2（`_sam2_point`，multimask 取最高 IoU），目标必出干净 mask 标 id1。**mask 本身仍是 SAM2 质量（保留分割噪声供诚实测试），只有目标"选择"用 GT 运动**——推理期（真实视频）改用 CoTracker 运动即可，无需 GT。
+
+**自验（B2 前半，5 episode vs GT mask）**：目标-IoU **0.95-0.97**、basket **0.97-0.98**、arm **0.58-0.66**（arm 管线内按运动重聚类，frame-0 IoU 次要）。帧间方差消除，目标 5/5 覆盖。单 episode 全管线跑通：target-cov 1.00 / IoU 0.97 / 物体真实位移 15cm（之前 target-cov 0 时 disp=0 的垃圾 clip 被自验指标正确标红）。
+
+**管线集成**：`pi3_video_gt.py --seg {gt,openvocab}`。openvocab 路径只替换管线真正消费的两帧 mask（widx[0] seg_per_g+g0-keep、widx[-1] 补洞排除）；windowing/目标 id 仍走 GT 运动（生成期允许）。三处 mask 源统一为 `mask_w0`/`mask_wL` 局部变量。
+
+**Sam2Processor 坑**：point prompt 需 4 层嵌套 `[image][object][point][xy]`、labels 3 层；multimask 输出 `[obj,n_masks,H,W]` 需降到 `[n_masks,H,W]` 再按 iou_scores 选。
+
+**B2 后半（运行中）**：`orchestrate_v9ov.sh`（detached）= 56 clip 用 `--seg openvocab` 重生成 → train **v9lang_ov**（同配方：rel_head/w_rel1.5/w_rel_cf1.0/entity_head0/resume v7_pi3/800步）→ langswap 三划分。**诚实性判据**：v9lang_ov 在 OV 数据上的 sel-acc/dir-cos 不比 GT-mask 版 v9lang（heldseed 0.75/+0.81）差 >10% → 管线能扛自己的分割噪声 → 真实视频可行。日志 `logs/orchestrate_v9ov.log`。
