@@ -892,3 +892,11 @@ robot→id8 lump + generic-shape prompts（grounding-dino-base）后实测：
 - **管线集成缺口**：现 `find_object_id` 需全帧 mask 找最动 id；openvocab 只有 frame-0 → 需改成用 CoTracker 位移（frame-0 物体像素跟踪位移最大者=目标）仲裁，非全帧 mask 质心。这是"--seg openvocab"集成的真正改动（不止换 mask 源）。
 
 **Phase B 状态**：openvocab_seg.py 建成、arm/basket 达标、SAM2 质量验证；物体检测 + 管线集成需 SAM2-AMG 重构（待 session 重置后子 agent 迭代）。Phase A 已完整收尾（v9-lang 生产模型、场景泛化 0.75、已提交）。
+
+## §59 openvocab AMG WIP（待 session 重置后子 agent 调优）
+
+加了 `segment_frame_amg`（SAM2 point-grid 100 点 → segment everything → 按排除法归类）。SAM2 point-grid API 验证可用（100 prompt→100 mask）。但首版分类失败：arm/basket/target IoU 全 0，却painted 7 个 object（说明 dedup 保留了错误区域——floor 子块当物体了，robot/basket 的 GroundingDINO box 分类没命中）。需调：(1) background 移除（max_frac + floor 颜色/边界判据）、(2) robot/basket box 检测的 prompt/阈值、(3) dedup 容器判据。这是迭代实验，子 agent 最合适（session 限额阻塞至 7:30am EST）。
+
+**openvocab 当前最佳 = box-based `segment_frame`**（robot→id8 lump + generic shapes，grounding-dino-base）：arm 0.65 / basket 0.97 / 物体覆盖不稳（目标 ~1/3 命中）。AMG 是正确方向但未调通。
+
+**B1 状态**：脚本框架完整，两条路径（box / amg），SAM2 mask 质量好；物体可靠检测未达标。集成（find_object_id 改用 CoTracker 位移仲裁）未做。**B2/B3 待 B1 物体检测达标**。

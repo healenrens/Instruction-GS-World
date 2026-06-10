@@ -435,3 +435,88 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# --------------------------------------------------------------------------- #
+# §58 AMG path: SAM2 automatic masks (segment EVERYTHING via a point grid) + classify by exclusion.
+# Robust where GroundingDINO misses small objects: the named-object identity is NOT needed (the data
+# pipeline picks the manipulated object by MOTION). GroundingDINO is used ONLY for the reliable
+# robot/basket categories; every other distinct mask is a table object.
+# --------------------------------------------------------------------------- #
+def _amg_masks(models, pil, grid: int = 12, min_px: int = 40, max_frac: float = 0.5,
+               dedup: float = 0.7, score_thr: float = 0.6):
+    import numpy as np, torch
+    W, H = pil.size
+    gy, gx = np.meshgrid(np.linspace(H * 0.12, H * 0.96, grid),
+                         np.linspace(W * 0.06, W * 0.94, grid), indexing="ij")
+    pts = np.stack([gx.ravel(), gy.ravel()], 1)
+    ip = [[[float(p[0]), float(p[1])]] for p in pts]
+    il = [[1]] * len(pts)
+    proc, model = models["sam_proc"], models["sam_model"]
+    inp = proc(images=pil, input_points=[ip], input_labels=[il], return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        out = model(**inp, multimask_output=False)
+    masks = proc.post_process_masks(out.pred_masks.cpu(), inp["original_sizes"])[0]   # [P,1,H,W]
+    ms = (masks[:, 0] > 0).numpy()
+    sc = out.iou_scores.detach().cpu().numpy().ravel() if hasattr(out, "iou_scores") else np.ones(len(ms))
+    cand = []
+    for i, m in enumerate(ms):
+        a = int(m.sum())
+        if a < min_px or a > max_frac * H * W or sc[i] < score_thr:   # drop tiny / background-sized / low-conf
+            continue
+        cand.append((a, m))
+    cand.sort(key=lambda c: c[0])   # smallest first -> objects win over enclosing regions
+    kept = []
+    for a, m in cand:
+        # drop if mostly contained in an already-kept mask (near-duplicate / sub-part)
+        if any((np.logical_and(m, km).sum() / max(1, a)) > dedup for km in kept):
+            continue
+        kept.append(m)
+    return kept
+
+
+def _box_overlap_frac(mask, box):
+    import numpy as np
+    x0, y0, x1, y1 = [int(v) for v in box]
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return 0.0
+    inb = (xs >= x0) & (xs <= x1) & (ys >= y0) & (ys <= y1)
+    return float(inb.mean())
+
+
+def segment_frame_amg(rgb_uint8, instruction, device: str | None = None):
+    """AMG variant of segment_frame: SAM2 segment-everything + GroundingDINO robot/basket -> schema."""
+    import numpy as np
+    device = device or _device()
+    models = load_models(device)
+    H, W = rgb_uint8.shape[:2]
+    pil = Image.fromarray(rgb_uint8.astype(np.uint8))
+    obj_masks = _amg_masks(models, pil)
+    dets = _gd_detect(models, pil, ["robotic arm", "robot", "basket"], box_thresh=0.18, text_thresh=0.18)
+
+    def best(phrase):
+        cs = [d for d in dets if _phrase_matches(d["label"], phrase)]
+        return max(cs, key=lambda d: d["score"])["box"] if cs else None
+    robot_box = best("robot") or best("robotic arm")
+    basket_box = best("basket")
+
+    id_map = np.zeros((H, W), dtype=np.uint8)
+    objs = []
+    for m in obj_masks:
+        if robot_box is not None and _box_overlap_frac(m, robot_box) > 0.6:
+            id_map[m] = ID_ARM          # whole robot -> id8 (pipeline motion-clusters the joints)
+            continue
+        if basket_box is not None and _box_overlap_frac(m, basket_box) > 0.6:
+            id_map[m] = ID_BASKET
+            continue
+        ys, xs = np.where(m)
+        objs.append((float(xs.mean()), m))
+    objs.sort(key=lambda e: e[0])       # left -> right
+    nid = ID_OBJ
+    for cx, m in objs:
+        if nid > ID_DISTRACTOR_HI:
+            break
+        id_map[m] = nid
+        nid += 1
+    return id_map
