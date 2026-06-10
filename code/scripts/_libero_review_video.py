@@ -8,22 +8,25 @@ from igsw.dynamics.model import DynamicsConfig
 from igsw.model_full import InstructGSWorldModel
 from scripts.eval_sim_generalization import sample_controls, _to_dev
 
+from scripts.eval_langswap import build_model       # §54: reconstruct ALL flags (rel_head/entity_head too)
 clip_p, ckpt_p, out_p = sys.argv[1], sys.argv[2], sys.argv[3]
 c = torch.load(clip_p, map_location="cuda", weights_only=False)
 ck = torch.load(ckpt_p, map_location="cpu", weights_only=False)
-cfg = DynamicsConfig(**ck["cfg"])
-mdl = InstructGSWorldModel(cfg, n_control=ck.get("M", 2048), n_query=ck.get("n_query", 16),
-                           cond_mode="aggregator", spatial_ground=True, dyn_gate=bool(ck.get("dyn_gate", 0)),
-                           sem_dim=ck.get("sem_dim", 0), gate_uses_sem=bool(ck.get("gate_uses_sem", 1)),
-                           gate_entity_pool=bool(ck.get("gate_entity_pool", 0)),
-                           entity_lbs=bool(ck.get("entity_lbs", 0))).cuda().eval()
-mdl.load_state_dict(ck["model"], strict=False)
+mdl = build_model(ck)
 
 g0 = GaussianSet(c["means"], c["quats"], c["scales"], c["opacities"], c["colors"], None)
 tr = c["traj"].cuda(); K = int(c["Kf"]); uv = c["uv"].cuda()
 disp = (tr[K] - tr[0]).norm(dim=-1)
 gen = torch.Generator(device="cuda").manual_seed(0)
-ci = sample_controls(g0.means, disp, ck.get("M", 2048), gen, 0.01); cu = uv[ci]
+# §54: PER-ENTITY UNIFORM sampling (not mover-biased) — entity-aware LBS needs EVERY entity to have
+# controls, else under-sampled static entities bind to moving controls and scatter (a sampling artifact).
+if ck.get("entity_lbs", 0):
+    from scripts.eval_langswap import uniform_controls
+    seg_full = c["seg_per_g"].cuda().long()
+    ci = uniform_controls(seg_full, len(seg_full) - int(c.get("n_fill", 0)), ck.get("M", 2048))
+else:
+    ci = sample_controls(g0.means, disp, ck.get("M", 2048), gen, 0.01)
+cu = uv[ci]
 img0 = (c["gt_rgb"][0].cuda().float()).clamp(0, 255).to(torch.uint8).cpu().numpy()
 seg_g = c["seg_per_g"].cuda().long() if (ck.get("entity_lbs", 0) or ck.get("gate_entity_pool", 0)) else None
 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):

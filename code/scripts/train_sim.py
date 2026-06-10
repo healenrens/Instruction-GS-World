@@ -419,6 +419,15 @@ def main():
                     corr = torch.corrcoef(torch.stack([gt_disp.float(), pd.float()]))[0, 1]
                     topk = gt_disp.topk(max(1, M // 20)).indices
                     ratio = (pd[topk].mean() / gt_disp[topk].mean().clamp_min(1e-6)).item()
+                    # §A1 DIRECTION cosine of the movers (the blind-spot metric — corr/ratio are
+                    # norm-only and missed the entity-head's +0.99->-0.18 direction collapse).
+                    gt_vec = gt_pos[K] - gt_pos[0]; pred_vec = out["ctrl"][K - 1].float() - init
+                    mvk = gt_vec.norm(dim=-1) > args.mover_thresh
+                    dcos = float("nan")
+                    if mvk.any():
+                        cs = (pred_vec[mvk] * gt_vec[mvk]).sum(-1) / (
+                            pred_vec[mvk].norm(dim=-1) * gt_vec[mvk].norm(dim=-1)).clamp_min(1e-6)
+                        dcos = cs.median().item()
                     # Exp-1 metrics: static-leakage (mean PRED disp of GT-static controls -> should ->0)
                     # and mover precision/recall of sigmoid(p_dyn)>0.5 vs the free mover label.
                     stat_m = mover_label < 0.5                              # GT-static controls
@@ -445,7 +454,7 @@ def main():
                       f"rot{rot_l.item():.4f} lang{lang_c.item():.4f} scl{scale_a.item():.3f} "
                       f"dyn{dyn_l.item():.4f} seg{seg_l.item():.4f} rig{rig_l.item():.4f} "
                       f"rel{rel_l.item():.3f} cf{cf_l.item():.3f} resid{float(resid_l):.4f} rPSNR{mp:.1f} "
-                      f"corr{corr.item():.3f} ratio{ratio:.2f} leak{leak:.4f} relSel{rel_sel:.2f} cfSup{cf_sup:.2f} "
+                      f"corr{corr.item():.3f} ratio{ratio:.2f} dcos{dcos:.2f} leak{leak:.4f} relSel{rel_sel:.2f} cfSup{cf_sup:.2f} "
                       f"mP{mp_prec:.2f} mR{mp_rec:.2f} {rate:.2f}it/s peakGB{mem:.1f}", flush=True)
                 if writer:
                     writer.add_scalar("loss/mover_bce", dyn_l.item(), step)

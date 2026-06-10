@@ -21,7 +21,8 @@ gen_one() {  # epi split
   done
 }
 for epi in $1; do gen_one "$epi" train; done
-for epi in $2; do gen_one "$epi" heldtask; done
+for epi in $2; do gen_one "$epi" heldtask; done    # held TASK (unseen target noun)
+for epi in $3; do gen_one "$epi" heldseed; done    # held SEED (SEEN noun, unseen episode -> scene generalization)
 wait
 NALL=$(ls data/libero_pi3_v2/*.pt 2>/dev/null | wc -l)
 NTRAIN=$(ls data/libero_pi3_v2/*_train.pt 2>/dev/null | wc -l)

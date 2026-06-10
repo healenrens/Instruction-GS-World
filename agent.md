@@ -811,3 +811,74 @@ gate_entity_pool/entity_lbs/rel + never passing seg_per_g -> §49 ckpts mis-eval
 s180** (gate now CLOSES on the named object under a wrong instruction) with TRUE-pass corr 0.945 / leak
 5e-4 / mP·mR intact. relSel still 0 (r≈0 under TRUE — gate stays open via the visual logit; r goes
 strongly negative only under WRONG). Decisive test pending: eval_langswap swap/true ratio (was 1.00).
+
+## §54 v8 RESULTS (the headline: language is now causal)
+
+eval_langswap (per-entity UNIFORM sampling — no GT leak; swap/true = named object's motion under a SWAP
+instruction ÷ under the TRUE instruction; selection accuracy gates floor∧suppression∧quiet):
+
+| run | TRAIN (seen nouns) sel-acc | TRAIN swap/true | HELDTASK sel-acc | note |
+|---|---|---|---|---|
+| v7 (no rel head) | 0.00 | ~1.00 | 0.00 | language IGNORED (the §52a failure) |
+| v8-lang (rel head) | 0.53 | **0.10** | 0.00 | language CAUSAL; floor gated by magnitude undershoot |
+| v8-ent (+entity SE3) | **0.84** | **0.00** | 0.00 | entity head fixed magnitude (TRUEmove≈GT 25-27cm); suppression perfect |
+
+So: **swap the instruction → the object's motion drops to 0-10%** (was 100%). Visual proof:
+viz/libero_v8/langswap_epi310.mp4 (milk moves under "milk", frozen under "alphabet soup"). cf loss→0,
+cfSup→0 throughout. The entity head ALSO cured the §51 magnitude undershoot (sel-acc 0.53→0.84).
+
+**Honest limitation — HELDTASK (unseen TARGET noun) over-suppresses (sel-acc 0).** salad dressing (task 8,
+held out) was only ever seen as a DISTRACTOR (relevance label 0), never a target (label 1) -> the
+relevance head outputs r<0 for it even under the correct instruction -> gate closes -> TRUEmove=0. This is
+a VOCABULARY-generalization limit of 8 training nouns (the relevance head memorized them), NOT a mechanism
+failure (the mechanism is proven on seen nouns). To disentangle "unseen NOUN" from "unseen SCENE", v8b
+adds a HELDSEED split (seen nouns, unseen episodes). Real fix needs noun diversity / a real-world-scale
+vocab — exactly why the pipeline is now Pi3 (ego-ready). Both training runs = 4×A100 DDP (world=4).
+
+## §55 v8 结果定论 + v9 replan（2026-06-10）
+
+**v8 验证阶梯完成，逐代诊断（uniform 采样、build_model 全 flag）：**
+| 模型 | obj位移 | 终点误差 | 方向cos | langswap |
+|---|---|---|---|---|
+| v7-pi3 | 27.4 | 10.2cm | +0.93 | swap=1.00（语言被忽略）|
+| **v8-lang** | 32.0 | **6.0cm** | **+0.99** | **swap=0.10 ✓** |
+| v8-ent | 27.5 | 42.2cm | **-0.18** | swap=0.00 |
+| v8b | 24.7 | 40.8cm | -0.19 | swap=0.00 |
+
+**赢**：§54 语言因果化成功（v8-lang：换指令物体运动 1.00→0.10、cfSup 1→0、视觉+数值双证；方向终点近乎完美 6cm/+0.99）。**此前担心的"欠幅"在 Pi3 数据上不存在**——是 review 脚本漏 entity_head flag 造成的 172cm 假象（已修 _libero_review_video 用 build_model + uniform 采样）。
+
+**回归（已定位、用户决策封存实体头）**：实体槽位 SE(3) 头把方向 +0.99→-0.18。证据链：v8-lang 方向完美 → 加实体头(v8-ent) 直接崩。原因二合一：(a) 实体池化把逐控制点特征平均，**丢失了方向信息**（每个控制点本来有自己正确的方向，池化成一个实体级方向时若 MLP 学不到正确朝向就全错）；(b) `w_resid=0.1` 残差正则**压制了本来方向正确的逐点残差通路**（v8-lang 的逐点头方向是对的，被当噪声压掉）。诊断：uniform vs mover-biased 采样误差一致（42 vs 42），排除采样问题；GT 方向 cos(move,toward-basket)=0.52-0.60 合理，排除数据噪声。**修法（未来）**：方向感知池化——把控制点相对质心的几何（x_i−c_e）编码进实体 MLP，让它能表达旋转而非只平移；本轮不做，flag 默认关。
+
+**方法论漏洞（已补）**：corr/ratio/mag 全是范数指标、方向盲 → 回归没被任何训练/eval 数字暴露，靠逐代手动诊断才发现。§A1 已加 **dir-cos**（eval_langswap 每 clip + 汇总；train_sim log 行 `dcos`）。
+
+**未解决根本缺口**：未见名词泛化（heldtask 过度抑制 TRUEmove=0）——8 名词词汇硬限制。**用户决策：v9 主攻开放词汇分割（GroundingDINO+SAM2 替代 GT mask）**，解锁无 mask 的 LIBERO suite 扩词汇/场景 + 真实视频 + 推理期诚实分割。SAM2.1-large + GroundingDINO-tiny 权重已在 hf_cache。
+
+**v9 路线**：A) dir-cos 补盲 + v9-lang（rel only、v2 双窗、干净读数）+ 封存实体头；B) openvocab_seg 管线 + IoU 自验 + 词汇扩展 → v10 未见名词测试；C) 真实 ego 视频试点（Pi3 已 ego-ready，缺 schema 逐帧 viewmat）。
+
+## §56 v9 执行进展（Phase A 固化 + Phase B openvocab，2026-06-10，受 session-limit 约束）
+
+**A2 v9-lang**（rel only、双窗 40 train、resume v7）：双窗数据训练**不稳**（per-clip corr/dcos 剧烈振荡：corr 0.14-0.87、dcos -0.34~+0.96，因早窗 clip 运动只占部分、更难）。后期收敛 dcos~0.90-0.93、corr~0.87——方向保住了（无实体头），但略低于 v8-lang 的 +0.98。最终三划分 eval 待出（heldseed=场景泛化关键读数）。dcos 已进训练 log（§A1）。
+
+**B1 openvocab_seg.py**（agent 在 session-limit 前建好 423 行：GroundingDINO-tiny + SAM2.1-large + IoU 自验 CLI）。IoU 实测（5 episode）：
+- **basket(2)=0.97-0.98** ✓（SAM2 质量极好）。
+- **arm(8)=0.000** ✗——根因：GroundingDINO-tiny **把整个机器人 lump 成一个检测**，"robot arm"短语没单独命中，整机器人被赋 id10（gripper, 4118px），id8 空。
+- **named object(1)=0.00 on 4/5**（只 epi410 salad dressing 命中）✗——tiny 无法在相似桌面物体间 ground 具体名词；且**漏检 5/7 干扰物**（只找到 2 个）。
+- **关键认识**：训练数据 NOT 需要 openvocab ground 对名词——现有 `find_object_id` 已按运动仲裁目标。openvocab 只需把"所有物体+臂+夹爪+篮子"分出类别；运动挑目标。所以 named-object IoU 失败对训练无关紧要；真正的坑是 **arm lump + 漏检物体**（tiny 太弱）。
+- **修复中**：GD_REPO 改环境可覆盖；下载 grounding-dino-base（更强）重测中。SAM2 mask 质量本身没问题，瓶颈纯在 detection。
+- 若 base 仍不够：备选 SAM2 自动 mask 生成（segment everything）+ 按"非臂/夹爪/篮子/背景"归为物体，或 LIBERO sim 重渲分割（更可靠但失去真实视频兼容）。
+
+**session-limit**：子 agent + workflow 被限（7:30am EST 重置）；数据源调研 workflow 失败待重跑。直接 server 调用与训练进程不受影响，继续 inline 推进。
+
+## §57 Phase A 收尾：v9-lang 是生产模型（场景泛化成立）+ openvocab 结构性障碍
+
+**决定性 A/B（同一 v2 held-out 划分，公平对比）：**
+| heldseed（见过名词、未见 episode=场景泛化） | sel-acc | dir-cos | endpoint |
+|---|---|---|---|
+| **v9-lang（双窗早起点）** | **0.75** | **+0.81** | 7.8cm(epi40) |
+| v8-lang（单窗） | 0.25 | +0.76 | — |
+
+**结论：双窗早起点数据把场景泛化从 0.25→0.75（3 倍），方向 +0.76→+0.81。v9-lang = 生产模型。** 之前以为 v8-lang 方向 +0.98 更优是误判——那是 v8-lang 在自己训练 clip 上的数；公平 held-out 对比 v9-lang 全面更好。视觉证据 `viz/libero_v9/v9_heldseed40.mp4`：未见场景里正确选中 alphabet soup 并推向篮子。heldtask（未见名词）两者都 0——纯词汇限制，Phase B 解决。
+
+**openvocab grounding-dino-base IoU = tiny 字节级相同**（arm 0.00 / obj 0.00 / basket 0.97）→ **障碍是结构性 LOGIC，不是检测器强度**：(1) "robot arm"短语没单独命中、整机器人被 lump 成 id10；(2) 用名词词表逐个检测物体覆盖率差。修法（需迭代，待 session 重置后子 agent）：机器人统一归 id8（让管线运动聚类拆关节）+ 物体改用 SAM2 自动 mask 生成（segment everything）按排除法归类，而非靠 GroundingDINO 逐名词。basket(0.97)+SAM2 mask 质量本身没问题。
+
+**Phase A 完成度**：A1 方向指标 ✓、A3 实体头封存 ✓、A2 v9-lang 生产模型 ✓（场景泛化证实）。Phase B openvocab 卡在结构性 logic + session 限额；Phase C 真实视频依赖 B。

@@ -15,6 +15,7 @@ Reports selection accuracy + mean swap/true ratio, and an all-static baseline ro
 import argparse, glob, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import torch
+import torch.nn.functional as F
 from igsw.gaussians import GaussianSet
 from igsw.dynamics.model import DynamicsConfig
 from igsw.model_full import InstructGSWorldModel
@@ -57,7 +58,7 @@ def run(mdl, c, ci, seg_g, instr, K):
         vi = _to_dev(mdl.encoder.build_inputs(instr, img0), "cuda")
         out = mdl(vi, g0, K, ctrl_idx=ci, control_uv=c["uv"].cuda()[ci],
                   control_uv_hw=(int(c["H"]), int(c["W"])), seg_per_g=seg_g)
-    return (out["ctrl"][K - 1].float() - g0.means[ci]).norm(dim=-1)   # [M] control endpoint disp
+    return out["ctrl"][K - 1].float(), g0.means[ci].float()           # endpoints, init  [M,3] each
 
 
 def main():
@@ -72,7 +73,7 @@ def main():
     clips = sorted(glob.glob(os.path.join(args.data, f"*_{args.split}.pt")))
     print(f"ckpt={args.ckpt} rel_head={ck.get('rel_head',0)} | {len(clips)} {args.split} clips")
     M = ck.get("M", 2048)
-    succ, ratios, base_succ = [], [], []
+    succ, ratios, base_succ, dcoss, eerrs = [], [], [], [], []
     for cp in clips:
         c = torch.load(cp, map_location="cuda", weights_only=False)
         seg = c["seg_per_g"].cuda().long(); N = len(seg); nkeep = N - int(c.get("n_fill", 0))
@@ -89,22 +90,33 @@ def main():
         gt_mv = float(gt_disp[mv_m].mean())
         other_obj = [e for e in obj_es if e != mv_e]
         instr = c["instruction"]
-        pd_true = run(mdl, c, ci, seg, instr, K)
+        ep_true, init = run(mdl, c, ci, seg, instr, K)
+        pd_true = (ep_true - init).norm(dim=-1)
         m_true = float(pd_true[mv_m].mean())
+        # §A1 DIRECTION (the blind-spot metric): pred vs GT centroid displacement of the mover entity.
+        gt_ep = tr[K][ci]
+        pred_d = ep_true[mv_m].mean(0) - init[mv_m].mean(0)
+        gt_d = gt_ep[mv_m].mean(0) - init[mv_m].mean(0)
+        dir_cos = float(F.cosine_similarity(pred_d[None], gt_d[None]))
+        endp_err = float((ep_true[mv_m] - gt_ep[mv_m]).norm(dim=-1).median())
+        dcoss.append(dir_cos); eerrs.append(endp_err)
         quiet = all(float(pd_true[seg_c == e].mean()) < 0.02 for e in other_obj)
         floor = m_true >= 0.25 * gt_mv
         swaps = [INSTR(n) for n in NOUNS if n not in instr][:args.n_swap]
         for sw in swaps:
-            pd_sw = run(mdl, c, ci, seg, sw, K)
-            m_sw = float(pd_sw[mv_m].mean())
+            ep_sw, _ = run(mdl, c, ci, seg, sw, K)
+            m_sw = float((ep_sw - init).norm(dim=-1)[mv_m].mean())
             r = m_sw / max(m_true, 1e-6); ratios.append(r)
             succ.append(1.0 if (floor and quiet and m_sw <= 0.5 * m_true) else 0.0)
             base_succ.append(0.0)   # all-static baseline: m_true=0 -> floor fails -> 0
         print(f"  {os.path.basename(cp)}: mover=id{mv_e} GTdisp={gt_mv*100:.1f}cm TRUEmove={m_true*100:.1f}cm "
+              f"dir-cos={dir_cos:+.2f} endErr={endp_err*100:.0f}cm "
               f"floor={'Y' if floor else 'N'} quiet={'Y' if quiet else 'N'} swap/true={sum(ratios[-len(swaps):])/max(1,len(swaps)):.2f}")
     n = max(1, len(succ))
     print(f"\n=== SELECTION ACCURACY: {sum(succ)/n:.2f}  ({int(sum(succ))}/{n} clip-swap pairs) ===")
     print(f"    mean swap/true motion ratio: {sum(ratios)/max(1,len(ratios)):.2f}  (low = language suppresses correctly)")
+    print(f"    mean DIRECTION cos: {sum(dcoss)/max(1,len(dcoss)):+.2f}  endpoint-err: {sum(eerrs)/max(1,len(eerrs))*100:.0f}cm  "
+          f"(high cos / low err = correct TRAJECTORY, not just correct selection)")
     print(f"    all-static baseline accuracy: {sum(base_succ)/n:.2f}  (suppression cannot game the metric)")
 
 
