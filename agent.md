@@ -1173,3 +1173,12 @@ agibot_video_gt.py 加运动:CoTracker 网格(1008点)+ Pi3 canonical 点图 3D 
 **m4 EEF 度量尺度校准**（_agibot_eefcal.py）三轮迭代：box median（scale12.7、场景 23m ✗）→ mover-filter（6.2、7m ✗）→ **逐 track Umeyama + RANSAC 式共识**：每条 track 单独拟合 EEF 轨迹形状，刚性附着夹爪的 track 以低残差胜出。**结果 PASS**：右臂 box 3 tracks 过 sanity，**scale=0.697、最佳残差 1.1cm（6% rel on 19cm）、场景中位深度×s=0.79m（物理合理）**；左臂框 0/25 过（正确，不随右 EEF 动）。**Pi3 重建获得米制尺度（真实本体感知锚定）→ 解锁 m5 操作器 5°5cm 真 GT 评估。** 方法注记：consensus spread 0.40-0.88 偏宽（仅 3 tracks）——多 clip 校准时用更密 gripper 点 + 双窗。
 
 **R3 进度**：m1✓ m2部分(CoTracker噪声,待StV2) m3✓ m4✓ | 剩 m2-redo(StV2)、m5(操作器评估)、m6(digital-world 配对)、m7(MoSca 校验)。
+
+## §80 R3 m5：零样本操作器评估（真实 EEF GT 上的诚实基线）
+
+`_agibot_m5_eval.py`：完整管线一气呵成——真实帧→Pi3 g0(14万)→openvocab seg(id8 机器人 11426 点)→m4 逐 track 共识尺度(0.697, rel 6%)→v11_rigid 零样本 forward(指令"Place the held cucumber...")→夹爪框区控制点预测位移×s 转米制→对真实 EEF。
+
+**结果（LIBERO sim 训练 → 真实超市，零样本）**：GT |ΔEEF|=18.6cm；PRED=6.6cm(**0.35×欠幅**)；**方向 cos +0.51**(粗对)；**EPE3D 16.3cm < static 18.6cm(弱胜 static)**；gate 0.47(半开)。
+**判读**：不可用但非零——分布大偏移(franka→双臂人形、桌面→超市、模板指令→自由文本)下方向仍粗对且弱胜 static。这是 R4 sim+real 共训的诚实起点。**Caveat**：夹爪框内 seg==8∧box 控制点仅 3 → 回退框内全部(混入背景) → 预测幅度被稀释,真实欠幅可能没 0.35× 那么糟;待 StV2 m2-redo 后用运动仲裁取干净夹爪点重测。
+
+**R3 进度：m1✓ m3✓ m4✓ m5✓(基线) | m2-redo 等 StV2(安装中,已重启) m6 digital-world 配对 m7 MoSca。R4：libero_90 下载中。**
