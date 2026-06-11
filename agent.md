@@ -1165,3 +1165,11 @@ R3 真实视频数据源勘探（AgiBot 已在服务器，DROID 用户否决）�
 agibot_video_gt.py 加运动:CoTracker 网格(1008点)+ Pi3 canonical 点图 3D 抬升 + 运动 ID。结果:median-disp 0.5cm(多数静止✓)、movers>4cm=157、**max 186.8cm(Pi3 深度 outlier)**;目检 movers 散布全场、未干净定位到黄瓜/夹爪。**Pi3+CoTracker(LIBERO sim 够用)在真实 AgiBot 上深度噪声太大 → 伪 GT 不干净**。**这正印证计划选 SpatialTrackerV2(遮挡/深度感知 3D 跟踪)+ MoSca 黄金子集校验**的必要性。viz/agibot/r3_m2.png(5 panel:RGB t0/tK | 3DGS | 运动伪GT | EEF 轨迹)。
 
 **R3 状态**:里程碑1(真实视频→3DGS+EEF GT)✓、里程碑2(运动伪GT,噪声,需StV2)✓-部分。剩余里程碑3-7(openvocab seg、StV2 干净运动、EEF 尺度校准、操作器5°5cm评估、digital-world真GT、MoSca校验)是多 session 工作量——尤其 StV2 需下载安装。
+
+## §79 R3 m3+m4：openvocab 真实场景成立 + EEF 度量尺度校准 PASS
+
+**m3 openvocab on real AgiBot**（_agibot_ovtest.py，viz/agibot/r3_m3_openvocab.png）：超市帧上 GroundingDINO ground 全部开放名词（plastic bag 0.65/robot gripper 0.53/robotic arm 0.52/shopping cart 0.41/cucumber 0.38 多候选——货架上真有一排黄瓜）；segment_frame_amg schema 映射成立（双臂→id8、塑料袋/购物车→id2 容器、果蔬→干扰物）。**诚实缺口**：名词 grounding 选"货架某根黄瓜"而非"夹爪里那根"（the held cucumber）→ 目标实例选择必须靠运动仲裁（StV2，符合设计）。
+
+**m4 EEF 度量尺度校准**（_agibot_eefcal.py）三轮迭代：box median（scale12.7、场景 23m ✗）→ mover-filter（6.2、7m ✗）→ **逐 track Umeyama + RANSAC 式共识**：每条 track 单独拟合 EEF 轨迹形状，刚性附着夹爪的 track 以低残差胜出。**结果 PASS**：右臂 box 3 tracks 过 sanity，**scale=0.697、最佳残差 1.1cm（6% rel on 19cm）、场景中位深度×s=0.79m（物理合理）**；左臂框 0/25 过（正确，不随右 EEF 动）。**Pi3 重建获得米制尺度（真实本体感知锚定）→ 解锁 m5 操作器 5°5cm 真 GT 评估。** 方法注记：consensus spread 0.40-0.88 偏宽（仅 3 tracks）——多 clip 校准时用更密 gripper 点 + 双窗。
+
+**R3 进度**：m1✓ m2部分(CoTracker噪声,待StV2) m3✓ m4✓ | 剩 m2-redo(StV2)、m5(操作器评估)、m6(digital-world 配对)、m7(MoSca 校验)。
