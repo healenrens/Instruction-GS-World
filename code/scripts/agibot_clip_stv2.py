@@ -1,0 +1,217 @@
+"""§82 R3 clip assembly: REAL AgiBot video -> training-format clip with the StV2 backend.
+
+One gauge end-to-end (canonical = frame-0 camera):
+  VGGT4Track front  -> per-frame camera-frame pointmaps + intrinsics + c2w poses
+  StV2 offline      -> world-frame 3D tracks (clean motion pseudo-GT, §81)
+  openvocab (§64)   -> entity ids at frame-0 (robot lump id8; objects 1..7; container 2)
+  motion arbitration-> target entity = the non-robot entity whose tracks move most (id -> 1)
+  per-entity trimmed Kabsch per frame -> traj[Kf+1, N, 3] (robot k-means sub-parts 50+c)
+  viewmats[t] = inv(c2w[t]) @ c2w[0]  (canonical -> cam_t; ego-ready schema §63)
+
+Saves data/_agibot/clip_stv2_ep{EP}.pt + an audit visual (GT-moved points over real frames).
+Run from the SpaTrackerV2 repo dir with the MAIN venv (§81 install):
+  cd /mnt/pfs/public/xuhaoming/SpaTrackerV2 && CUDA_VISIBLE_DEVICES=0 \
+  /mnt/pfs/public/xuhaoming/instruct_gs_world/.venv/bin/python \
+  /mnt/pfs/public/xuhaoming/instruct_gs_world/code/scripts/agibot_clip_stv2.py
+"""
+import os
+import sys
+
+WS = "/mnt/pfs/public/xuhaoming/instruct_gs_world"
+sys.path.insert(0, os.path.join(WS, "code"))
+sys.path.insert(0, os.path.join(WS, "code/scripts"))
+sys.path.insert(0, "/mnt/pfs/public/xuhaoming/SpaTrackerV2")
+import numpy as np
+import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from igsw.data.lerobot_agibot import list_tasks, AgiBotLeRobotTask          # noqa: E402
+from igsw.lifting.to_gaussians import points_to_gaussians                   # noqa: E402
+
+TASK, EP, WIN, K = "task_327", 0, 48, 12
+HEAD = "observation.images.head"
+ID_ARM, ID_OBJ = 8, 1
+
+
+def trimmed_kabsch(X, Y, trim=0.25):
+    """Rigid R,t mapping X->Y with worst-`trim` residuals dropped + refit. [P,3] each."""
+    def fit(A, B):
+        Am, Bm = A.mean(0), B.mean(0)
+        U, S, Vt = np.linalg.svd((A - Am).T @ (B - Bm))
+        d = np.sign(np.linalg.det(Vt.T @ U.T))
+        D = np.diag([1.0, 1.0, d])
+        R = Vt.T @ D @ U.T
+        return R, Bm - R @ Am
+    R, t = fit(X, Y)
+    res = np.linalg.norm((X @ R.T + t) - Y, axis=-1)
+    keep = res <= np.quantile(res, 1.0 - trim)
+    if keep.sum() >= 4:
+        R, t = fit(X[keep], Y[keep])
+    return R, t
+
+
+def main():
+    from models.SpaTrackV2.models.predictor import Predictor
+    from models.SpaTrackV2.models.utils import get_points_on_a_grid
+    from models.SpaTrackV2.models.vggt4track.models.vggt_moe import VGGT4Track
+    from models.SpaTrackV2.models.vggt4track.utils.load_fn import preprocess_image
+    from openvocab_seg import segment_frame_amg
+
+    dev = "cuda"
+    root = next(r for r in list_tasks() if r.rstrip("/").endswith(TASK))
+    t = AgiBotLeRobotTask(root)
+    pq = t.read_parquet(EP, ["observation.states.end.position"])
+    eef = pq["observation.states.end.position"].reshape(-1, 2, 3)
+    Tt = eef.shape[0]
+    segs = t.subtasks(EP)
+    cand = [(float(np.linalg.norm(eef[min(int(s["end_frame"]), Tt - 1)] - eef[int(s["start_frame"])], axis=-1).max()),
+             int(s["start_frame"]), s.get("action_text", "")) for s in segs
+            if int(s.get("end_frame", 0)) - int(s.get("start_frame", 0)) >= WIN]
+    _, a, instruction = sorted(cand, reverse=True)[0]
+    a = max(0, min(a, Tt - WIN - 1))
+    widx = np.clip(np.unique(np.linspace(a, a + WIN, K + 1).round().astype(int)), 0, Tt - 1)
+    Kf = len(widx) - 1
+    frames = np.asarray(t.decode_frames(EP, HEAD, widx.tolist()))
+    H0, W0 = frames.shape[1:3]
+    print(f"[clip] window [{a},{a+WIN}] Kf={Kf} instr={instruction[:50]!r}", flush=True)
+
+    # ---- StV2 front: pointmaps (camera frame), intrinsics, c2w --------------------------------
+    vt5 = preprocess_image(torch.from_numpy(frames).permute(0, 3, 1, 2).float())[None]
+    front = VGGT4Track.from_pretrained("Yuxihenry/SpatialTrackerV2_Front").cuda().eval()
+    with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        pf = front(vt5.cuda() / 255)
+    pts_cam = pf["points_map"].squeeze().float().cpu().numpy()              # [T,h,w,3] cam frame
+    unc = pf["unc_metric"].squeeze().float().cpu().numpy()                  # [T,h,w]
+    intrs = pf["intrs"].squeeze().float().cpu().numpy()                     # [T,3,3]
+    vt = vt5.squeeze()
+    h, w = vt.shape[2:]
+    del front
+    torch.cuda.empty_cache()
+
+    # ---- StV2 tracker: world tracks + c2w -----------------------------------------------------
+    model = Predictor.from_pretrained("Yuxihenry/SpatialTrackerV2-Offline").cuda().eval()
+    model.spatrack.track_num = 756
+    grid_pts = get_points_on_a_grid(27, (h, w), device="cpu")
+    query_xyt = torch.cat([torch.zeros_like(grid_pts[:, :, :1]), grid_pts], dim=2)[0].numpy()
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        (c2w_traj, intrs_o, point_map, conf_depth, track3d_pred, track2d_pred,
+         vis_pred, conf_pred, video) = model.forward(
+            vt, depth=pts_cam[..., 2], intrs=intrs, extrs=np.eye(4)[None].repeat(Kf + 1, 0),
+            queries=query_xyt, fps=1, full_point=False, iters_track=4, query_no_BA=True,
+            fixed_cam=False, stage=1, unc_metric=unc > 0.5, support_frame=Kf, replace_ratio=0.2)
+    c2w = c2w_traj.squeeze().float().cpu().numpy()                          # [T,4,4]
+    tr3w = track3d_pred.squeeze().float().cpu().numpy()[..., :3]            # [T,Q,3] world
+    tr2 = track2d_pred.squeeze().float().cpu().numpy()[..., :2]             # [T,Q,2] model px
+    vis = vis_pred.squeeze().cpu().numpy() > 0.5
+    del model
+    torch.cuda.empty_cache()
+
+    # ---- canonical gauge = frame-0 camera ------------------------------------------------------
+    A = np.linalg.inv(c2w[0])                                               # world -> cam0
+    tr3 = tr3w @ A[:3, :3].T + A[:3, 3]                                     # [T,Q,3] canonical
+    viewmats = np.stack([np.linalg.inv(c2w[tt]) @ c2w[0] for tt in range(Kf + 1)]).astype(np.float32)
+
+    # ---- g0 from frame-0 camera-frame pointmap (== canonical) ---------------------------------
+    z0 = pts_cam[0][..., 2]
+    valid = np.isfinite(pts_cam[0]).all(-1) & (z0 > 1e-4) & (unc[0] > 0.5)
+    g0, uv = points_to_gaussians(torch.from_numpy(pts_cam[0]).float()[None], (vt[0:1] / 255.0),
+                                 torch.from_numpy(valid)[None], opacity_init=0.9,
+                                 scale_factor=0.6, return_uv=True)
+    N = len(g0)
+
+    # ---- entities: openvocab seg @ frame-0; target by MOTION arbitration ----------------------
+    idm = segment_frame_amg(frames[0], instruction, device=dev)             # [H0,W0]
+    sx, sy = W0 / float(w), H0 / float(h)
+    uv_np = uv.numpy()
+    seg_g = idm[np.clip((uv_np[:, 1] * sy).round().astype(int), 0, H0 - 1),
+                np.clip((uv_np[:, 0] * sx).round().astype(int), 0, W0 - 1)].astype(np.int64)
+    tr_seg = idm[np.clip((tr2[0][:, 1] * sy).round().astype(int), 0, H0 - 1),
+                 np.clip((tr2[0][:, 0] * sx).round().astype(int), 0, W0 - 1)].astype(np.int64)
+    ok = vis.mean(0) > 0.6
+    disp = np.linalg.norm(tr3[Kf] - tr3[0], axis=-1)
+    obj_ids = [int(i) for i in np.unique(tr_seg) if 1 <= i <= 7]
+    if obj_ids:
+        mov = {i: float(np.median(disp[ok & (tr_seg == i)])) if (ok & (tr_seg == i)).sum() >= 3 else 0.0
+               for i in obj_ids}
+        tgt = max(mov, key=mov.get)
+        print(f"[clip] motion arbitration: {mov} -> target id{tgt}", flush=True)
+    else:
+        tgt = ID_OBJ
+    seg_g[seg_g == tgt] = ID_OBJ if tgt != ID_OBJ else seg_g[seg_g == tgt]
+    tr_seg[tr_seg == tgt] = ID_OBJ
+
+    # ---- per-entity rigid traj (robot k-means sub-parts; target rigid; bg static) -------------
+    traj = np.repeat(tr3.mean(axis=1, keepdims=True) * 0, N, axis=1).astype(np.float32)  # placeholder
+    traj = np.broadcast_to(g0.means.numpy()[None], (Kf + 1, N, 3)).copy()
+    seg_final = seg_g.copy()
+    ent_list = []
+    if (tr_seg == ID_OBJ).sum() >= 4:
+        ent_list.append((ID_OBJ, np.where(ok & (tr_seg == ID_OBJ))[0], ID_OBJ))
+    arm_q = np.where(ok & (tr_seg == ID_ARM))[0]
+    if len(arm_q) >= 8:                                                     # k-means sub-parts
+        from sklearn.cluster import KMeans
+        kk = min(3, len(arm_q) // 4)
+        lab = KMeans(n_clusters=kk, n_init=4, random_state=0).fit_predict(
+            (tr3[Kf, arm_q] - tr3[0, arm_q]))
+        for c in range(kk):
+            qi = arm_q[lab == c]
+            if len(qi) >= 4:
+                ent_list.append((ID_ARM, qi, 50 + c))
+    for src_id, qi, out_id in ent_list:
+        gm = seg_g == src_id
+        if out_id >= 50:                                                    # arm sub-part: nearest-track split
+            d2 = ((uv_np[gm][:, None, :] - tr2[0][qi][None, :, :]) ** 2).sum(-1)
+            sub = np.zeros(gm.sum(), bool)
+            allq = np.concatenate([e[1] for e in ent_list if e[2] >= 50])
+            d2all = ((uv_np[gm][:, None, :] - tr2[0][allq][None, :, :]) ** 2).sum(-1)
+            owner = allq[d2all.argmin(1)]
+            sub = np.isin(owner, qi)
+            idx = np.where(gm)[0][sub]
+            seg_final[idx] = out_id
+        else:
+            idx = np.where(gm)[0]
+        X0 = tr3[0][qi]
+        for tt in range(1, Kf + 1):
+            R, tv = trimmed_kabsch(X0, tr3[tt][qi])
+            traj[tt, idx] = g0.means.numpy()[idx] @ R.T + tv
+    is_obj = seg_final == ID_OBJ
+    obj_disp = np.linalg.norm(traj[Kf][is_obj] - traj[0][is_obj], axis=-1)
+    print(f"[clip] N={N} obj_gauss={int(is_obj.sum())} obj disp median={np.median(obj_disp)*100:.1f} "
+          f"(StV2 units) | arm sub-parts={[e[2] for e in ent_list if e[2]>=50]}", flush=True)
+
+    gt_rgb = (vt.permute(0, 2, 3, 1).cpu().numpy()).astype(np.uint8)        # [T,h,w,3]
+    save = {"means": g0.means, "quats": g0.quats, "scales": g0.scales,
+            "opacities": g0.opacities, "colors": g0.colors, "uv": uv,
+            "seg_per_g": torch.from_numpy(seg_final), "traj": torch.from_numpy(traj),
+            "K_intr": torch.from_numpy(intrs_o.squeeze().float().cpu().numpy()[0]),
+            "viewmat": torch.eye(4), "viewmats": torch.from_numpy(viewmats),
+            "H": h, "W": w, "Kf": Kf, "instruction": instruction,
+            "gt_rgb": torch.from_numpy(gt_rgb),
+            "is_obj": torch.from_numpy(is_obj), "n_fill": 0,
+            "backend": "stv2", "epi": EP, "task": TASK, "split": "real"}
+    os.makedirs(os.path.join(WS, "data/_agibot"), exist_ok=True)
+    out_pt = os.path.join(WS, f"data/_agibot/clip_stv2_ep{EP}.pt")
+    torch.save(save, out_pt)
+    print(f"[clip] saved {out_pt}", flush=True)
+
+    # ---- audit visual: GT-moved entity points projected over the real frames ------------------
+    Ki = intrs_o.squeeze().float().cpu().numpy()[0]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.6))
+    for ax, tt in zip(axes, [0, Kf // 2, Kf]):
+        ax.imshow(gt_rgb[tt]); ax.axis("off")
+        vm = viewmats[tt]
+        for m, col in [(is_obj, "red"), (seg_final >= 50, "cyan")]:
+            P = traj[tt][m] @ vm[:3, :3].T + vm[:3, 3]
+            zc = np.clip(P[:, 2], 1e-4, None)
+            ax.scatter(Ki[0, 0] * P[:, 0] / zc + Ki[0, 2], Ki[1, 1] * P[:, 1] / zc + Ki[1, 2],
+                       s=1.5, c=col, alpha=0.5, linewidths=0)
+        ax.set_title(f"GT traj @ t{tt} (red=target cyan=arm)", fontsize=8)
+    plt.tight_layout()
+    outp = os.path.join(WS, "viz/agibot/r3_clip_stv2.png")
+    plt.savefig(outp, dpi=120, bbox_inches="tight")
+    print(f"[clip] saved {outp}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

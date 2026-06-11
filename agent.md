@@ -1190,3 +1190,14 @@ agibot_video_gt.py 加运动:CoTracker 网格(1008点)+ Pi3 canonical 点图 3D 
 **m2-redo 结果**(_agibot_stv2.py,viz/agibot/r3_m2redo_stv2.png):VGGT4Track 前端(深度+内参+位姿,13×392×518)→ StV2 offline 729 tracks、vis 93%。**世界系 3D 位移:静止中位 0.1cm、p90 0.3cm、最大 44.7cm(合理)——对比 m2 CoTracker+Pi3 的 max 186.8cm 疯狂离群 + movers 散布全场**。目检:运动热力干净集中在右臂+持黄瓜区,top movers 轨迹一致地货架→购物车。**真实视频干净物体 3D 运动伪 GT 可用;输出含 c2w_traj/intrs/point_map(供 clip schema viewmats)**。npz 存 data/_agibot/stv2_tracks.npz。
 
 **R3 进度:m1✓ m2-redo✓(StV2) m3✓ m4✓ m5✓ | 剩 m6 digital-world 配对、m7 MoSca 黄金子集校验、clip schema 总装(StV2 轨迹+openvocab seg+EEF 尺度+viewmats → 训练格式)。**
+
+## §82 R3 clip 总装 v1：schema 跑通；伪 GT 质量两缺陷待修（目标身份 + 臂刚性化）
+
+`agibot_clip_stv2.py`：真实 AgiBot → 完整训练格式 clip（StV2 后端,单 gauge=cam0）：VGGT4Track 前端(逐帧 cam-frame pointmap+内参+c2w) → StV2 世界系轨迹 → canonical 重 gauge → g0(20.3万) + openvocab seg + 运动仲裁 + 逐实体 trimmed-Kabsch traj + `viewmats[t]=inv(c2w[t])@c2w[0]`(ego schema §63) → clip_stv2_ep0.pt + 审核图。
+
+**v1 诚实判定（viz/agibot/r3_clip_stv2.png）**：
+1. ✅ 总装端到端成立（schema 完整、臂子部件 50-52 携带运动、保存可加载）。
+2. ✗ **目标身份错**：运动仲裁在 openvocab 物体实体上全静（~2mm,货架物），选了噪声 id6——**持握中的黄瓜在夹爪里被 openvocab 归进 robot id8**（place 子任务的普遍情形:抓住的物体与夹爪同刚体）。修法：mover ∩ GD-"cucumber"-box（含末帧,物体离开货架后可分离）或 mover 簇内做外观分割。
+3. ✗ **臂刚性化涂抹**：k=3 子部件对关节臂太粗（t12 青色云漂移走样）。修法：更细子部件/逐帧重聚类，或臂放弃刚性化、直接 nearest-track 位移监督（schema 的 traj 本就支持非刚性）。
+
+**结论**：StV2 原始轨迹干净（§81），损失在"逐实体刚性化"。批量生成（20 clip）前先修这两点。R3 剩：clip-builder v1.1（上述两修）、m6 digital-world 配对、m7 MoSca 校验。R4 备料：libero_90 重启下载中（重试循环,已 1715 mp4）。
