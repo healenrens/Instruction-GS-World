@@ -22,7 +22,7 @@ def _ext(X):
 
 def _rand_rot(dev, scale=0.2):
     aa = torch.randn(3, device=dev) * scale
-    return quat_to_rotmat(axis_angle_to_quat(aa[None]))[0]      # [3,3]
+    return quat_to_rotmat(axis_angle_to_quat(aa[None]))[0], aa  # [3,3], axis-angle [3]
 
 
 def main():
@@ -37,18 +37,22 @@ def main():
     x = torch.cat([x1, x2, x0], 0)                              # [120,3]
     seg = torch.cat([torch.ones(40), torch.full((60,), 2.0), torch.zeros(20)]).long().to(dev)
 
-    # ===== TEST 1: a TRUE rigid field per entity is reproduced exactly =====
-    R1, t1 = _rand_rot(dev), torch.tensor([0.05, -0.02, 0.03], device=dev)
-    R2, t2 = _rand_rot(dev), torch.tensor([-0.04, 0.01, 0.02], device=dev)
+    # ===== TEST 1: a TRUE rigid field (CONSISTENT v + omega) is reproduced exactly =====
+    # §74: rotation now comes from the supervised omega, so a rigid field must carry both the rigid
+    # displacement (v) AND the matching per-control axis-angle (omega).
+    (R1, aa1), t1 = _rand_rot(dev), torch.tensor([0.05, -0.02, 0.03], device=dev)
+    (R2, aa2), t2 = _rand_rot(dev), torch.tensor([-0.04, 0.01, 0.02], device=dev)
     y1 = x1 @ R1.T + t1
     y2 = x2 @ R2.T + t2
     y0 = x0                                                     # bg: no motion
     v_true = (torch.cat([y1, y2, y0], 0) - x)[None]            # [1,120,3]
     om_in = torch.zeros_like(v_true)
+    om_in[0, :40] = aa1                                         # entity 1's rotation
+    om_in[0, 40:100] = aa2                                      # entity 2's rotation
     v_hat, om_hat = entity_rigid_aggregate(x, v_true.clone(), om_in.clone(), seg, w=None)
     err = (v_hat - v_true).abs().max().item()
     t1_ok = err < 1e-4
-    print(f"[1] rigid-in->identity: max|v_hat - v_true| = {err:.2e}  {'PASS' if t1_ok else 'FAIL'}")
+    print(f"[1] rigid-in(v+omega)->identity: max|v_hat - v_true| = {err:.2e}  {'PASS' if t1_ok else 'FAIL'}")
     ok &= t1_ok
 
     # ===== TEST 2: a SCATTER field collapses to rigid, centroid direction preserved =====

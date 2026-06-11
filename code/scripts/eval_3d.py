@@ -74,7 +74,7 @@ def main():
     print(f"ckpt={args.ckpt} rigid_agg={ck.get('rigid_agg', 0)} | {len(clips)} {args.split} clips\n"
           f"{'clip':<26} {'GTdisp':>7} {'EPE3D':>7} {'magR':>6} {'rotErr':>7} {'5°5cm':>6} "
           f"{'Acc3DS':>7} {'Acc3DR':>7} {'rigRes':>7}")
-    mags, epes, rots, accs, accr, ok5s, rigs = [], [], [], [], [], [], []
+    mags, epes, rots, accs, accr, ok5s, rigs, gtrots = [], [], [], [], [], [], [], []
     for cp in clips:
         c = torch.load(cp, map_location="cuda", weights_only=False)
         seg = c["seg_per_g"].cuda().long()
@@ -105,6 +105,9 @@ def main():
         Rp, _ = kabsch_Rt(ii, pe[K - 1])
         Rg, _ = kabsch_Rt(ii, ge[K - 1])
         rot_err = rot_angle_deg(Rp, Rg)
+        I3 = torch.eye(3, device=Rg.device, dtype=Rg.dtype)
+        gt_rot = rot_angle_deg(Rg, I3)                                # GT's OWN rotation magnitude (is it real?)
+        gtrots.append(gt_rot)
         trans_err = float((pd - gd).norm())
         ok5 = (rot_err <= 5.0) and (trans_err <= 0.05)
         # Acc3DS/Acc3DR (mover controls, endpoint)
@@ -123,8 +126,8 @@ def main():
     print(f"  mag-ratio    median {_median(mags):.2f}x   P10 {_p10(mags):.2f}x   "
           f"(collapse = median<<1 or P10<0.5; target [0.85,1.15] & P10>=0.5)")
     print(f"  EPE3D        median {_median(epes)*100:.1f}cm   P90 {sorted(epes)[int(0.9*(n-1))]*100:.1f}cm")
-    print(f"  5°5cm rate   {sum(ok5s)/n:.2f}    rot-err median {_median(rots):.1f}°   "
-          f"(rotation measured for the FIRST time)")
+    print(f"  5°5cm rate   {sum(ok5s)/n:.2f}    rot-err median {_median(rots):.1f}°    "
+          f"GT-rot median {_median(gtrots):.1f}° (is GT actually rotating? if ~0 the pred rot is spurious)")
     print(f"  Acc3DS(5cm)  {sum(accs)/n:.2f}    Acc3DR(10cm) {sum(accr)/n:.2f}")
     print(f"  coherence    rigid-residual median {_median(rigs)*100:.2f}cm")
 

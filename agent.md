@@ -1126,3 +1126,10 @@ v11mag = resume v9lang + `--w_mag 0.5`，settle 1500 步（0 跳过）。eval_3d
 **核心目标(幅度)实质修复**：median 两划分 ≥0.85、heldseed P10 过、EPE3D 全面降、尾部 P90 23.5→11.4cm。**附带白拿**：selection 0.75→1.00（因 R0 诊断的"塌缩使物体没过 0.25×GT 地板"被解除）。
 **残留（折进 R2）**：(a) train P10 0.29（少数 train clip 仍塌，heldseed 不受影响）；(b) heldseed dir +0.81→+0.75（n=8 噪声内，但低于严格门禁）；(c) **旋转未动（31.9°、5°5cm=0）——本就是 R2 目标**。heldtask 0.00×=词汇问题(R4)非幅度。
 **判定**：R1 在主目标上实质成功，残留交 R2（R2 重训会同时管旋转+守方向，自然吸收 (b)(c)；(a) 视 R2 后情况）。v11mag 暂作 R2 的 resume 基座，不急 ship。
+
+## §74 R2: 旋转源从 v-Kabsch 改为 supervised omega-mean（去 SVD→可训练在环）；GT 物体确实在转
+
+诊断确认 §73 假设：rigid_agg 的旋转来自**速度场 Kabsch**（拟合 vote 噪声→28-31° 误差），而 rot_l 监督的 per-control omega 被**丢弃**。修法（rigid_agg.py，rot_from_omega 默认 True）：实体旋转 = supervised omega 的加权均值（exp），平移仍取速度质心；`y_hat=R(x-mux)+muy`。**去掉 SVD**→数值稳定 + **完全可微（omega 得梯度，无需 V3 的 detach hack）→ rigid_agg 现可训练在环**（V3 的拦路 SVD-backward 消失）。单元 5/5 过（test1 改为提供一致的 v+omega）。
+
+**重大发现**：eval_3d 加 GT-rot 列 → **heldseed GT-rot 中位 17.5°**——**pick-place 物体真的在转**（抓起/放下时倾斜），R0"伪旋转"框架错误。omega-mean 把 rot-err 31.9→**19.0°**（最干净的 epi040_c 仅 **4.8°**），但 5°5cm 仍 0：模型预测的旋转幅度对、方向/量不够准；且 GT 旋转本身含伪 GT 噪声（Procrustes on tracked points，小位移 clip 病态 epi240_e 82°）。
+**重估 R2**：(1) omega-mean 是对的旋转源（严格改进 + 可训练），ship 为默认；(2) "原始投票即刚性"现可实现——训练时开 rigid_agg(omega-mean) 让 raw votes 直接刚性（V3 做不到、现在能）；(3) 干净旋转评估需 LIBERO-goal 抽屉/旋钮（R3/R4 数据），libero_object 的入射旋转太噪。
