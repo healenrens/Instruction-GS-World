@@ -29,7 +29,9 @@ import matplotlib.pyplot as plt
 from igsw.data.lerobot_agibot import list_tasks, AgiBotLeRobotTask          # noqa: E402
 from igsw.lifting.to_gaussians import points_to_gaussians                   # noqa: E402
 
-TASK, EP, WIN, K = "task_327", 0, 48, 12
+TASK = os.environ.get("AGIBOT_TASK", "task_327")
+EP = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+WIN, K = 48, 12
 HEAD = "observation.images.head"
 ID_ARM, ID_OBJ = 8, 1
 
@@ -155,11 +157,29 @@ def main():
           f"(total movers {int(movers.sum())})", flush=True)
     if tgt_q.sum() >= 4:
         tr_seg[tgt_q] = ID_OBJ
-        # carve the target's GAUSSIANS out of the robot lump: pixels near target tracks @ frame0
+        # carve the target's GAUSSIANS out of the robot lump: pixels near target tracks @ frame0...
         d2t = ((uv_np[:, None, :] - tr2[0][tgt_q][None, :, :]) ** 2).sum(-1).min(1)
         near_t = d2t < (0.03 * max(h, w)) ** 2
-        seg_g[near_t & (seg_g == ID_ARM)] = ID_OBJ
-        seg_g[near_t & (seg_g == 0)] = ID_OBJ
+        # ...v1.2 + MOTION-CONSISTENCY: the carved Gaussian's own local motion (3-NN IDW over ALL
+        # tracks) must be a real fraction of the target's motion — static same-class instances
+        # (shelf cucumbers under a noun box crossed by mover paths) have ~0 local motion -> dropped.
+        okq = np.where(ok)[0]
+        cand = np.where(near_t)[0]
+        d2a = ((uv_np[cand][:, None, :] - tr2[0][okq][None, :, :]) ** 2).sum(-1)     # [C,Qok]
+        nn3 = np.argsort(d2a, axis=1)[:, :3]
+        w3 = 1.0 / np.clip(np.take_along_axis(d2a, nn3, axis=1), 1e-6, None)
+        w3 = w3 / w3.sum(1, keepdims=True)
+        dKf = np.linalg.norm(tr3[Kf][okq] - tr3[0][okq], axis=-1)                     # [Qok]
+        loc_mov = (w3 * dKf[nn3]).sum(1)                                              # [C]
+        tgt_med = float(np.median(disp[tgt_q]))
+        keep = loc_mov > 0.4 * tgt_med
+        carved = cand[keep]
+        print(f"[clip] carve motion-filter: {len(cand)} candidates -> {int(keep.sum())} kept "
+              f"(target med {tgt_med*100:.1f}, thresh {0.4*tgt_med*100:.1f})", flush=True)
+        m_c = np.zeros(N, bool)
+        m_c[carved] = True
+        seg_g[m_c & (seg_g == ID_ARM)] = ID_OBJ
+        seg_g[m_c & (seg_g == 0)] = ID_OBJ
     else:
         print("[clip] WARN: no moving noun box -> falling back to v1 entity-motion vote", flush=True)
         obj_ids = [int(i) for i in np.unique(tr_seg) if 1 <= i <= 7]
@@ -234,7 +254,7 @@ def main():
                        s=1.5, c=col, alpha=0.5, linewidths=0)
         ax.set_title(f"GT traj @ t{tt} (red=target cyan=arm)", fontsize=8)
     plt.tight_layout()
-    outp = os.path.join(WS, "viz/agibot/r3_clip_stv2.png")
+    outp = os.path.join(WS, f"viz/agibot/r3_clip_stv2_ep{EP}.png")
     plt.savefig(outp, dpi=120, bbox_inches="tight")
     print(f"[clip] saved {outp}", flush=True)
 
