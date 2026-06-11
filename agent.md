@@ -1211,3 +1211,10 @@ v1.1 双修（agibot_clip_stv2.py）：
 **审核图（viz/agibot/r3_clip_stv2_v11.png）**：红色目标主簇 t0(夹爪/货架顶)→t12(购物袋) 连贯移动 ✓；臂干净 ✓。**残留（v1.2 todo）**：货架同类黄瓜少量误并入目标（同类实例歧义：GD 框叠到 mover 2D 路径附近的静止同类）→ 修法：carve 时要求该高斯邻近的 track 自身在动（运动一致性过滤），或限制 carve 半径/限定包含 moving tracks 的那个框。
 
 **R3 状态：m1✓ m2-redo✓ m3✓ m4✓ m5✓ clip-v1.1✓(可用,留 v1.2 小修) | 剩：v1.2 同类渗漏修 → 批量 20 clip → m7 MoSca 抽查 → R4 共训。m6(digital-world 配对)降级为可选（标定可从 EEF 校准替代）。**
+
+## §84 R3 批量生产 + R4 入口：50 episode 生成、31 过质量门、v12 sim+real 共训启动
+
+**clip-builder 迭代链**（每轮诚实盘点驱动）：v1.2 名词解析坏(3/20 PASS) → **v1.3** 多模式名词提取+容器黑名单（修 15 个 'shelf.' 误解析）+ GD 框内播种 query（修小物体 grid 漏检）→ 8/20 → **v1.4** Retrieve 类锚定段尾取窗（段首是伸手、物体未动 = 12 个失败共因）→ 9/20 → **不再调参、改拓宽**：ep20-49 再生成 30 个（v1.4 在新批通过率 ~73%）。
+**终态：50 个 clip、31 过质量门（62%）**，质量门=目标位移∈[5,80]StV2cm ∧ 物体高斯∈[500,30k]。词汇：cucumber/pear/carambola/corn、双动词模板（Place held/Retrieve）、位移 5.6-60cm。失败模式记录：同类实例歧义 + 抓取时机异质（v1.5 候选：多窗扫描取过门窗口）。
+
+**v12 共训（R4 第一炮，运行中）**：mix_v12 = 56 sim(LIBERO) + 25 real train + 6 heldreal（symlink，epi9xxxxx_r_{split}.pt 命名兼容 loader）。resume v11mag、w_mag 配方、2500 步 settle。**判据**：真实 heldreal 显著改善零样本基线（dir +0.51 / EPE3D 16.3cm / mag 0.35×，§80 m5）；sim heldseed 不回退（mag 0.85×/EPE3D 10.3cm/sel 1.00）。orchestrate_v12.sh，日志 logs/orchestrate_v12.log。
