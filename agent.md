@@ -1245,3 +1245,10 @@ v12mix（56 sim + 25 real train + 6 heldreal，resume v11mag，2500 步 0 跳过
 **轨 B 词汇扩展前置(已确认可行)**：libero_90(3921 ep、fps20、73 任务)是 **LeRobot v2.1**,**AgiBotLeRobotTask 直接可读**(video_key=observation.images.image,decode 出 256² agentview,instruction 从 episodes.jsonl)——无需写新 loader。**18 个新名词**(book/red mug/white mug/black bowl/caddy + 空间指代 left/right/middle compartment)vs 现 8 名词。clip 生成路径=复用 agibot_clip_stv2 的"frames+instruction→StV2/Pi3→openvocab→运动仲裁→clip"(parse_target_noun 已支持"pick up the X and place..."),sim 无需 EEF/尺度。待轨 A 出结果后执行(GPU 让给旋转实验)。
 
 **生产模型链**:v9lang_rigid(R0基线)→ v11_rigid(R1+R2)→ **v12_rigid(R4 共训,真实可用,当前最佳)**。
+
+## §88 v13 验尸（book 数据毒化：fps 域错位）+ v14erot dtype 崩修复
+
+**v13 全面否决**：held90 未见 book 实例"接合了"（会动——对比 heldtask=0 时代）但幅度狂野（2.53×过冲、EPE 49.9cm）；**守卫全烂**：sim heldseed EPE 12.4→24.7cm、Acc3DR 0.37→0.13、mag P10→0.00（有 clip 彻底塌）；real heldreal EPE 10.8→31.5cm、过冲 2.27×。**根因**：libero_90 是 fps20，book 批量生成 WIN=48 帧=2.4s（fps10 的一半 wall-clock）→ 每步运动时长/尺度域错位 → 训练被污染（§86 备料标注过 stride×2，批量时漏执行）。**修法**：book 重生成 WIN=96（同 wall-clock）+ 重训；v12_rigid 保持生产。教训：**异 fps 数据源必须按 wall-clock 对齐窗口**。
+
+**v14erot 启动即崩（exit=1, 45s）**：autocast 混精度——DiT 输出 xr 是 fp32（LayerNorm autocast 规则回 fp32），erot_val(xr) 是 bf16（Linear），`alpha.to(xr.dtype)` 选错基准 → f32 源 vs bf16 ro 的 index_add_ 冲突。**修复**：alpha 对齐 val.dtype。重启成功（s0 正常）。bases 头无此模式（一直在跑）。
+**当前**：v14erot(卡0-1, 1500步~3h) + v14bases(卡2-3, 3000步~6h) 并行训练中；编排器等 bases 结束后自动评估两者（erot 届时已完成 → ckpt_last 正确）。
