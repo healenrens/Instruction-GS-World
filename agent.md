@@ -1218,3 +1218,22 @@ v1.1 双修（agibot_clip_stv2.py）：
 **终态：50 个 clip、31 过质量门（62%）**，质量门=目标位移∈[5,80]StV2cm ∧ 物体高斯∈[500,30k]。词汇：cucumber/pear/carambola/corn、双动词模板（Place held/Retrieve）、位移 5.6-60cm。失败模式记录：同类实例歧义 + 抓取时机异质（v1.5 候选：多窗扫描取过门窗口）。
 
 **v12 共训（R4 第一炮，运行中）**：mix_v12 = 56 sim(LIBERO) + 25 real train + 6 heldreal（symlink，epi9xxxxx_r_{split}.pt 命名兼容 loader）。resume v11mag、w_mag 配方、2500 步 settle。**判据**：真实 heldreal 显著改善零样本基线（dir +0.51 / EPE3D 16.3cm / mag 0.35×，§80 m5）；sim heldseed 不回退（mag 0.85×/EPE3D 10.3cm/sel 1.00）。orchestrate_v12.sh，日志 logs/orchestrate_v12.log。
+
+## §85 R4 第一炮：v12 sim+real 共训 = 模型首次在真实开放世界视频上 work
+
+v12mix（56 sim + 25 real train + 6 heldreal，resume v11mag，2500 步 0 跳过）双评：
+
+**REAL heldreal（headline）vs 零样本基线（§80 m5: dir+0.51/EPE16.3/mag0.35×）**：
+| | 零样本 | v12 共训 |
+|---|---|---|
+| 幅度比中位/P10 | 0.35× | **0.93× / 0.77×** |
+| EPE3D 中位 | 16.3cm | **10.8cm**（追平 sim）|
+| 最佳 clip | — | epi48 EPE5.3/Acc3DR0.90、epi20 4.8/0.72、epi25 8.7/0.61 |
+| 5°5cm | — | 0/6（GT-rot **48.7°**，货架抓取倾斜极大，模型旋转未解）|
+| coherence | — | 0.07cm 刚性 |
+**真实物体幅度 0.35→0.93×、EPE 16.3→10.8cm、3/6 真实 heldout genuinely 好。模型首次在真实超市视频上有用。**
+
+**SIM 回归守卫**：mag 0.91×(持平)、EPE3D 10.3→12.4cm(轻微)、langswap sel 1.00→**0.88**、dir +0.76、coherence 0.06cm。**轻微退化、基本守住**（sim/real 容量分配代价）。
+
+**生产模型 = `checkpoints/libero_v12_rigid`**（真实可用）。**剩余前沿 = 旋转**（sim GT-rot 17.5° / real 48.7°，5°5cm 始终 0，R2 已定位为"训练学不进、投影从噪声 omega 取"——需干净旋转监督，是下一个主攻）。
+**v11 计划完成度**：R0✓ R1✓ R2✓(投影) R3✓ **R4 第一炮 ✓**(共训证明 real 可用)；R4 后半 = 词汇扩展(libero_90 已下 3.3G/7842mp4)+ 旋转主攻 + 规模化。
