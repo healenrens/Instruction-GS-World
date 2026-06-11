@@ -130,55 +130,81 @@ def main():
                  np.clip((tr2[0][:, 0] * sx).round().astype(int), 0, W0 - 1)].astype(np.int64)
     ok = vis.mean(0) > 0.6
     disp = np.linalg.norm(tr3[Kf] - tr3[0], axis=-1)
-    obj_ids = [int(i) for i in np.unique(tr_seg) if 1 <= i <= 7]
-    if obj_ids:
-        mov = {i: float(np.median(disp[ok & (tr_seg == i)])) if (ok & (tr_seg == i)).sum() >= 3 else 0.0
-               for i in obj_ids}
-        tgt = max(mov, key=mov.get)
-        print(f"[clip] motion arbitration: {mov} -> target id{tgt}", flush=True)
-    else:
-        tgt = ID_OBJ
-    seg_g[seg_g == tgt] = ID_OBJ if tgt != ID_OBJ else seg_g[seg_g == tgt]
-    tr_seg[tr_seg == tgt] = ID_OBJ
+    movers = ok & (disp > max(float(np.percentile(disp[ok], 80)), 0.02))
 
-    # ---- per-entity rigid traj (robot k-means sub-parts; target rigid; bg static) -------------
-    traj = np.repeat(tr3.mean(axis=1, keepdims=True) * 0, N, axis=1).astype(np.float32)  # placeholder
+    # ---- v1.1 TARGET = HELD-OBJECT arbitration: moving tracks inside the instruction-noun box --
+    # (the held object rides INSIDE the gripper -> openvocab lumps it into robot id8; v1's
+    #  per-openvocab-entity motion vote therefore picked a static shelf item. Fix: GD the noun on
+    #  frame0 AND lastframe (after placement the object separates), target = mover ∩ noun-box.)
+    import re
+    from openvocab_seg import load_models, _gd_detect
+    m_n = re.search(r"held ([a-z]+)", instruction.lower())
+    noun = m_n.group(1) if m_n else (instruction.lower().split(" the ")[1].split()[0]
+                                     if " the " in instruction.lower() else "object")
+    models = load_models(dev)
+    from PIL import Image
+    tgt_q = np.zeros(tr2.shape[1], bool)
+    for fi in (0, Kf):
+        dets = _gd_detect(models, Image.fromarray(frames[fi]), [noun], box_thresh=0.2, text_thresh=0.2)
+        for d in dets:
+            x0b, y0b, x1b, y1b = [float(v) for v in d["box"]]
+            inb = ((tr2[fi][:, 0] * sx >= x0b) & (tr2[fi][:, 0] * sx <= x1b)
+                   & (tr2[fi][:, 1] * sy >= y0b) & (tr2[fi][:, 1] * sy <= y1b))
+            tgt_q |= (inb & movers)
+    print(f"[clip] held-object arbitration: noun={noun!r} mover-tracks-in-box={int(tgt_q.sum())} "
+          f"(total movers {int(movers.sum())})", flush=True)
+    if tgt_q.sum() >= 4:
+        tr_seg[tgt_q] = ID_OBJ
+        # carve the target's GAUSSIANS out of the robot lump: pixels near target tracks @ frame0
+        d2t = ((uv_np[:, None, :] - tr2[0][tgt_q][None, :, :]) ** 2).sum(-1).min(1)
+        near_t = d2t < (0.03 * max(h, w)) ** 2
+        seg_g[near_t & (seg_g == ID_ARM)] = ID_OBJ
+        seg_g[near_t & (seg_g == 0)] = ID_OBJ
+    else:
+        print("[clip] WARN: no moving noun box -> falling back to v1 entity-motion vote", flush=True)
+        obj_ids = [int(i) for i in np.unique(tr_seg) if 1 <= i <= 7]
+        if obj_ids:
+            mov = {i: float(np.median(disp[ok & (tr_seg == i)])) if (ok & (tr_seg == i)).sum() >= 3 else 0.0
+                   for i in obj_ids}
+            tgt = max(mov, key=mov.get)
+            tr_seg[tr_seg == tgt] = ID_OBJ
+            seg_g[seg_g == tgt] = ID_OBJ
+
+    # ---- v1.1 traj: target RIGID (objects are rigid); robot NON-RIGID via k-NN track transfer --
+    # (v1's k=3 rigid sub-parts smeared the articulated arm; StV2's raw tracks are clean (§81) so
+    #  transfer displacement directly: per robot Gaussian, IDW blend of its 3 nearest robot tracks.)
     traj = np.broadcast_to(g0.means.numpy()[None], (Kf + 1, N, 3)).copy()
     seg_final = seg_g.copy()
-    ent_list = []
-    if (tr_seg == ID_OBJ).sum() >= 4:
-        ent_list.append((ID_OBJ, np.where(ok & (tr_seg == ID_OBJ))[0], ID_OBJ))
-    arm_q = np.where(ok & (tr_seg == ID_ARM))[0]
-    if len(arm_q) >= 8:                                                     # k-means sub-parts
-        from sklearn.cluster import KMeans
-        kk = min(3, len(arm_q) // 4)
-        lab = KMeans(n_clusters=kk, n_init=4, random_state=0).fit_predict(
-            (tr3[Kf, arm_q] - tr3[0, arm_q]))
-        for c in range(kk):
-            qi = arm_q[lab == c]
-            if len(qi) >= 4:
-                ent_list.append((ID_ARM, qi, 50 + c))
-    for src_id, qi, out_id in ent_list:
-        gm = seg_g == src_id
-        if out_id >= 50:                                                    # arm sub-part: nearest-track split
-            d2 = ((uv_np[gm][:, None, :] - tr2[0][qi][None, :, :]) ** 2).sum(-1)
-            sub = np.zeros(gm.sum(), bool)
-            allq = np.concatenate([e[1] for e in ent_list if e[2] >= 50])
-            d2all = ((uv_np[gm][:, None, :] - tr2[0][allq][None, :, :]) ** 2).sum(-1)
-            owner = allq[d2all.argmin(1)]
-            sub = np.isin(owner, qi)
-            idx = np.where(gm)[0][sub]
-            seg_final[idx] = out_id
-        else:
-            idx = np.where(gm)[0]
-        X0 = tr3[0][qi]
+    g_np = g0.means.numpy()
+    # target: trimmed Kabsch (rigid)
+    qo = np.where(tr_seg == ID_OBJ)[0]
+    if len(qo) >= 4:
+        idx_o = np.where(seg_final == ID_OBJ)[0]
+        X0 = tr3[0][qo]
         for tt in range(1, Kf + 1):
-            R, tv = trimmed_kabsch(X0, tr3[tt][qi])
-            traj[tt, idx] = g0.means.numpy()[idx] @ R.T + tv
+            R, tv = trimmed_kabsch(X0, tr3[tt][qo])
+            traj[tt, idx_o] = g_np[idx_o] @ R.T + tv
+    # robot: non-rigid k-NN inverse-distance transfer + k-means SUB-IDS (for entity-LBS binding only)
+    arm_q = np.where(ok & (tr_seg == ID_ARM))[0]
+    if len(arm_q) >= 8:
+        idx_a = np.where(seg_final == ID_ARM)[0]
+        d2 = ((uv_np[idx_a][:, None, :] - tr2[0][arm_q][None, :, :]) ** 2).sum(-1)   # [Na,Qa]
+        nn = np.argsort(d2, axis=1)[:, :3]
+        wgt = 1.0 / np.clip(np.take_along_axis(d2, nn, axis=1), 1e-6, None)
+        wgt = wgt / wgt.sum(1, keepdims=True)                                        # [Na,3]
+        for tt in range(1, Kf + 1):
+            dtr = tr3[tt][arm_q] - tr3[0][arm_q]                                     # [Qa,3]
+            traj[tt, idx_a] = g_np[idx_a] + (wgt[..., None] * dtr[nn]).sum(1)
+        from sklearn.cluster import KMeans
+        kk = min(4, len(arm_q) // 4)
+        lab = KMeans(n_clusters=kk, n_init=4, random_state=0).fit_predict(tr3[Kf, arm_q] - tr3[0, arm_q])
+        owner = lab[d2.argmin(1)]
+        seg_final[idx_a] = 50 + owner
     is_obj = seg_final == ID_OBJ
     obj_disp = np.linalg.norm(traj[Kf][is_obj] - traj[0][is_obj], axis=-1)
+    subids = sorted(int(i) for i in np.unique(seg_final) if i >= 50)
     print(f"[clip] N={N} obj_gauss={int(is_obj.sum())} obj disp median={np.median(obj_disp)*100:.1f} "
-          f"(StV2 units) | arm sub-parts={[e[2] for e in ent_list if e[2]>=50]}", flush=True)
+          f"(StV2 units x100) | arm sub-ids={subids}", flush=True)
 
     gt_rgb = (vt.permute(0, 2, 3, 1).cpu().numpy()).astype(np.uint8)        # [T,h,w,3]
     save = {"means": g0.means, "quats": g0.quats, "scales": g0.scales,

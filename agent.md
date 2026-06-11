@@ -1201,3 +1201,13 @@ agibot_video_gt.py 加运动:CoTracker 网格(1008点)+ Pi3 canonical 点图 3D 
 3. ✗ **臂刚性化涂抹**：k=3 子部件对关节臂太粗（t12 青色云漂移走样）。修法：更细子部件/逐帧重聚类，或臂放弃刚性化、直接 nearest-track 位移监督（schema 的 traj 本就支持非刚性）。
 
 **结论**：StV2 原始轨迹干净（§81），损失在"逐实体刚性化"。批量生成（20 clip）前先修这两点。R3 剩：clip-builder v1.1（上述两修）、m6 digital-world 配对、m7 MoSca 校验。R4 备料：libero_90 重启下载中（重试循环,已 1715 mp4）。
+
+## §83 R3 clip-builder v1.1：两缺陷修复（持握物仲裁 + 臂非刚性转移）；残留同类实例渗漏
+
+v1.1 双修（agibot_clip_stv2.py）：
+1. **持握物仲裁**：GD 指令名词("held (\w+)"→cucumber)在 frame0+末帧出框，**target = mover ∩ noun-box**（6/18 movers 命中）→ 从 robot lump 中按邻近 moving tracks 切出目标高斯。**结果：obj_gauss=3392、位移中位 41.4cm（吻合 §81 mover 簇；v1 是静止货架物 0.2cm）**。
+2. **臂非刚性化**：放弃 k-means 刚性子部件轨迹，改 **3-NN 逆距离加权的轨迹位移转移**（StV2 原始轨迹本来就干净）；k-means 子 id(50-53) 仅留给 entity-LBS 绑定。审核图 v1 的涂抹云消失，青色随臂走。
+
+**审核图（viz/agibot/r3_clip_stv2_v11.png）**：红色目标主簇 t0(夹爪/货架顶)→t12(购物袋) 连贯移动 ✓；臂干净 ✓。**残留（v1.2 todo）**：货架同类黄瓜少量误并入目标（同类实例歧义：GD 框叠到 mover 2D 路径附近的静止同类）→ 修法：carve 时要求该高斯邻近的 track 自身在动（运动一致性过滤），或限制 carve 半径/限定包含 moving tracks 的那个框。
+
+**R3 状态：m1✓ m2-redo✓ m3✓ m4✓ m5✓ clip-v1.1✓(可用,留 v1.2 小修) | 剩：v1.2 同类渗漏修 → 批量 20 clip → m7 MoSca 抽查 → R4 共训。m6(digital-world 配对)降级为可选（标定可从 EEF 校准替代）。**
