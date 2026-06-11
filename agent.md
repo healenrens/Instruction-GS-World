@@ -1252,3 +1252,12 @@ v12mix（56 sim + 25 real train + 6 heldreal，resume v11mag，2500 步 0 跳过
 
 **v14erot 启动即崩（exit=1, 45s）**：autocast 混精度——DiT 输出 xr 是 fp32（LayerNorm autocast 规则回 fp32），erot_val(xr) 是 bf16（Linear），`alpha.to(xr.dtype)` 选错基准 → f32 源 vs bf16 ro 的 index_add_ 冲突。**修复**：alpha 对齐 val.dtype。重启成功（s0 正常）。bases 头无此模式（一直在跑）。
 **当前**：v14erot(卡0-1, 1500步~3h) + v14bases(卡2-3, 3000步~6h) 并行训练中；编排器等 bases 结束后自动评估两者（erot 届时已完成 → ckpt_last 正确）。
+
+## §89 v14 旋转架构 A/B 终评：双判负（第 5/6 次结构化运动失败）；"逐点平移场不可替代"定律成形
+
+公平对照（补测 v12 RAW + v14erot+投影）后的 sim heldseed 矩阵：v12 RAW 12.2cm/29.7°/Acc .36；v12+投影 12.4/19.7°/.37；**v14erot RAW 16.2/34.3°/.18（全面差于基线）**，+投影 16.0/28.2°/.18；**v14bases(pure) 40.9cm/60.4°/.00 + langswap 方向 −0.14（v8-ent 同款方向崩溃签名）**；heldreal 同样（erot rot 48.8°≈信号 48.7°=零捕捉；bases 过冲 1.37×）。两套训练本身都健康（0 跳过——detach_state_rot 治住了递归爆炸；§86 的数值诊断是对的），**但学出来的旋转是噪声/有害**。
+
+**六次结构化运动尝试全负的统一规律**（v8-ent 特征池化、V3 v-Kabsch 在环、R2 omega 在环、w_rot↑、§87-A erot、§87-B bases-pure）：**逐控制点平移场是本架构唯一可靠的运动载体**——结构化/低秩/实体级运动要么训练爆炸（在环投影/强权重）、要么替换场后杀方向（池化/低秩）、要么叠加后注入噪声（erot）。**几何结构唯一稳定的施加点 = 推理期投影**（v12+omega-mean：29.7→19.7°，仍是最佳旋转处理）。
+
+**旋转的剩余可行杠杆（非架构）**：(1) **旋转丰富数据**——现数据旋转贫乏（17.5°中位 → 杠杆臂位置信号 ~1.5cm，埋在 12cm EPE 里）；libero_goal 抽屉/旋钮 90° 弧 → 位置 L1 本身就携带强旋转梯度给现有场（fps20 注意 WIN=96）。(2) bases-residual 模式（已实现未测，一个 flag）。(3) 更长训练。
+**生产模型不变 = libero_v12_rigid。** v14erot/v14bases ckpt 保留作记录。
