@@ -1133,3 +1133,15 @@ v11mag = resume v9lang + `--w_mag 0.5`，settle 1500 步（0 跳过）。eval_3d
 
 **重大发现**：eval_3d 加 GT-rot 列 → **heldseed GT-rot 中位 17.5°**——**pick-place 物体真的在转**（抓起/放下时倾斜），R0"伪旋转"框架错误。omega-mean 把 rot-err 31.9→**19.0°**（最干净的 epi040_c 仅 **4.8°**），但 5°5cm 仍 0：模型预测的旋转幅度对、方向/量不够准；且 GT 旋转本身含伪 GT 噪声（Procrustes on tracked points，小位移 clip 病态 epi240_e 82°）。
 **重估 R2**：(1) omega-mean 是对的旋转源（严格改进 + 可训练），ship 为默认；(2) "原始投票即刚性"现可实现——训练时开 rigid_agg(omega-mean) 让 raw votes 直接刚性（V3 做不到、现在能）；(3) 干净旋转评估需 LIBERO-goal 抽屉/旋钮（R3/R4 数据），libero_object 的入射旋转太噪。
+
+## §75 R2 验收：omega-mean 旋转推理投影有效；in-loop 训练再次失败（V3 教训重演）；5°5cm 待干净数据
+
+omega-mean rigid_agg（§74）作两种用法：
+- **推理投影（有效，ship）**：v11mag + omega-mean → rot-err 31.9→**19.0°**（最干净 clip 4.8°）、mag 0.85×/0.51× 保持、coherence 0.07cm。比 v-Kabsch 旋转源严格更好。
+- **训练在环（失败）**：v11rigid（resume v11mag + rigid_agg=1 训练）前 20 步干净、之后退化成**持续非有限梯度（1068 跳过/1160 步）**——和 V3 同类失败。omega-mean 去了 SVD 但 12 步 rollout 的旋转梯度累积仍不稳。已杀。**第三次印证：刚性投影该在推理后处理，不该回训练环。**
+
+**R2 判定（部分达成）**：架构修复（旋转源 = supervised omega-mean）正确且已 ship；"原始投票即刚性"经训练实现的路再次失败（接受推理投影为底线）。**5°5cm 仍 0**——因 (a) 模型旋转预测未够准，(b) libero_object 入射旋转的伪 GT 噪声大（GT-rot 17.5° 但小位移 clip 病态）。真正的旋转达标需 **LIBERO-goal 抽屉/旋钮干净旋转数据 + 更强旋转监督**，并入 R3/R4。
+
+**生产模型 = `checkpoints/libero_v11_rigid`**（v11mag 权重 + rigid_agg=1 omega-mean，12GB）：R0 暴露 + R1 幅度修复(塌缩 0.63→0.91×、sel 0.75→1.00) + R2 旋转源修复(31.9→19°) + coherence。取代 libero_v9lang_rigid 为当前最佳。
+
+**v11 计划进度**：R0 ✓、R1 ✓、R2 ✓(架构修复 ship,5°5cm 待干净数据)、R3 真实视频未开始(侦察✓)、R4 未开始。
