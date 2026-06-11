@@ -330,6 +330,65 @@ def entity_rigidity_loss(pred_ctrl, init, seg_ctrl, vis=None, min_pts: int = 4,
     return tot / max(cnt, 1)
 
 
+def entity_rot_position_loss(erot_steps, traj_full, seg_ctrl, vis_full=None,
+                             mover_thresh: float = 0.01, eps: float = 1e-6):
+    """§87-A POSITION-SPACE entity-rotation supervision (no SO(3) metric, no SVD on predictions).
+
+    erot_steps: list over K steps of (R_e [E,3,3] PREDICTED per-step entity rotations, uniq [E]).
+    traj_full:  [K+1,M,3] exact GT control trajectory (incl. init at index 0).
+    seg_ctrl:   [M] entity ids (the head's uniq comes from torch.unique => sorted; same here).
+
+    Supervises the CUMULATIVE rotation with a DETACHED PREFIX (Rc_t = R_t @ sg(Rc_{t-1})): each
+    step's head output gets a direct gradient from the cumulative target WITHOUT the K-step chained
+    Jacobian (the §86 explosion mechanism). Position-space residual (meters, movers only):
+        L = mean_i | Rc_t (x0_i - c0) - (xt_i - ct) |_1
+    The GT side needs NO Kabsch: (xt - ct) IS the GT rotated offset field (per-entity-rigid GT)."""
+    K = len(erot_steps)
+    if K == 0:
+        return traj_full.new_zeros(())
+    uniq = erot_steps[0][1]
+    seg = seg_ctrl.view(-1)
+    tot = traj_full.new_zeros(())
+    cnt = 0
+    Rc = None
+    for t in range(1, K + 1):
+        R_t = erot_steps[t - 1][0].float()
+        Rc = R_t if Rc is None else torch.bmm(R_t, Rc.detach())     # detached-prefix cumulative
+        for k, e in enumerate(uniq.tolist()):
+            if e == 0:
+                continue                                            # background
+            m = seg == e
+            if int(m.sum()) < 4:
+                continue
+            X0 = traj_full[0][m].float()
+            Xt = traj_full[t][m].float()
+            if float((Xt - X0).norm(dim=-1).mean()) < mover_thresh:
+                continue                                            # static entity: the gate's job
+            pred_off = (X0 - X0.mean(0)) @ Rc[k].T                  # Rc (x0 - c0)
+            tot = tot + (pred_off - (Xt - Xt.mean(0))).abs().mean()
+            cnt += 1
+    return tot / max(cnt, 1)
+
+
+def coef_seg_ce_loss(coef, seg_ctrl, eps: float = 1e-6):
+    """§87-B weak prior: controls of one entity should prefer one basis. Maps each non-bg entity to
+    basis (rank % B), CE on the blend coefficients. Weak (w~0.1) — a prior, not a constraint."""
+    import torch.nn.functional as F
+    seg = seg_ctrl.view(-1)
+    Bb = coef.shape[-1]
+    target = torch.full((seg.shape[0],), -1, dtype=torch.long, device=coef.device)
+    r = 0
+    for e in torch.unique(seg).tolist():
+        if e == 0:
+            continue
+        target[seg == e] = r % Bb
+        r += 1
+    m = target >= 0
+    if int(m.sum()) == 0:
+        return coef.new_zeros(())
+    return F.nll_loss(torch.log(coef[m].float().clamp_min(eps)), target[m])
+
+
 def relevance_bce_loss(p_rel, is_obj_ctrl, objmask, eps: float = 1e-6):
     """§54 the language-causal supervision: push the per-control relevance logit r toward `is_obj`
     (the instruction-named object's controls = 1, the OTHER objects = 0), ONLY over object-class

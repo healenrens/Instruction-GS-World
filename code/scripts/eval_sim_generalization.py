@@ -197,7 +197,11 @@ def main():
                                  entity_lbs=bool(ck.get("entity_lbs", 0)),              # OFF -> §49 ckpts mis-evaluated
                                  rel_head=bool(ck.get("rel_head", 0)),
                                  entity_head=bool(ck.get("entity_head", 0)),
-                                 rigid_agg=bool(ck.get("rigid_agg", 0))).to(dev).eval()
+                                 rigid_agg=bool(ck.get("rigid_agg", 0)),
+                                 entity_rot=bool(ck.get("entity_rot", 0)),
+                                 motion_bases=int(ck.get("motion_bases", 0)),
+                                 bases_mode=str(ck.get("bases_mode", "pure")),
+                                 detach_state_rot=bool(ck.get("detach_state_rot", 0))).to(dev).eval()
     miss, unexp = model.load_state_dict(ck["model"], strict=False)
     print(f"[eval] ckpt={args.ckpt} step={ck.get('step')} spatial={spatial} cond={cond_mode} "
           f"dyn_gate={dyn_gate} sem_dim={sem_dim} gate_uses_sem={gate_uses_sem} M={M} | "

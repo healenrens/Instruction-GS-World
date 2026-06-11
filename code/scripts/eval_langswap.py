@@ -33,7 +33,11 @@ def build_model(ck, force_rigid_agg=False):
                              sem_dim=ck.get("sem_dim", 0), gate_uses_sem=bool(ck.get("gate_uses_sem", 1)),
                              gate_entity_pool=bool(ck.get("gate_entity_pool", 0)), entity_lbs=bool(ck.get("entity_lbs", 0)),
                              rel_head=bool(ck.get("rel_head", 0)), entity_head=bool(ck.get("entity_head", 0)),
-                             rigid_agg=bool(ck.get("rigid_agg", 0)) or force_rigid_agg).cuda().eval()
+                             rigid_agg=bool(ck.get("rigid_agg", 0)) or force_rigid_agg,
+                             entity_rot=bool(ck.get("entity_rot", 0)),
+                             motion_bases=int(ck.get("motion_bases", 0)),
+                             bases_mode=str(ck.get("bases_mode", "pure")),
+                             detach_state_rot=bool(ck.get("detach_state_rot", 0))).cuda().eval()
     m.load_state_dict(ck["model"], strict=False)
     return m
 

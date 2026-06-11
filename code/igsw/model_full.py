@@ -61,6 +61,10 @@ class InstructGSWorldModel(nn.Module):
                                         # weighted-Kabsch SE(3) per entity (parameter-free; identity on a
                                         # rigid field => exact warm-start). Unlike entity_head it aggregates
                                         # in OUTPUT space (votes), so direction survives. Needs entity_lbs.
+        entity_rot: bool = False,       # §87-A: entity-level 6D rotation via attention readout
+        motion_bases: int = 0,          # §87-B: Shape-of-Motion low-rank SE(3) bases (0 = off)
+        bases_mode: str = "pure",       # 'pure' replaces per-control motion; 'residual' adds
+        detach_state_rot: bool = False, # §87: stop-grad quats into tokens (cut recurrent rot chain)
     ):
         super().__init__()
         self.encoder = QwenVLEncoder(qwen_path)   # frozen feature extractor (no LoRA)
@@ -86,7 +90,9 @@ class InstructGSWorldModel(nn.Module):
             self.layer_id_emb = nn.Parameter(torch.randn(n_l, d) * 0.02)
             self.aggregator = CrossAttention(d, agg_heads, ctx_dim=d)   # shared across layers
             self.agg_norm = nn.LayerNorm(d, eps=1e-6)
-        self.dynamics = GaussianDynamics(dyn_cfg, entity_head=bool(entity_head), rigid_agg=bool(rigid_agg))
+        self.dynamics = GaussianDynamics(dyn_cfg, entity_head=bool(entity_head), rigid_agg=bool(rigid_agg),
+                                         entity_rot=bool(entity_rot), motion_bases=int(motion_bases),
+                                         bases_mode=str(bases_mode), detach_state_rot=bool(detach_state_rot))
         self.n_control = n_control
         self.lbs_k = lbs_k
         # ---- per-control SPATIAL visual grounding (agent.md §37): each control samples the
@@ -155,6 +161,8 @@ class InstructGSWorldModel(nn.Module):
         # here we only record the flag so forward() routes seg + pooled relevance feats down.
         self.entity_head_on = bool(entity_head)
         self.rigid_agg = bool(rigid_agg)                         # §66 v10-rigid
+        self.entity_rot_on = bool(entity_rot)                    # §87-A
+        self.motion_bases_n = int(motion_bases)                  # §87-B
         if self.rigid_agg and not self.entity_lbs:
             import warnings
             warnings.warn("rigid_agg=True without entity_lbs=True: control-level rigidity will NOT "
@@ -369,8 +377,9 @@ class InstructGSWorldModel(nn.Module):
 
         # §54 entity-slot routing: pass the per-control seg ids + relevance feature so the dynamics can
         # pool a per-entity rigid SE(3) each step. resid_accum collects the per-step residual magnitude.
-        # seg ids feed the entity head AND the §66 rigid-agg layer (both need per-entity grouping).
-        ent_seg = seg_c if ((self.entity_head_on or self.rigid_agg) and seg_c is not None) else None
+        # seg ids feed the entity head, the §66 rigid-agg layer AND the §87-A entity-rot head.
+        ent_seg = seg_c if ((self.entity_head_on or self.rigid_agg or self.entity_rot_on)
+                            and seg_c is not None) else None
         ent_rel = rel_feat if (self.entity_head_on and rel_feat is not None) else None
         resid_accum = []
 
@@ -391,6 +400,7 @@ class InstructGSWorldModel(nn.Module):
         # LBS binding to ENTITY-AWARE — a dense point deforms only with its own entity's controls.
         roll = SCGSRollout(dense_g0, n_control=self.n_control, k=self.lbs_k, ctrl_idx=ctrl_idx,
                            dense_seg=(seg_per_g if (self.entity_lbs and seg_per_g is not None) else None))
+        self.dynamics.erot_log = [] if self.entity_rot_on else None     # §87-A per-step R_e record
         dense_states, deltas, ctrl_traj = roll.rollout(delta_fn, K, start_step=start_step)
         out = {
             "means": torch.stack([s.means for s in dense_states], 0),
@@ -405,6 +415,10 @@ class InstructGSWorldModel(nn.Module):
         }
         if resid_accum:                                        # §54 residual reg target (push motion -> entity SE3)
             out["resid_norm"] = torch.stack(resid_accum).mean()
+        if self.entity_rot_on and self.dynamics.erot_log:      # §87-A: per-step (R_e, uniq) for the rot loss
+            out["erot_steps"] = self.dynamics.erot_log
+        if self.motion_bases_n > 0 and self.dynamics.coef_last is not None:
+            out["coef"] = self.dynamics.coef_last              # §87-B: last-step blend coefficients
         # Exp-1: expose the per-control dynamics-gate logit (supervised by the free mover label in the
         # trainer) and the optional object-semantic embedding. At INFERENCE these are PREDICTED from the
         # Qwen patch feature alone (no GT needed) — the gate has already shaped out["v"]/["ctrl"] above.
