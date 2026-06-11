@@ -85,9 +85,14 @@ def main():
     Tt = eef.shape[0]
     segs = t.subtasks(EP)
     cand = [(float(np.linalg.norm(eef[min(int(s["end_frame"]), Tt - 1)] - eef[int(s["start_frame"])], axis=-1).max()),
-             int(s["start_frame"]), s.get("action_text", "")) for s in segs
-            if int(s.get("end_frame", 0)) - int(s.get("start_frame", 0)) >= WIN]
-    _, a, instruction = sorted(cand, reverse=True)[0]
+             int(s["start_frame"]), int(min(s.get("end_frame", 0), Tt - 1)), s.get("action_text", ""))
+            for s in segs if int(s.get("end_frame", 0)) - int(s.get("start_frame", 0)) >= WIN]
+    _, a, seg_end, instruction = sorted(cand, reverse=True)[0]
+    # v1.4 window anchor: 'retrieve/pick' segments START with the reach (object still static on the
+    # shelf -> 12/20 v1.3 fails with target disp ~0); the grasp-and-lift is at the segment END.
+    # 'place the held X' moves the object from the start -> keep start-anchored.
+    if any(kw in instruction.lower() for kw in ("retrieve", "pick", "grasp", "take", "fetch", "get")):
+        a = max(int(a), int(seg_end) - WIN)
     a = max(0, min(a, Tt - WIN - 1))
     widx = np.clip(np.unique(np.linspace(a, a + WIN, K + 1).round().astype(int)), 0, Tt - 1)
     Kf = len(widx) - 1
