@@ -1145,3 +1145,11 @@ omega-mean rigid_agg（§74）作两种用法：
 **生产模型 = `checkpoints/libero_v11_rigid`**（v11mag 权重 + rigid_agg=1 omega-mean，12GB）：R0 暴露 + R1 幅度修复(塌缩 0.63→0.91×、sel 0.75→1.00) + R2 旋转源修复(31.9→19°) + coherence。取代 libero_v9lang_rigid 为当前最佳。
 
 **v11 计划进度**：R0 ✓、R1 ✓、R2 ✓(架构修复 ship,5°5cm 待干净数据)、R3 真实视频未开始(侦察✓)、R4 未开始。
+
+## §76 R3 数据侦察：AgiBot digital-world 有标定 + 物体 6D pose（可能升级伪 GT→真 GT）
+
+R3 真实视频数据源勘探（AgiBot 已在服务器，DROID 用户否决）：
+- **主 lerobot**（`agibot-world-beta-lerobot`，reader 已验证）：8 cam RGB(AV1)+ **真实 EEF 6-DOF**(observation.states.end.position[T,2,3]+orientation[T,2,4])+gripper+细粒度子任务语言(action_config)。**无标定、无物体 GT**。
+- **digital-world**（`agibot-digital-world` 2.6TB，每 episode = task_info.json + proprio_states.h5 + parameter.json）：**parameter.json 有相机标定**（每 cam intrinsic fx/fy/ppx/ppy + extrinsic pose[4x4]）——主 dump 缺的标定这里有！+ proprio_states.h5(全本体感知)+ task_info.json 物体 `omni6DPose_*` id(6D pose 基准物体)。**无 RGB(在主 lerobot)、物体 per-frame pose 待确认**。digital-world 用 uuid、主 lerobot 用 task/episode——配对关系待查。
+- **R3 评估分层（据此）**：操作器(gripper/arm) = 真实 EEF GT(严格 5°5cm/EPE3D)；物体 = 伪 GT(StV2/Pi3+CoTracker)，**若 digital-world 配对成功 + 物体 per-frame pose 存在 → 物体也升级为真 GT**(omni6DPose)。标定若可用 → 度量深度 + EEF 投影 + 多视角解锁。
+- **R3 里程碑1（在建）**：主 lerobot 一个操作 episode → 头 cam RGB 窗 + EEF + 语言 → Pi3 抬升 3DGS → 存 clip + 目检。证明真实视频→3DGS+真实 EEF 管线通。digital-world 标定/物体GT 为下一步增强。
