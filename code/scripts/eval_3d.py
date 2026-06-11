@@ -65,9 +65,11 @@ def main():
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--data", default="data/libero_pi3_v2")
     ap.add_argument("--split", default="heldseed")
+    ap.add_argument("--force_rigid_agg", type=int, default=0,
+                    help="§66: force rigid projection ON (eval a base ckpt in the production config)")
     args = ap.parse_args()
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    mdl = build_model(ck)
+    mdl = build_model(ck, force_rigid_agg=bool(args.force_rigid_agg))
     clips = sorted(glob.glob(os.path.join(args.data, f"*_{args.split}.pt")))
     print(f"ckpt={args.ckpt} rigid_agg={ck.get('rigid_agg', 0)} | {len(clips)} {args.split} clips\n"
           f"{'clip':<26} {'GTdisp':>7} {'EPE3D':>7} {'magR':>6} {'rotErr':>7} {'5°5cm':>6} "

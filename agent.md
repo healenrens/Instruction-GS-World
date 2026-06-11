@@ -1097,3 +1097,14 @@ v10-rigid 代码全部保留（flag 默认关、可回退）；test_rigid_agg 5/
 4. **旋转误差 27-28°（首次测量）**：模型给纯平移加了大旋转。coherence 好(0.01cm)说明 rigid_agg 生效——**物体是刚性的，但刚性地错（错幅度+伪旋转）**。caveat：小位移 clip 的 Kabsch 旋转病态(epi240_e GT5cm→83°)，但大位移 clean clip 真有伪旋转(epi100_c GT32cm→11°、epi40_c GT29cm→22°)；未来旋转指标应门控 GT disp>10cm。
 
 **R0 COVERAGE 门禁 = 通过**：套件全跑通、各指标出数、复现塌缩簇(P10 0.10×)、旋转首次有数。"暴露完整即过——它确实难看，且就该难看。"**用户判断（效果未达标 / 2D 无意义）被 3D 指标完全证实。** 现有诚实 3D 基线，R1 目标量化：mag 中位 0.63→≥0.85、P10 0.10→≥0.5 + 处理 28° 伪旋转。
+
+## §72 R1 诊断：幅度塌缩 = dyn-gate 在真实 mover 上关闭（非 head 欠预测）
+
+`_diag_collapse.py` 对照塌缩 clip vs 健康 clip，dump mover 实体的 gate=sigmoid(p_dyn)、rel、predMag/gtMag：
+| | gate(T) | predMag/gtMag |
+|---|---|---|
+| 塌缩(epi100/110/130/160_c) | **0.08-0.15**（gate 关 ~90%）| 0.09-0.14× |
+| 健康(epi0/30_c, epi240/330) | **0.75-1.00**（gate 开）| 0.89-1.24× |
+
+**根因定位**：head 的 raw v 正常，但 **dyn-gate 把 25-32cm 的真 mover 误判为静止**→ v×0.1 → 塌缩。rel(T)=0.69-0.80 还行，但 pooled p_dyn 的**视觉 dyn_logit 极负**，+rel 也开不动。swap/true 0.3-0.44 的真相：gate(T)=0.11、gate(W)=0.04 都很小，比值是噪声不是真泄漏。
+**修法（证据驱动）**：`mover_magnitude_loss`（losses.py:87，多步，§44 建过但从未入 v9 配方）直接惩罚欠幅，梯度经 gate 流回 → 在 GT 动的地方把 gate 顶开（GT 静止处 target~0 → 不破坏静止抑制）。R1 = resume v9lang + --w_mag 重训 → eval_3d 看 mag-ratio。
