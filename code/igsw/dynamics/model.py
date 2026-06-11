@@ -262,8 +262,8 @@ class GaussianDynamics(nn.Module):
             lmax = torch.full((Er,), -1e30, device=xr.device).index_reduce_(0, inv_r, logit_a, "amax")
             ex = torch.exp(logit_a - lmax[inv_r])
             den = torch.zeros(Er, device=xr.device).index_add_(0, inv_r, ex).clamp_min(1e-12)
-            alpha = (ex / den[inv_r]).to(xr.dtype)                    # [N], sums to 1 per entity
-            val = self.erot_val(xr)                                   # [N,d]
+            val = self.erot_val(xr)                                   # [N,d] (bf16 under autocast)
+            alpha = (ex / den[inv_r]).to(val.dtype)                   # match val: xr may be fp32 (post-LN)
             ro = torch.zeros(Er, val.shape[-1], device=xr.device, dtype=val.dtype)
             ro.index_add_(0, inv_r, alpha[:, None] * val)             # [Er,d] attention readout
             d6_e = self.erot_mlp(ro)                                  # [Er,6] zero-init
