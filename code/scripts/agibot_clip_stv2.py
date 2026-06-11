@@ -36,6 +36,23 @@ HEAD = "observation.images.head"
 ID_ARM, ID_OBJ = 8, 1
 
 
+CONTAINERS = {"shelf", "bag", "cart", "basket", "table", "plastic", "shopping"}
+
+
+def parse_target_noun(instr: str) -> str:
+    """Object noun from AgiBot action_text. Handles 'Place the held X into...' and
+    'Retrieve X from the shelf.' (v1.2's naive split grabbed 'shelf.'). Container words banned."""
+    import re
+    s = instr.lower().rstrip(".")
+    for p in (r"held ([a-z]+)",
+              r"(?:retrieve|pick up|pickup|grasp|take|pick|fetch|get)\s+(?:the\s+)?([a-z]+)",
+              r"place\s+(?:the\s+)?([a-z]+)"):
+        m = re.search(p, s)
+        if m and m.group(1) not in CONTAINERS:
+            return m.group(1)
+    return "object"
+
+
 def trimmed_kabsch(X, Y, trim=0.25):
     """Rigid R,t mapping X->Y with worst-`trim` residuals dropped + refit. [P,3] each."""
     def fit(A, B):
@@ -91,11 +108,31 @@ def main():
     del front
     torch.cuda.empty_cache()
 
+    # ---- noun boxes at frame-0 (BEFORE the tracker) -> seed extra queries inside them ---------
+    # v1.3: the 27x27 grid can miss a SMALL held object entirely (ep2/3: 0-1 tracks on the
+    # cucumber). Seeding a 5x6 query grid inside each noun box guarantees tracks ON the object.
+    from openvocab_seg import load_models, _gd_detect
+    from PIL import Image
+    noun = parse_target_noun(instruction)
+    models = load_models(dev)
+    sx, sy = W0 / float(w), H0 / float(h)
+    nboxes0 = [d["box"] for d in _gd_detect(models, Image.fromarray(frames[0]), [noun],
+                                            box_thresh=0.2, text_thresh=0.2)][:3]
+    seeds = []
+    for b in nboxes0:
+        x0b, y0b, x1b, y1b = [float(v) for v in b]                          # original px -> model px
+        gy, gx = np.meshgrid(np.linspace(y0b / sy + 2, y1b / sy - 2, 5),
+                             np.linspace(x0b / sx + 2, x1b / sx - 2, 6), indexing="ij")
+        seeds.append(np.stack([gx.ravel(), gy.ravel()], -1))
+    seeds = np.concatenate(seeds, 0) if seeds else np.zeros((0, 2))
+    print(f"[clip] noun={noun!r} boxes@f0={len(nboxes0)} seeded queries={len(seeds)}", flush=True)
+
     # ---- StV2 tracker: world tracks + c2w -----------------------------------------------------
     model = Predictor.from_pretrained("Yuxihenry/SpatialTrackerV2-Offline").cuda().eval()
     model.spatrack.track_num = 756
     grid_pts = get_points_on_a_grid(27, (h, w), device="cpu")
-    query_xyt = torch.cat([torch.zeros_like(grid_pts[:, :, :1]), grid_pts], dim=2)[0].numpy()
+    grid_all = np.concatenate([grid_pts[0].numpy(), seeds], 0)
+    query_xyt = np.concatenate([np.zeros((len(grid_all), 1)), grid_all], 1)
     with torch.amp.autocast("cuda", dtype=torch.bfloat16):
         (c2w_traj, intrs_o, point_map, conf_depth, track3d_pred, track2d_pred,
          vis_pred, conf_pred, video) = model.forward(
@@ -136,15 +173,9 @@ def main():
 
     # ---- v1.1 TARGET = HELD-OBJECT arbitration: moving tracks inside the instruction-noun box --
     # (the held object rides INSIDE the gripper -> openvocab lumps it into robot id8; v1's
-    #  per-openvocab-entity motion vote therefore picked a static shelf item. Fix: GD the noun on
-    #  frame0 AND lastframe (after placement the object separates), target = mover ∩ noun-box.)
-    import re
-    from openvocab_seg import load_models, _gd_detect
-    m_n = re.search(r"held ([a-z]+)", instruction.lower())
-    noun = m_n.group(1) if m_n else (instruction.lower().split(" the ")[1].split()[0]
-                                     if " the " in instruction.lower() else "object")
-    models = load_models(dev)
-    from PIL import Image
+    #  per-openvocab-entity motion vote therefore picked a static shelf item. Fix: GD the noun
+    #  (parse_target_noun, v1.3) on frame0 AND lastframe, target = mover ∩ noun-box. The seeded
+    #  queries (v1.3) guarantee tracks ON the object even when the 27x27 grid misses it.)
     tgt_q = np.zeros(tr2.shape[1], bool)
     for fi in (0, Kf):
         dets = _gd_detect(models, Image.fromarray(frames[fi]), [noun], box_thresh=0.2, text_thresh=0.2)
