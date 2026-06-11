@@ -1237,3 +1237,11 @@ v12mix（56 sim + 25 real train + 6 heldreal，resume v11mag，2500 步 0 跳过
 
 **生产模型 = `checkpoints/libero_v12_rigid`**（真实可用）。**剩余前沿 = 旋转**（sim GT-rot 17.5° / real 48.7°，5°5cm 始终 0，R2 已定位为"训练学不进、投影从噪声 omega 取"——需干净旋转监督，是下一个主攻）。
 **v11 计划完成度**：R0✓ R1✓ R2✓(投影) R3✓ **R4 第一炮 ✓**(共训证明 real 可用)；R4 后半 = 词汇扩展(libero_90 已下 3.3G/7842mp4)+ 旋转主攻 + 规模化。
+
+## §86 R4 双轨：旋转实验(运行中) + 词汇扩展前置(libero_90 可载、18 新名词)
+
+**轨 A 旋转攻坚(运行中)**：orchestrate_rot.sh = resume v11mag、**w_traj_rot 0.2→1.0**、1000 步、eval_3d sim heldseed。测 R2 遗留假设"加强旋转监督能否降 rot-err"(sim 19° ≈ GT-rot 17.5°,即模型基本没捕捉旋转)。注:5°5cm 还受平移门控(EPE 10cm>5cm),但 rot-err 改善+正确旋转也会带动 EPE。
+
+**轨 B 词汇扩展前置(已确认可行)**：libero_90(3921 ep、fps20、73 任务)是 **LeRobot v2.1**,**AgiBotLeRobotTask 直接可读**(video_key=observation.images.image,decode 出 256² agentview,instruction 从 episodes.jsonl)——无需写新 loader。**18 个新名词**(book/red mug/white mug/black bowl/caddy + 空间指代 left/right/middle compartment)vs 现 8 名词。clip 生成路径=复用 agibot_clip_stv2 的"frames+instruction→StV2/Pi3→openvocab→运动仲裁→clip"(parse_target_noun 已支持"pick up the X and place..."),sim 无需 EEF/尺度。待轨 A 出结果后执行(GPU 让给旋转实验)。
+
+**生产模型链**:v9lang_rigid(R0基线)→ v11_rigid(R1+R2)→ **v12_rigid(R4 共训,真实可用,当前最佳)**。
