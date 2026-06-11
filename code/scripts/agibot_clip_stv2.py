@@ -31,8 +31,12 @@ from igsw.lifting.to_gaussians import points_to_gaussians                   # no
 
 TASK = os.environ.get("AGIBOT_TASK", "task_327")
 EP = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-WIN, K = 48, 12
-HEAD = "observation.images.head"
+# DATASET: "agibot" (real, EEF-windowed) | "libero90" (sim LeRobot v2.1, full-episode window, no EEF)
+DATASET = os.environ.get("CLIP_DATASET", "agibot")
+LIBERO90_ROOT = "/mnt/pfs/public/xuhaoming/instruct_gs_world/data/libero_90_lerobot"
+WIN, K = (48, 12) if DATASET == "agibot" else (40, 12)
+HEAD = "observation.images.head" if DATASET == "agibot" else "observation.images.image"
+OUT_TAG = "" if DATASET == "agibot" else "lib90_"
 ID_ARM, ID_OBJ = 8, 1
 
 
@@ -78,22 +82,29 @@ def main():
     from openvocab_seg import segment_frame_amg
 
     dev = "cuda"
-    root = next(r for r in list_tasks() if r.rstrip("/").endswith(TASK))
-    t = AgiBotLeRobotTask(root)
-    pq = t.read_parquet(EP, ["observation.states.end.position"])
-    eef = pq["observation.states.end.position"].reshape(-1, 2, 3)
-    Tt = eef.shape[0]
-    segs = t.subtasks(EP)
-    cand = [(float(np.linalg.norm(eef[min(int(s["end_frame"]), Tt - 1)] - eef[int(s["start_frame"])], axis=-1).max()),
-             int(s["start_frame"]), int(min(s.get("end_frame", 0), Tt - 1)), s.get("action_text", ""))
-            for s in segs if int(s.get("end_frame", 0)) - int(s.get("start_frame", 0)) >= WIN]
-    _, a, seg_end, instruction = sorted(cand, reverse=True)[0]
-    # v1.4 window anchor: 'retrieve/pick' segments START with the reach (object still static on the
-    # shelf -> 12/20 v1.3 fails with target disp ~0); the grasp-and-lift is at the segment END.
-    # 'place the held X' moves the object from the start -> keep start-anchored.
-    if any(kw in instruction.lower() for kw in ("retrieve", "pick", "grasp", "take", "fetch", "get")):
-        a = max(int(a), int(seg_end) - WIN)
-    a = max(0, min(a, Tt - WIN - 1))
+    if DATASET == "libero90":
+        import json
+        t = AgiBotLeRobotTask(LIBERO90_ROOT)                                # LeRobot v2.1 reader reuse
+        em = [json.loads(l) for l in open(os.path.join(LIBERO90_ROOT, "meta/episodes.jsonl"))]
+        instruction = em[EP]["tasks"][0]
+        Tt = int(em[EP]["length"])
+        a = max(0, (Tt - WIN) // 2)                                         # centered full-episode window
+    else:
+        root = next(r for r in list_tasks() if r.rstrip("/").endswith(TASK))
+        t = AgiBotLeRobotTask(root)
+        pq = t.read_parquet(EP, ["observation.states.end.position"])
+        eef = pq["observation.states.end.position"].reshape(-1, 2, 3)
+        Tt = eef.shape[0]
+        segs = t.subtasks(EP)
+        cand = [(float(np.linalg.norm(eef[min(int(s["end_frame"]), Tt - 1)] - eef[int(s["start_frame"])], axis=-1).max()),
+                 int(s["start_frame"]), int(min(s.get("end_frame", 0), Tt - 1)), s.get("action_text", ""))
+                for s in segs if int(s.get("end_frame", 0)) - int(s.get("start_frame", 0)) >= WIN]
+        _, a, seg_end, instruction = sorted(cand, reverse=True)[0]
+        # v1.4 window anchor: 'retrieve/pick' segments START with the reach (object still static on the
+        # shelf -> 12/20 v1.3 fails with target disp ~0); the grasp-and-lift is at the segment END.
+        if any(kw in instruction.lower() for kw in ("retrieve", "pick", "grasp", "take", "fetch", "get")):
+            a = max(int(a), int(seg_end) - WIN)
+        a = max(0, min(a, Tt - WIN - 1))
     widx = np.clip(np.unique(np.linspace(a, a + WIN, K + 1).round().astype(int)), 0, Tt - 1)
     Kf = len(widx) - 1
     frames = np.asarray(t.decode_frames(EP, HEAD, widx.tolist()))
@@ -273,7 +284,7 @@ def main():
             "is_obj": torch.from_numpy(is_obj), "n_fill": 0,
             "backend": "stv2", "epi": EP, "task": TASK, "split": "real"}
     os.makedirs(os.path.join(WS, "data/_agibot"), exist_ok=True)
-    out_pt = os.path.join(WS, f"data/_agibot/clip_stv2_ep{EP}.pt")
+    out_pt = os.path.join(WS, f"data/_agibot/clip_stv2_{OUT_TAG}ep{EP}.pt")
     torch.save(save, out_pt)
     print(f"[clip] saved {out_pt}", flush=True)
 
