@@ -96,9 +96,28 @@ def main():
     N = len(g0)
     print(f"[agibot] g0: N={N} Gaussians from real head-cam frame-0", flush=True)
 
+    # ---- milestone-2: motion pseudo-GT via CoTracker (2D) lifted by Pi3 pointmaps (3D, canonical=cam0) ----
+    from igsw.lifting.tracking import CoTrackerTracker, sample_pointmaps_at
+    rel = np.stack([np.linalg.inv(poses[0]) @ poses[t] for t in range(Kf + 1)]).astype(np.float32)  # cam_t->cam0
+    canon = (np.einsum("tij,thwj->thwi", rel[:, :3, :3], local)
+             + rel[:, None, None, :3, 3]).astype(np.float32)             # [T,Hm,Wm,3] canonical pointmaps
+    ct = CoTrackerTracker(device=dev)
+    frT = torch.from_numpy(frames).permute(0, 3, 1, 2).float()           # [T,3,H0,W0]
+    gy, gx = torch.meshgrid(torch.linspace(20, H0 - 20, 28), torch.linspace(20, W0 - 20, 36), indexing="ij")
+    q = torch.stack([gx.flatten(), gy.flatten()], -1).to(dev)            # [Q,2] in original res
+    tracks, visb = ct.track(frT, q)                                      # [T,Q,2],[T,Q]
+    tracks_m = tracks.cpu() * torch.tensor([Wm / float(W0), Hm / float(H0)])
+    traj3d = sample_pointmaps_at(torch.from_numpy(canon), tracks_m)      # [T,Q,3] canonical
+    disp = (traj3d[Kf] - traj3d[0]).norm(dim=-1)                          # [Q]
+    mv = disp > 0.04
+    print(f"[agibot] motion: Q={len(q)} tracked | movers(>4cm)={int(mv.sum())} "
+          f"median-disp={disp.median()*100:.1f}cm max={disp.max()*100:.1f}cm "
+          f"(object pseudo-GT 3D trajectory)", flush=True)
+
     # ---- save minimal clip + the REAL EEF GT for the window ----
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     save = dict(means=g0.means.cpu(), colors=g0.colors.cpu(), uv=uv.cpu(),
+                traj_track=traj3d.cpu(), track_uv=tracks[0].cpu(), track_disp=disp.cpu(),  # motion pseudo-GT
                 eef_pos=torch.from_numpy(eef[widx]).float(),                # [Kf+1,2,3] REAL GT
                 eef_ori=torch.from_numpy(pq[EEF_ORI].reshape(-1, 2, 4)[widx]).float(),
                 grip=torch.from_numpy(pq[GRIP].reshape(-1, 2)[widx]).float(),
@@ -108,17 +127,23 @@ def main():
     print(f"[agibot] saved {args.out}", flush=True)
 
     # ---- validation visual: RGB t0/tK | lifted 3DGS point-cloud | EEF 3D trajectory ----
-    fig = plt.figure(figsize=(16, 4))
-    ax = fig.add_subplot(1, 4, 1); ax.imshow(frames[0]); ax.axis("off"); ax.set_title(f"head RGB t0\n{text[:34]}", fontsize=8)
-    ax = fig.add_subplot(1, 4, 2); ax.imshow(frames[Kf]); ax.axis("off"); ax.set_title(f"head RGB t{Kf}", fontsize=8)
+    fig = plt.figure(figsize=(20, 4))
+    ax = fig.add_subplot(1, 5, 1); ax.imshow(frames[0]); ax.axis("off"); ax.set_title(f"head RGB t0\n{text[:32]}", fontsize=8)
+    ax = fig.add_subplot(1, 5, 2); ax.imshow(frames[Kf]); ax.axis("off"); ax.set_title(f"head RGB t{Kf}", fontsize=8)
     # 3DGS point cloud (project means by frame-0 pinhole-ish: just (uv) colored)
-    ax = fig.add_subplot(1, 4, 3)
+    ax = fig.add_subplot(1, 5, 3)
     col = g0.colors.cpu().numpy().clip(0, 1)
     uvn = uv.cpu().numpy()
     ax.scatter(uvn[:, 0], uvn[:, 1], s=1, c=col, linewidths=0)
     ax.set_xlim(0, Wm); ax.set_ylim(Hm, 0); ax.axis("off"); ax.set_title(f"Pi3 3DGS N={N}", fontsize=8)
+    # motion pseudo-GT: tracked points on frame-0, colored by 3D displacement (movers = bright)
+    ax = fig.add_subplot(1, 5, 4); ax.imshow((frames[0].astype(np.float32) * 0.45).astype(np.uint8))
+    tk0 = tracks[0].cpu().numpy(); dd = disp.cpu().numpy()
+    sc = ax.scatter(tk0[:, 0], tk0[:, 1], s=8, c=dd * 100, cmap="hot", vmin=0, vmax=15, linewidths=0)
+    ax.set_xlim(0, W0); ax.set_ylim(H0, 0); ax.axis("off")
+    ax.set_title(f"motion pseudo-GT\nmovers>4cm: {int(mv.sum())}/{len(q)}", fontsize=8)
     # EEF 3D trajectory (dual-arm), top-down xy
-    ax = fig.add_subplot(1, 4, 4)
+    ax = fig.add_subplot(1, 5, 5)
     ew = eef[widx]
     for arm, c in [(0, "tab:blue"), (1, "tab:red")]:
         ax.plot(ew[:, arm, 0], ew[:, arm, 1], "-o", ms=2, c=c, label=f"arm{arm}")

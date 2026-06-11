@@ -1159,3 +1159,9 @@ R3 真实视频数据源勘探（AgiBot 已在服务器，DROID 用户否决）�
 `code/scripts/agibot_video_gt.py`：读 task_327 ep0（"Place the held cucumber into the plastic bag in the shopping cart"）→ 按 EEF 位移挑运动子任务窗 [187,235] → decode 头 cam RGB(640x480,13帧) → Pi3 抬升 **574x434、相机 ego 移动、N=140572 高斯**（超市场景/果蔬可辨）→ 存 clip(means/colors/uv + **真实 EEF 6-DOF[Kf+1,2,3]+ori+grip** + 子任务语言) + 目检图 `viz/agibot/r3_m1.png`（RGB t0/tK | Pi3 3DGS 点云 | 双臂 EEF xy 轨迹）。**真实视频→3DGS + 真实 EEF GT 基础打通。**
 
 **R3 剩余（多日）**：(2) 运动伪 GT（StV2 集成或 Pi3+CoTracker 出 object 3D 轨迹）；(3) openvocab seg frame-0（无 GT mask）；(4) **EEF 尺度校准**（EEF 米 ↔ Pi3 gauge，gripper 2D track 对齐 或 digital-world 标定）；(5) 操作器 5°5cm/EPE3D vs 真实 EEF；(6) digital-world 配对（标定+omni6DPose 物体 GT）；(7) MoSca 黄金子集校验伪 GT。里程碑1 是基础，(2)-(7) 是 R3 主体。
+
+## §78 R3 里程碑2：运动伪 GT（CoTracker+Pi3）跑通但噪声大 → 印证需 StV2
+
+agibot_video_gt.py 加运动:CoTracker 网格(1008点)+ Pi3 canonical 点图 3D 抬升 + 运动 ID。结果:median-disp 0.5cm(多数静止✓)、movers>4cm=157、**max 186.8cm(Pi3 深度 outlier)**;目检 movers 散布全场、未干净定位到黄瓜/夹爪。**Pi3+CoTracker(LIBERO sim 够用)在真实 AgiBot 上深度噪声太大 → 伪 GT 不干净**。**这正印证计划选 SpatialTrackerV2(遮挡/深度感知 3D 跟踪)+ MoSca 黄金子集校验**的必要性。viz/agibot/r3_m2.png(5 panel:RGB t0/tK | 3DGS | 运动伪GT | EEF 轨迹)。
+
+**R3 状态**:里程碑1(真实视频→3DGS+EEF GT)✓、里程碑2(运动伪GT,噪声,需StV2)✓-部分。剩余里程碑3-7(openvocab seg、StV2 干净运动、EEF 尺度校准、操作器5°5cm评估、digital-world真GT、MoSca校验)是多 session 工作量——尤其 StV2 需下载安装。
