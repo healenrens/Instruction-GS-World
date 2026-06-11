@@ -1108,3 +1108,21 @@ v10-rigid 代码全部保留（flag 默认关、可回退）；test_rigid_agg 5/
 
 **根因定位**：head 的 raw v 正常，但 **dyn-gate 把 25-32cm 的真 mover 误判为静止**→ v×0.1 → 塌缩。rel(T)=0.69-0.80 还行，但 pooled p_dyn 的**视觉 dyn_logit 极负**，+rel 也开不动。swap/true 0.3-0.44 的真相：gate(T)=0.11、gate(W)=0.04 都很小，比值是噪声不是真泄漏。
 **修法（证据驱动）**：`mover_magnitude_loss`（losses.py:87，多步，§44 建过但从未入 v9 配方）直接惩罚欠幅，梯度经 gate 流回 → 在 GT 动的地方把 gate 顶开（GT 静止处 target~0 → 不破坏静止抑制）。R1 = resume v9lang + --w_mag 重训 → eval_3d 看 mag-ratio。
+
+## §73 R1 验收：幅度塌缩实质修复（mover_magnitude_loss），选择 0.75→1.00；旋转留给 R2
+
+v11mag = resume v9lang + `--w_mag 0.5`，settle 1500 步（0 跳过）。eval_3d（production config +rigid_agg）+ langswap 守卫：
+
+| 指标 | v9lang_rigid(R0) | **v11mag(R1)** | R1 门禁 |
+|---|---|---|---|
+| mag 中位 train/heldseed | 0.63/0.65× | **0.91/0.85×** | ≥0.85 ✓ |
+| mag **P10** train/heldseed | 0.11/0.10× | 0.29 / **0.51×** | ≥0.5：heldseed✓ train✗ |
+| EPE3D 中位 train/heldseed | 13.6/13.1cm | **10.5/10.3cm** | ↓✓ |
+| EPE3D **P90** heldseed | 23.5cm | **11.4cm** | 尾部腰斩 ✓ |
+| **langswap sel** train/heldseed | 0.57/0.75 | **0.82/1.00** | ≥0.75 ✓✓ |
+| dir heldseed | +0.81 | +0.75 | ≥+0.8 ✗(n=8噪声内) |
+| 5°5cm / rot-err | 0.00/28° | 0.00/**31.9°** | R2 目标 |
+
+**核心目标(幅度)实质修复**：median 两划分 ≥0.85、heldseed P10 过、EPE3D 全面降、尾部 P90 23.5→11.4cm。**附带白拿**：selection 0.75→1.00（因 R0 诊断的"塌缩使物体没过 0.25×GT 地板"被解除）。
+**残留（折进 R2）**：(a) train P10 0.29（少数 train clip 仍塌，heldseed 不受影响）；(b) heldseed dir +0.81→+0.75（n=8 噪声内，但低于严格门禁）；(c) **旋转未动（31.9°、5°5cm=0）——本就是 R2 目标**。heldtask 0.00×=词汇问题(R4)非幅度。
+**判定**：R1 在主目标上实质成功，残留交 R2（R2 重训会同时管旋转+守方向，自然吸收 (b)(c)；(a) 视 R2 后情况）。v11mag 暂作 R2 的 resume 基座，不急 ship。
