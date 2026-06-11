@@ -34,7 +34,12 @@ EP = int(sys.argv[1]) if len(sys.argv) > 1 else 0
 # DATASET: "agibot" (real, EEF-windowed) | "libero90" (sim LeRobot v2.1, full-episode window, no EEF)
 DATASET = os.environ.get("CLIP_DATASET", "agibot")
 LIBERO90_ROOT = "/mnt/pfs/public/xuhaoming/instruct_gs_world/data/libero_90_lerobot"
-WIN, K = (48, 12) if DATASET == "agibot" else (40, 12)
+# §88 wall-clock alignment: libero_90/goal are fps20 vs LIBERO-sim fps10 — the v13 book batch used
+# WIN=40 (2.0s, HALF the wall-clock of the 4.8s training windows) -> per-step motion-scale domain
+# mismatch -> poisoned training (sim EPE 12->25cm). fps20 needs WIN=96 (=4.8s).
+_default_win = 48 if DATASET == "agibot" else 96
+WIN = int(os.environ.get("CLIP_WIN", _default_win))
+K = 12
 HEAD = "observation.images.head" if DATASET == "agibot" else "observation.images.image"
 OUT_TAG = "" if DATASET == "agibot" else "lib90_"
 ID_ARM, ID_OBJ = 8, 1
