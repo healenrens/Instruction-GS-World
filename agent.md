@@ -1153,3 +1153,9 @@ R3 真实视频数据源勘探（AgiBot 已在服务器，DROID 用户否决）�
 - **digital-world**（`agibot-digital-world` 2.6TB，每 episode = task_info.json + proprio_states.h5 + parameter.json）：**parameter.json 有相机标定**（每 cam intrinsic fx/fy/ppx/ppy + extrinsic pose[4x4]）——主 dump 缺的标定这里有！+ proprio_states.h5(全本体感知)+ task_info.json 物体 `omni6DPose_*` id(6D pose 基准物体)。**无 RGB(在主 lerobot)、物体 per-frame pose 待确认**。digital-world 用 uuid、主 lerobot 用 task/episode——配对关系待查。
 - **R3 评估分层（据此）**：操作器(gripper/arm) = 真实 EEF GT(严格 5°5cm/EPE3D)；物体 = 伪 GT(StV2/Pi3+CoTracker)，**若 digital-world 配对成功 + 物体 per-frame pose 存在 → 物体也升级为真 GT**(omni6DPose)。标定若可用 → 度量深度 + EEF 投影 + 多视角解锁。
 - **R3 里程碑1（在建）**：主 lerobot 一个操作 episode → 头 cam RGB 窗 + EEF + 语言 → Pi3 抬升 3DGS → 存 clip + 目检。证明真实视频→3DGS+真实 EEF 管线通。digital-world 标定/物体GT 为下一步增强。
+
+## §77 R3 里程碑1 达成：真实 AgiBot 视频 → Pi3 3DGS + 真实 EEF GT（管线基础通）
+
+`code/scripts/agibot_video_gt.py`：读 task_327 ep0（"Place the held cucumber into the plastic bag in the shopping cart"）→ 按 EEF 位移挑运动子任务窗 [187,235] → decode 头 cam RGB(640x480,13帧) → Pi3 抬升 **574x434、相机 ego 移动、N=140572 高斯**（超市场景/果蔬可辨）→ 存 clip(means/colors/uv + **真实 EEF 6-DOF[Kf+1,2,3]+ori+grip** + 子任务语言) + 目检图 `viz/agibot/r3_m1.png`（RGB t0/tK | Pi3 3DGS 点云 | 双臂 EEF xy 轨迹）。**真实视频→3DGS + 真实 EEF GT 基础打通。**
+
+**R3 剩余（多日）**：(2) 运动伪 GT（StV2 集成或 Pi3+CoTracker 出 object 3D 轨迹）；(3) openvocab seg frame-0（无 GT mask）；(4) **EEF 尺度校准**（EEF 米 ↔ Pi3 gauge，gripper 2D track 对齐 或 digital-world 标定）；(5) 操作器 5°5cm/EPE3D vs 真实 EEF；(6) digital-world 配对（标定+omni6DPose 物体 GT）；(7) MoSca 黄金子集校验伪 GT。里程碑1 是基础，(2)-(7) 是 R3 主体。
