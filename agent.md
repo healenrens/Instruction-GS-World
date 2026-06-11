@@ -1182,3 +1182,11 @@ agibot_video_gt.py 加运动:CoTracker 网格(1008点)+ Pi3 canonical 点图 3D 
 **判读**：不可用但非零——分布大偏移(franka→双臂人形、桌面→超市、模板指令→自由文本)下方向仍粗对且弱胜 static。这是 R4 sim+real 共训的诚实起点。**Caveat**：夹爪框内 seg==8∧box 控制点仅 3 → 回退框内全部(混入背景) → 预测幅度被稀释,真实欠幅可能没 0.35× 那么糟;待 StV2 m2-redo 后用运动仲裁取干净夹爪点重测。
 
 **R3 进度：m1✓ m3✓ m4✓ m5✓(基线) | m2-redo 等 StV2(安装中,已重启) m6 digital-world 配对 m7 MoSca。R4：libero_90 下载中。**
+
+## §81 R3 m2-redo 达成:StV2 在真实 AgiBot 上出干净 3D 运动伪 GT(卡点#2 解决)
+
+**安装战记**(供后人):torch2.4.1 专属 venv 路线被代理反复杀死(pip 无续传、wget 与代理不兼容、git 依赖 503、torch 的 nvidia-cu12 依赖群又是 2GB+)。**最终解**:发现 StV2 模型代码不 import xformers → 直接跑主 venv(torch 2.8),uv 补 11 个小依赖(easydict/decord/moviepy/kornia/pycolmap/pyceres/einx/flow_vis/hydra/omegaconf/timm)+ 本地装 utils3d(pinned commit)/segment-anything。**curl -C - 25 秒拉完 797MB**(wget 0 字节,坑)。权重 HF 直拉(Yuxihenry/SpatialTrackerV2_Front + -Offline)。
+
+**m2-redo 结果**(_agibot_stv2.py,viz/agibot/r3_m2redo_stv2.png):VGGT4Track 前端(深度+内参+位姿,13×392×518)→ StV2 offline 729 tracks、vis 93%。**世界系 3D 位移:静止中位 0.1cm、p90 0.3cm、最大 44.7cm(合理)——对比 m2 CoTracker+Pi3 的 max 186.8cm 疯狂离群 + movers 散布全场**。目检:运动热力干净集中在右臂+持黄瓜区,top movers 轨迹一致地货架→购物车。**真实视频干净物体 3D 运动伪 GT 可用;输出含 c2w_traj/intrs/point_map(供 clip schema viewmats)**。npz 存 data/_agibot/stv2_tracks.npz。
+
+**R3 进度:m1✓ m2-redo✓(StV2) m3✓ m4✓ m5✓ | 剩 m6 digital-world 配对、m7 MoSca 黄金子集校验、clip schema 总装(StV2 轨迹+openvocab seg+EEF 尺度+viewmats → 训练格式)。**
