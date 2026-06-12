@@ -89,7 +89,7 @@ def main():
     from openvocab_seg import segment_frame_amg
 
     dev = "cuda"
-    if DATASET == "libero90":
+    if DATASET != "agibot":                                                 # any LeRobot v2.1 sim suite
         import json
         t = AgiBotLeRobotTask(LIBERO90_ROOT)                                # LeRobot v2.1 reader reuse
         em = [json.loads(l) for l in open(os.path.join(LIBERO90_ROOT, "meta/episodes.jsonl"))]
