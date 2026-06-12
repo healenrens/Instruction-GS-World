@@ -1278,3 +1278,8 @@ v13b（v12 基座 + book96 WIN=96 数据，2500 步 0 跳过）三评：
 **v15**（运行中，14:03 起）：mix_v15 = 106 train（56 sim + 25 real + 17 book96 + **24 libero_goal 旋转**，30/30 过门）；v12 基座、w_traj_rot 0.3；四重终评 = **heldgoal 5°5cm（旋转靠数据的终检）** + held90 + 双守卫 + langswap。
 **v16 bases-residual**（已挂队，v15 完自动起）：用户指示"低秩基排为下一件事"。干净 A/B：同基座（v12mix）+ 同数据（mix_v15）± `--motion_bases 10 --bases_mode residual`（叠加不替换——pure 杀方向 §89）。kill 判据 = langswap 方向（pure 死在 −0.14）；赢 = 任一指标超 v15 且方向不回退。
 **出齐后**：v13b vs v15 vs v16 对照表 → 旋转靠数据还是低秩结构定谳 → 生产模型三选一。
+
+## §91 addendum: 旋转数据审计 + v17 强旋转数据(turn-focused)生成中
+
+**审计 v15 吃的 libero_goal 旋转数据**:GT 旋转中位仅 **20.1°**(最大 43.4° turn-on-stove)——只比 pick-place(17.5°)多 3°,远非设想的 90° 弧。原因:旋转物体是小旋钮(StV2 track 少/噪声大、运动仲裁含夹爪平移稀释)。**对 v15 判读的影响**:若 heldgoal 5°5cm 仍 0,**不能下"数据救不了旋转"结论**(数据本身旋转不够强,20° 切向信号埋在 10cm EPE 里)。
+**v17 后手(数据生成中,GPU0 与 v15 共存无 OOM)**:24 个 **turn-on-stove 专批**(GT 旋转 35-43°,是 mixed goal 20° 的近 2 倍)→ 对"旋转靠数据"的更干净检验。**v17 训练暂不排队——按 v15 旋转结果定**(若 v15 旋转有任何松动 → v17 值得;若 v15+v16 旋转全死 → v17 是最后的数据杠杆)。
