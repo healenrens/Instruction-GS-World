@@ -8,6 +8,7 @@ from scripts.eval_langswap import build_model, uniform_controls, run, INSTR, NOU
 
 CKPT = sys.argv[1] if len(sys.argv) > 1 else "checkpoints/libero_v9lang/ckpt_last.pt"
 DATA = sys.argv[2] if len(sys.argv) > 2 else "data/libero_pi3_v2"
+FORCE_RIGID = bool(int(sys.argv[3])) if len(sys.argv) > 3 else False   # §66: build with rigid_agg forced on
 
 
 def proj(P, K, vm):
@@ -17,7 +18,7 @@ def proj(P, K, vm):
 
 
 ck = torch.load(CKPT, map_location="cpu", weights_only=False)
-mdl = build_model(ck)
+mdl = build_model(ck, force_rigid_agg=FORCE_RIGID)
 clips = sorted(glob.glob(f"{DATA}/*_c_heldseed.pt"))[:4]
 print(f"model={CKPT} | {len(clips)} heldseed clips")
 
@@ -61,5 +62,6 @@ for r, cp in enumerate(clips):
     print(f"  {os.path.basename(cp)}: GT {dgt:.0f}cm | pred-correct {dT:.0f}cm dir{dcos:+.2f} | pred-wrong {dW:.0f}cm")
 
 plt.tight_layout(); os.makedirs("viz/ov_data", exist_ok=True)
-plt.savefig("viz/ov_data/v9_predictions.png", dpi=115, bbox_inches="tight")
-print("saved viz/ov_data/v9_predictions.png")
+out = f"viz/ov_data/v9_predictions{'_rigid' if FORCE_RIGID else ''}.png"
+plt.savefig(out, dpi=115, bbox_inches="tight")
+print("saved", out)

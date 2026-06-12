@@ -26,15 +26,38 @@ NOUNS = ["alphabet soup", "bbq sauce", "butter", "chocolate pudding", "cream che
 INSTR = lambda n: f"pick up the {n} and place it in the basket"
 
 
-def build_model(ck):
+def build_model(ck, force_rigid_agg=False):
     cfg = DynamicsConfig(**ck["cfg"])
     m = InstructGSWorldModel(cfg, n_control=ck.get("M", 2048), n_query=ck.get("n_query", 16),
                              cond_mode="aggregator", spatial_ground=True, dyn_gate=bool(ck.get("dyn_gate", 0)),
                              sem_dim=ck.get("sem_dim", 0), gate_uses_sem=bool(ck.get("gate_uses_sem", 1)),
                              gate_entity_pool=bool(ck.get("gate_entity_pool", 0)), entity_lbs=bool(ck.get("entity_lbs", 0)),
-                             rel_head=bool(ck.get("rel_head", 0)), entity_head=bool(ck.get("entity_head", 0))).cuda().eval()
+                             rel_head=bool(ck.get("rel_head", 0)), entity_head=bool(ck.get("entity_head", 0)),
+                             rigid_agg=bool(ck.get("rigid_agg", 0)) or force_rigid_agg,
+                             entity_rot=bool(ck.get("entity_rot", 0)),
+                             motion_bases=int(ck.get("motion_bases", 0)),
+                             bases_mode=str(ck.get("bases_mode", "pure")),
+                             detach_state_rot=bool(ck.get("detach_state_rot", 0))).cuda().eval()
     m.load_state_dict(ck["model"], strict=False)
     return m
+
+
+def _ext(X):                                          # §66 RMS distance from centroid (object "size")
+    return float(((X - X.mean(0)) ** 2).sum(1).mean().clamp_min(0).sqrt())
+
+
+def _rigid_res(P, Q):                                 # §66 Kabsch residual P->Q (coord units); 0 = rigid
+    Pm, Qm = P.mean(0), Q.mean(0)
+    U, S, Vt = torch.linalg.svd((P - Pm).T @ (Q - Qm))
+    d = torch.sign(torch.det(Vt.T @ U.T))
+    D = torch.eye(3, device=P.device, dtype=P.dtype); D[2, 2] = d
+    Qf = (P - Pm) @ (Vt.T @ D @ U.T).T + Qm
+    return float((Q - Qf).norm(dim=-1).mean())
+
+
+def _median(xs):
+    s = sorted(xs); n = len(s)
+    return 0.0 if n == 0 else (s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2]))
 
 
 def uniform_controls(seg, n_keep, M, per=256, seed=0):
@@ -67,13 +90,19 @@ def main():
     ap.add_argument("--data", default="data/libero_pi3")
     ap.add_argument("--split", default="heldtask")
     ap.add_argument("--n_swap", type=int, default=4)
+    ap.add_argument("--force_rigid_agg", type=int, default=0,
+                    help="§66: force per-entity rigid aggregation ON at build (inference A/B on a ckpt "
+                         "trained without it — e.g. v9-lang — with zero retraining).")
     args = ap.parse_args()
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    mdl = build_model(ck)
+    mdl = build_model(ck, force_rigid_agg=bool(args.force_rigid_agg))
+    print(f"rigid_agg={'ON' if (bool(ck.get('rigid_agg',0)) or args.force_rigid_agg) else 'off'}"
+          f"{' (FORCED at inference)' if args.force_rigid_agg and not ck.get('rigid_agg',0) else ''}")
     clips = sorted(glob.glob(os.path.join(args.data, f"*_{args.split}.pt")))
     print(f"ckpt={args.ckpt} rel_head={ck.get('rel_head',0)} | {len(clips)} {args.split} clips")
     M = ck.get("M", 2048)
     succ, ratios, base_succ, dcoss, eerrs = [], [], [], [], []
+    ext_ratios, rig_reses = [], []                         # §66 coherence (extent-ratio, rigid residual)
     for cp in clips:
         c = torch.load(cp, map_location="cuda", weights_only=False)
         seg = c["seg_per_g"].cuda().long(); N = len(seg); nkeep = N - int(c.get("n_fill", 0))
@@ -100,6 +129,9 @@ def main():
         dir_cos = float(F.cosine_similarity(pred_d[None], gt_d[None]))
         endp_err = float((ep_true[mv_m] - gt_ep[mv_m]).norm(dim=-1).median())
         dcoss.append(dir_cos); eerrs.append(endp_err)
+        # §66 COHERENCE (the scatter blind-spot): does the mover stay rigid, or do its Gaussians fly apart?
+        ext_ratios.append(_ext(ep_true[mv_m]) / max(_ext(init[mv_m]), 1e-6))
+        rig_reses.append(_rigid_res(init[mv_m], ep_true[mv_m]))
         quiet = all(float(pd_true[seg_c == e].mean()) < 0.02 for e in other_obj)
         floor = m_true >= 0.25 * gt_mv
         swaps = [INSTR(n) for n in NOUNS if n not in instr][:args.n_swap]
@@ -117,6 +149,8 @@ def main():
     print(f"    mean swap/true motion ratio: {sum(ratios)/max(1,len(ratios)):.2f}  (low = language suppresses correctly)")
     print(f"    mean DIRECTION cos: {sum(dcoss)/max(1,len(dcoss)):+.2f}  endpoint-err: {sum(eerrs)/max(1,len(eerrs))*100:.0f}cm  "
           f"(high cos / low err = correct TRAJECTORY, not just correct selection)")
+    print(f"    COHERENCE: extent-ratio median {_median(ext_ratios):.2f}  rigid-residual {sum(rig_reses)/max(1,len(rig_reses))*100:.2f}cm  "
+          f"(1.00 / ~0cm = object moves RIGIDLY; >>1 = Gaussians scatter)")
     print(f"    all-static baseline accuracy: {sum(base_succ)/n:.2f}  (suppression cannot game the metric)")
 
 

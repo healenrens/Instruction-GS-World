@@ -38,7 +38,8 @@ from igsw.training import photometric_loss, delta_reg, velocity_smoothness  # no
 from igsw.training.losses import (trajectory_loss, rotation_loss, contrastive_infonce,  # noqa: E402
                                   scale_anchor_loss, mover_bce_loss, semantic_id_loss,
                                   mover_magnitude_loss, entity_rigidity_loss,
-                                  relevance_bce_loss, counterfactual_gate_loss)
+                                  relevance_bce_loss, counterfactual_gate_loss,
+                                  entity_rot_position_loss, coef_seg_ce_loss)
 
 # §54: the 10 LIBERO-object instruction nouns — the counterfactual WRONG-instruction pool. Real
 # instructions are "pick up the {noun} and place it in the basket".
@@ -154,6 +155,22 @@ def main():
                     help="§54: entity-slot SE(3) head (per-entity rigid v_e,omega_e + small per-control residual)")
     ap.add_argument("--w_resid", type=float, default=0.1,
                     help="§54: residual-magnitude reg (push motion through the entity SE(3) channel)")
+    ap.add_argument("--rigid_agg", type=int, default=0,
+                    help="§66 v10-rigid: project per-control motion votes onto one weighted-Kabsch SE(3) "
+                         "per entity (parameter-free, identity on a rigid field). Auto-zeros w_rigid (the "
+                         "soft prior it replaces). Needs --entity_lbs 1 for clean dense rigidity.")
+    ap.add_argument("--entity_rot", type=int, default=0,
+                    help="§87-A: entity-level 6D rotation head (attention readout; translation stays "
+                         "per-control). Supervised in POSITION space (entity_rot_position_loss).")
+    ap.add_argument("--w_erot", type=float, default=0.5, help="§87-A: entity-rot position-loss weight")
+    ap.add_argument("--motion_bases", type=int, default=0,
+                    help="§87-B Shape-of-Motion low-rank SE(3) bases (count; 0=off; paper uses 10)")
+    ap.add_argument("--bases_mode", default="pure", choices=["pure", "residual"],
+                    help="§87-B: pure = bases REPLACE per-control motion; residual = add on top")
+    ap.add_argument("--w_coef_seg", type=float, default=0.1,
+                    help="§87-B: weak CE prior — same entity prefers the same basis (0=off)")
+    ap.add_argument("--detach_state_rot", type=int, default=0,
+                    help="§87: stop-grad quats into tokens (cut the 12-step recurrent rotation chain)")
     ap.add_argument("--feature_dim", type=int, default=0)
     ap.add_argument("--render_steps", type=int, default=2)
     ap.add_argument("--checkpoint_every", type=int, default=1)
@@ -195,7 +212,19 @@ def main():
                                  gate_entity_pool=bool(args.gate_entity_pool),
                                  entity_lbs=bool(args.entity_lbs),
                                  rel_head=bool(args.rel_head),
-                                 entity_head=bool(args.entity_head)).to(dev)
+                                 entity_head=bool(args.entity_head),
+                                 rigid_agg=bool(args.rigid_agg),
+                                 entity_rot=bool(args.entity_rot),
+                                 motion_bases=int(args.motion_bases),
+                                 bases_mode=args.bases_mode,
+                                 detach_state_rot=bool(args.detach_state_rot)).to(dev)
+    if args.rigid_agg and args.w_rigid > 0:
+        if is_main:
+            print(f"[v10-rigid] rigid_agg on -> w_rigid {args.w_rigid} auto-zeroed "
+                  f"(structural rigidity replaces the soft prior).", flush=True)
+        args.w_rigid = 0.0
+    if is_main and args.rigid_agg and not args.entity_lbs:
+        print("[WARN] --rigid_agg 1 without --entity_lbs 1: dense motion may not be cleanly rigid.", flush=True)
     if is_main and args.spatial_ground and not args.vlm_image:
         print("[WARN] --spatial_ground 1 needs --vlm_image 1 (per-control Qwen-image features).", flush=True)
     if is_main:
@@ -311,7 +340,8 @@ def main():
                 # control set -> the BCE target for the dyn-gate. Object-semantic uses seg_per_g.
                 mover_label = (disp_all[ctrl_idx] > args.mover_thresh).float()      # [M]
                 seg_all = clip["seg_per_g"].to(dev).long()                          # [N]
-                seg_ctrl = seg_all[ctrl_idx] if (args.sem_dim > 0 or args.w_rigid > 0 or args.rel_head) else None
+                seg_ctrl = seg_all[ctrl_idx] if (args.sem_dim > 0 or args.w_rigid > 0 or args.rel_head
+                                                 or args.entity_rot or args.motion_bases > 0) else None
                 # §54 relevance LABEL: 1 where the control belongs to the instruction-named object (the free
                 # role-based `is_obj` = seg==obj_id). None for clips without it (ManiSkill) -> rel loss 0.
                 is_obj_ctrl = (clip["is_obj"].to(dev)[ctrl_idx].float()
@@ -400,12 +430,20 @@ def main():
                                                     is_obj_ctrl)
             # §54 residual reg: push motion through the entity SE(3) channel (only when entity_head emits it).
             resid_l = out["resid_norm"] if ("resid_norm" in out) else out["v"].new_zeros(())
+            # §87-A position-space entity-rotation loss (cumulative w/ detached prefix — no chained Jacobian)
+            erot_l = out["v"].new_zeros(())
+            if args.entity_rot and "erot_steps" in out and seg_ctrl is not None:
+                erot_l = entity_rot_position_loss(out["erot_steps"], gt_full.float(), seg_ctrl)
+            # §87-B weak coefficient prior (same entity -> same basis)
+            coef_l = out["v"].new_zeros(())
+            if args.motion_bases > 0 and args.w_coef_seg > 0 and "coef" in out and seg_ctrl is not None:
+                coef_l = coef_seg_ce_loss(out["coef"], seg_ctrl)
             total = (args.w_traj_pos * pos_l + args.w_traj_vel * vel_l + args.w_traj_rot * rot_l
                      + args.w_lang_contrast * lang_c + args.w_render * rloss
                      + args.w_reg * reg + args.w_vel * vel + args.w_scale_anchor * scale_a
                      + args.w_dyn * dyn_l + args.w_seg * seg_l + args.w_mag * mag_l
                      + args.w_rigid * rig_l + args.w_rel * rel_l + args.w_rel_cf * cf_l
-                     + args.w_resid * resid_l)
+                     + args.w_resid * resid_l + args.w_erot * erot_l + args.w_coef_seg * coef_l)
             # NaN/Inf guard (DDP-safe): always backward (lockstep), skip opt.step iff global gnorm non-finite.
             total.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -460,7 +498,8 @@ def main():
                 print(f"e{epoch} s{step} lr{lr_base[0]*sc:.2e} pos{pos_l.item():.4f} vel{vel_l.item():.4f} "
                       f"rot{rot_l.item():.4f} lang{lang_c.item():.4f} scl{scale_a.item():.3f} "
                       f"dyn{dyn_l.item():.4f} seg{seg_l.item():.4f} rig{rig_l.item():.4f} "
-                      f"rel{rel_l.item():.3f} cf{cf_l.item():.3f} resid{float(resid_l):.4f} rPSNR{mp:.1f} "
+                      f"rel{rel_l.item():.3f} cf{cf_l.item():.3f} resid{float(resid_l):.4f} "
+                      f"erot{float(erot_l):.4f} coef{float(coef_l):.3f} rPSNR{mp:.1f} "
                       f"corr{corr.item():.3f} ratio{ratio:.2f} dcos{dcos:.2f} leak{leak:.4f} relSel{rel_sel:.2f} cfSup{cf_sup:.2f} "
                       f"mP{mp_prec:.2f} mR{mp_rec:.2f} {rate:.2f}it/s peakGB{mem:.1f}", flush=True)
                 if writer:
@@ -485,6 +524,9 @@ def main():
                         "gate_uses_sem": args.gate_uses_sem, "entity_lbs": args.entity_lbs,
                         "w_rigid": args.w_rigid, "gate_entity_pool": args.gate_entity_pool,
                         "rel_head": args.rel_head, "entity_head": args.entity_head,
+                        "rigid_agg": args.rigid_agg,
+                        "entity_rot": args.entity_rot, "motion_bases": args.motion_bases,
+                        "bases_mode": args.bases_mode, "detach_state_rot": args.detach_state_rot,
                         "w_rel": args.w_rel, "w_rel_cf": args.w_rel_cf}
                 torch.save(ckpt, os.path.join(args.out, f"ckpt_{step:07d}.pt"))
                 torch.save(ckpt, os.path.join(args.out, "ckpt_last.pt"))
@@ -501,6 +543,9 @@ def main():
                 "gate_uses_sem": args.gate_uses_sem, "entity_lbs": args.entity_lbs,
                 "w_rigid": args.w_rigid, "gate_entity_pool": args.gate_entity_pool,
                 "rel_head": args.rel_head, "entity_head": args.entity_head,
+                "rigid_agg": args.rigid_agg,
+                "entity_rot": args.entity_rot, "motion_bases": args.motion_bases,
+                "bases_mode": args.bases_mode, "detach_state_rot": args.detach_state_rot,
                 "w_rel": args.w_rel, "w_rel_cf": args.w_rel_cf}
         torch.save(ckpt, os.path.join(args.out, "ckpt_last.pt"))
         print(f"[done] step {step}", flush=True)

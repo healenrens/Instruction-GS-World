@@ -968,3 +968,342 @@ v9-lang-ov（OV mask 训练）vs v9-lang（GT mask 训练），langswap heldseed
 **② 训练影响 = 真实但只伤"选择"通路（方向幸存）**：看列——同一数据上，OV 训练模型选对物体 0.50 vs GT 训练 0.75，但**方向泛化保住（+0.79 vs +0.81）**。即 OV mask 噪声只伤了 relevance/选择通路，没伤 dynamics/方向。最可能根因：物体 mask 过分割（is_obj 监督目标更噪——物体 Gaussian 数中位 1.03× 但最高 1.77×）。**诚实保留**：heldseed 仅 8 clip，部分可能是训练方差；但"选择掉/方向稳"的选择性模式说明是真实的局部效应。
 
 **结论**：openvocab **推理/评估完全就绪**（解锁真实视频 + 无 mask 套件的评估）；openvocab **训练**需 mask 质量门（§50 思路：丢高过分割 clip，或收紧 SAM2 目标 mask）才能让选择泛化回到 GT 水平。修法折叠进 B3：gen 时加 IoU/过分割门。
+
+## §65 刚体一致性问题：调研 + 数据核查 + 设计方案（用户发现的 coherence 盲区；方案待拍板）
+
+**问题（用户目检发现）**：v9-lang 预测的物体高斯球会散开（cream cheese extent ×3.73），不是刚体整体移动。所有现有指标（corr/ratio/dir-cos/endpoint）都是聚合量、对散开盲视——与早前"方向盲区"同性质的指标盲区。根因：主 loss `trajectory_loss` 逐控制点独立 L1（点间零耦合）；`entity_rigidity_loss`（可微 Kabsch 残差，w_rigid=0.5）只是训练期软惩罚，在 held-out 场景失效（软先验不泛化，推理期无结构保证）。
+
+**文献调研（四家族）**：① 软刚性损失（Dynamic 3D Gaussians 3DV'24 local-rigidity、SC-GS CVPR'24 ARAP）= 我们现状，逐场景优化够用、前馈泛化失效；② 低秩运动基（Shape of Motion 2024：共享 SE(3) bases × 逐点系数 = "软分解成刚性组"；HiMoR CVPR'25 层级化）= 用户直觉的通用形式，柔性/关节的远期路线，刚体阶段超配；③ 硬性逐物体 SE(3)（DreMa、机器人 GS 世界模型）= 被封存的 entity head，特征池化丢方向（+0.99→-0.18 教训）；④ **逐点投票→网络内可微刚性聚合**（Gojcic CVPR'21 Oral, Rigid 3D Scene Flow：逐点 flow → 物体级刚性抽象，端到端，提升精度+泛化）= 最适配。ManiGaussian/GWM 等 GS 操作世界模型用形变场、无刚性保证（同样会散，非答案）。
+
+**数据核查（16 clip 只读诊断 `_diag_rigid_survey.py`）**：GT 刚性残差 **0.00cm（16/16）**——GT 构造性刚性，刚性应是硬参数化非软惩罚；每实体控制点 146-171（Kabsch 充足）；预测 extent-ratio 中位 1.11、**4/16 >1.2**、最差 3.73，预测刚性残差中位 2.45cm（物体仅 6-11cm，同量级=视觉散架）；**Kabsch 投影后方向 16/16 完全不变**（+0.86→+0.86）——输出空间聚合保方向，与特征空间池化（entity head 失败）形成实测对照。附带：`_e` 早窗方向本身差（+0.25~0.54）= §57 已知双窗不稳问题，正交于刚性。
+
+**方案（等用户拍板）**：A（推荐）= predict_deltas 后、LBS 前加**逐实体 weighted-Kabsch 聚合层**（权重=p_dyn；刚性 by construction、方向从投票继承、warm-start 恒等、w_rigid 退役、eval 加 extent-ratio/刚性残差堵盲区；SVD 退化→eps+小实体纯平移 fallback；arm 用 50+c 子部件）；B（零成本 stopgap）= 纯推理期投影（已验证 3.73→1.00 方向不变）；C（远期）= motion bases 升级路径。验证阶梯：①coherence 指标进 eval → ②方案B A/B 基线 → ③方案A + resume v9-lang settle 800 步 → ④判据：heldseed sel≥0.75 且 dir≥+0.8 持平、extent-ratio→1.00±0.05。
+
+**Phase C viewmats pilot 验证（§63 收尾）**：pilot clip（epi0, --seg gt）`viewmats[13,4,4]` ✓、`viewmats[0]==I`（1e-16）✓、静态相机逐帧偏差 0.0054/平移 0.0064m（与 camera-static sanity 一致）✓、旧 clip 广播逐行等价 ✓；新旧两路 trainer smoke 见 log。
+
+## §66 v10-rigid 接口设计（batched weighted-Kabsch 聚合层；设计文档，未实现，等拍板）
+
+**定位**：§65 方案 A 的向量化形式 = "运动低秩"通用表示（方案 C / Shape-of-Motion 形态）在刚体+有 seg 条件下的硬归属特例。v10-rigid（seg 硬归属）→ v11-bases（可学习系数）同一套数学渐进放松。设计判据（用户）：可 scale、GPU 利用率不掉、优雅（删 loss 而不是加 loss）。
+
+```python
+# igsw/dynamics/rigid_agg.py（拟新建）
+def entity_rigid_aggregate(pos0, pos_pred, ent_id, w=None, min_pts=4, eps=1e-7):
+    """把逐控制点预测位置投影到逐实体 SE(3) 轨道上。全程批量、零 Python 循环。
+    pos0[M,3] 帧0位置; pos_pred[K,M,3] 原始逐点预测（=方向投票场）; ent_id[M] 压缩实体id
+    （objects 1-7、arm 子部件 50+c 各自一个、gripper 10；背景/静态 id 不聚合=passthrough）;
+    w[M] 投票权重（p_dyn × vis；None=均匀）。
+    返回 [K,M,3] 刚性一致位置 + (R[K,E,3,3], t[K,E,3])。"""
+```
+每步 k（K·E 个拟合一次批量解）：① 加权质心 μX_e/μY_e：两次 index_add；② 互协方差 H_e=Σw(x−μX)(y−μY)^T：einsum('m,mi,mj->mij')+index_add→[E,3,3]；③ 批量 SVD [K·E,3,3]，R=V·diag(1,1,det(VUᵀ))·Uᵀ（反射守卫）；④ t=μY−RμX，out=R[ent_id]x+t[ent_id]。退化守卫：Σw<min_pts 或 σ₂/σ₁<eps → 纯平移 R=I（torch.where，无数据依赖分支，DDP static_graph 安全）。
+
+**集成点**：dynamics/model.py predict_deltas 逐点积分出 ctrl 位置后、返回前投影；实体成员的逐点 quat 改由 R_e 给出 → entity_lbs 的 dense 自动继承刚性。flag `--rigid_agg`（默认 0）；开启时 w_rigid 自动归 0（冗余删除——loss 表净缩短）。**warm-start 恒等**：对已刚性场投影=恒等 ⇒ 从 v9-lang 精确续训。开销：O(M) scatter + ≤288 个 3×3 SVD（K=12·E≤24）≈ 微秒级，对 0.17-0.27it/s 的主开销（Qwen+DiT+渲染）不可见；ragged batch 天然支持（实体 id 偏移）。
+
+**同 PR 指标**（堵 coherence 盲区）：extent-ratio + 刚性残差(cm) 进 eval_langswap 汇总与训练 log。
+
+**v11-bases 放松路径**：ent_id one-hot → 可学习系数 [M,Kb]（softmax），H 改系数加权，seg 早期 CE 监督系数、后期放开。内核形状不变。
+
+**验证阶梯（批准后执行）**：单元测试（合成刚性场→恒等；散开场→extent 1.0 且方向不变）→ resume v9-lang settle 800 步 → langswap 三划分+coherence 指标。判据：heldseed sel≥0.75、dir≥+0.8 持平，extent-ratio 1.00±0.05，刚性残差<0.5cm。
+
+**B3 数据状态**：libero_goal 下载完整并校验（428 eps、856/856 mp4、428 parquet、fps20、双相机键、10 条新指令含新动词 put-on/open/put-inside + 新名词 bowl/plate/wine bottle/rack/drawer）；libero_90 仅 meta（全量 ~3921 eps 待拉）。IPEC loader（mp4+episodes.jsonl，区别于 binhng parquet 图像）待写——排在 v10-rigid 拍板后。
+
+## §67 v10-rigid 实现 + V1 单元 + V2 推理 A/B（散开问题在 v9-lang 上零重训即解）
+
+按 plan（adaptive-giggling-crescent.md）实现 batched weighted-Kabsch 实体聚合，branch `v10-rigid`：
+- `igsw/dynamics/rigid_agg.py` `entity_rigid_aggregate`：逐点投票 x→x+v → 每实体加权 Kabsch（index_add×2 + einsum 互协方差 + 批量 3×3 SVD）→ 回写 v̂=R_e·x+t_e−x, ω̂=axisangle(R_e)。fp32 island、reflection 守卫、退化(<4点/共线)→纯平移 fallback（torch.where，DDP 安全）、参数自由。
+- 接线：model.py predict_deltas gate 后调用；model_full.py `--rigid_agg` flag + seg_local 在 rigid_agg||entity_head 时下传 + entity_lbs warn 守卫；train_sim.py flag + 自动归零 w_rigid + ckpt 双存键；eval_langswap/eval_sim_generalization build_model 读 flag；eval_langswap 加 `--force_rigid_agg`（零重训推理 A/B）+ **coherence 指标**（extent-ratio、刚性残差）堵盲区。
+- **附带修复**：rigid_agg 把实体刚性运动应用到**全部**控制点（含 gate 关闭的），结构性解决 §49"半个物体冻住"。
+
+**V1 单元（test_rigid_agg.py 5/5 PASS）**：刚性场→恒等(2.4e-7)、散开 1.22→1.00 方向 cos 1.000、退化→纯平移、bf16+梯度有限、bg passthrough。
+
+**V2 推理 A/B（v9-lang 现有权重，heldseed，force_rigid_agg 0 vs 1，零重训）**：
+| heldseed | OFF | FORCED-ON |
+|---|---|---|
+| selection | 0.75 | **0.75**（不变）|
+| direction | +0.81 | **+0.81**（不变）|
+| **刚性残差** | **2.15cm** | **0.01cm** |
+| extent-ratio 中位 | 1.04 | 1.00 |
+
+**散开消除（刚性残差 2.15→0.01cm）且 selection/方向逐字节不变** → 散开在生产模型上**零重训即解**。extent 中位 1.04 是 8 clip 中位（cream-cheese 3.73 离群被中位洗掉），刚性残差更敏感、清楚显示修复。V2 判据全过。train/heldtask split + 刚性可视化进行中；V3 训练（让投票适应投影）随后。
+
+## §68 v10-rigid V3/V4 终评：推理投影(V2)胜，训练在环(V3)回归方向 → 生产用 V2
+
+修复 SVD 反向后 V3 训练干净跑完（800步 0 跳过），但 V4 三划分揭示**训练在环不如推理投影**。三方对照（heldseed=场景泛化关键读数）：
+
+| | v9-lang (V2 OFF) | v9-lang+rigid (V2 ON, 零重训) | v10-rigid 训练版 (V3/V4) |
+|---|---|---|---|
+| heldseed sel | 0.75 | 0.75 | **0.84** |
+| heldseed **dir** | **+0.81** | **+0.81** | **+0.28** ✗ |
+| heldseed endErr | 14cm | 14cm | 30cm ✗ |
+| coherence | 散开(2.15cm) | **刚性(0.01cm)** | 刚性(0.01cm) |
+| train sel/dir/err | 0.57/+0.72/14cm | 0.57/+0.72/—  | 0.84/+0.53/35cm |
+
+**判据**：V4 要求 heldseed dir≥+0.8——**V2 过(+0.81)，V3 不过(+0.28)**。V3 选择上升但方向塌、终点误差翻倍。
+
+**根因（诚实定位）**：V2 用 v9-lang **已训练好的高质量逐控制点投票**（mean 方向 +0.81）做刚性投影 → 保住方向；V3 用 detach-R 后**只有实体均值梯度（muy）**重训 800 步，投票漂移、均值方向退化到 +0.28。**投票本来就好，用更弱的梯度信号重训反而伤了它。** 即"刚性投影"最佳作用位置是**推理后处理**，不是训练在环（至少这套梯度配置 + 800步如此）。
+
+**结论 = 生产用 V2**：rigid_agg 作为 v9-lang 的**推理期投影**（`--force_rigid_agg 1`，参数自由、零重训）→ 散开解决（2.15→0.01cm）+ 方向/选择/终点全保住（+0.81/0.75/14cm）。**不发 V3 训练版**（方向回归）。salvage 选项（更少步/保留逐控制点梯度/更低 lr）留待需要时；V2 已达成 plan 目标。
+
+v10-rigid 代码全部保留（flag 默认关、可回退）；test_rigid_agg 5/5；推理投影是干净增量。
+
+## §69 v10-rigid 收尾：生产模型 = libero_v9lang_rigid（v9-lang + 推理刚性投影）
+
+按用户决策 A 固化 V2。**生产模型 = `checkpoints/libero_v9lang_rigid/ckpt_last.pt`** = v9-lang 权重 + `rigid_agg=1` flag（推理期参数自由投影，opt 已丢、12GB）。加载即自动刚性投影（build_model 读 ckpt flag，无需 --force）。验证（heldseed，无 --force）：rigid_agg=ON、**sel 0.75 / dir +0.81 / endErr 13cm**（= v9-lang 质量）+ **coherence 1.00 / 0.01cm**（刚性）。
+
+**生产推理/评估/可视化一律指向此 ckpt**。旧 v9-lang ckpt 保留（含 opt，可续训）。代码全 flag 门控默认关——任何旧 ckpt 行为不变。
+
+**这条线（散开/coherence）正式收尾。** 完整链：用户目检发现散开 → §65 调研4家族+16clip数据核查 → §66 设计 → §67 实现+V1单元5/5+V2零重训解决 → §68 V3训练在环回归方向（诚实记录，投影该后处理不该回训）→ §69 固化 V2 为生产。branch v10-rigid。
+
+## §70 v11 计划（用户：效果未达标，只列计划不执行）— 独立失败分析 + 3D-first 指标 + 真实视频 + scale-up
+
+**用户判断**（2026-06-11）：模型效果未达标；刚体约束未充分解决；真实视频（实操/ego）未开始；2D/视频指标无意义（变化只占画面小部分，仅可作辅助约束），核心看 3D 指标。**本节=计划，未执行。**
+
+### A. 独立失败分析（挖现有 eval 日志，零新计算）
+1. **幅度塌缩 = 主要矛盾**：c-窗 train clips epi100/110/130/150/160 整簇 GT 26-32cm 只走 2-4cm（**比例 ~0.1×**），方向却 +0.95-1.00。train sel 0.57 的真相：40% 对子败在 0.25×GT 幅度地板，不是选错。heldseed butter 同样 0.10×。**塌缩 clip 的 swap/true 0.3-0.44（健康 clip 0.00-0.03）→ rel-gate 在这些场景对真/假指令都半开 = relevance 校准失败**，gate 半开直接缩 v。叠加：L1 轨迹损失 median-seeking（仅 ~5% 控制点动）、w_mag 未入 v9 配方、800 步 settle + 40 clip 过小。
+2. **训练指标共谋**：corr 是范数相关（全局缩小 0.1× 仍高）→ corr 0.93 与幅度 0.1× 并存；rPSNR 渲染整帧而动区 ~5% 像素 → 背景主导。**现指标体系系统性掩盖幅度塌缩**（与方向盲区、散开盲区同构，第三次）。
+3. **刚体未真正解决（用户正确）**：V2 投影=推理期遮症状；模型原始投票仍散（投影前残差 2.15cm）；**旋转正确性从未测过**（LIBERO pick-place 近平移、R_e≈I 没暴露）；V3 训练在环失败。表示层不"懂"刚体。
+4. **数据规模荒谬**：40 train clips、1 相机、1 suite、8-10 名词、fps10、纯 sim。heldseed n=8（±0.09 二项噪声）——一切结论都在噪声区。
+5. 早窗方向差（+0.11-0.63，§57）：pre-contact 时机歧义。6. heldtask=0（词汇）。7. 长时域 v8 后未测。
+
+### B. 调研结论（真实视频 + 3D 指标 + scale）
+- **真实视频伪 GT 提取器**：**SpatialTrackerV2**（ICCV'25，前馈统一 2D 跟踪+单目深度+相机位姿，世界系 3D 轨迹分解为 geometry/ego/object，10-20s/段，比 SOTA 3D 跟踪 +30%、与动态重建持平快 50×）= 主提取器，替代 CoTracker+Pi3 拼接；**MegaSaM**（CVPR'25，动态视频相机+深度，可微 BA）= 位姿/深度备选；**MoSca**（CVPR'25，离线 4D Motion Scaffolds 高保真）= 慢但准，作 5-10 clip 黄金子集校验伪 GT 自身。
+- **3D 指标标准（取代自创）**：TAPVid-3D 的 **3D-AJ / APD / OA**（含全局中位数尺度归一）；场景流 **EPE3D / Acc3DS(≤5cm或5%) / Acc3DR(≤10cm或10%) / 离群率**（Gojcic CVPR'21 标准）；实体位姿 **5°5cm**（旋转测量首次引入）+ 平移/幅度比直方图（中位数+P10，杜绝被均值洗掉）。2D/渲染指标全部降级为辅助约束。
+- **真实数据源**：**DROID**（真机、ZED 双目深度+标定+语言，CC-BY-4.0，gs://gresearch/robotics/droid）= 首选（真深度可校准单目管线的尺度）；**AgiBot-world-beta**（已在服务器！137k ep、8 cam 30fps、语言标注）= 零下载成本的 ego/多视角试点；**EgoDex**（829h Vision Pro ego 操作+3D 手部）/ EPIC-KITCHENS / EgoExo4D = 后续规模。
+- 表示升级参照：Shape-of-Motion/HiMoR 低秩运动基（v11-bases）；GWM/ManiGaussian 无刚性保证（前车之鉴）。
+
+### C. 计划（R0→R4，每阶段 3D 指标门禁）
+- **R0 指标改革 + 诚实重基线（~1天）**：实现 3D 套件（EPE3D/Acc3DS/Acc3DR、3D-AJ/APD、5°5cm、幅度比中位+P10、逐步方向曲线、coherence 已有、长时域复活）进 eval_langswap/新 eval_3d.py；训练 log 加幅度比中位（替 corr 主位）；v9lang_rigid 在全部 56 clip 重基线（含首次旋转误差）。**门禁：暴露面完整（预期难看，就要难看）。**
+- **R1 幅度/gate 校准修复（~2-3天）**：先诊断塌缩簇（rel logit/p_dyn 分布 vs 健康簇；是否名词相关）；候选修法（按证据择 1-2）：(a) rel-BCE pos_weight/温度重校准 + 塌缩场景过采样，(b) w_mag（已存在）入配方 + per-entity 位移损失（实体级幅度直接监督，对 ~0.1× 塌缩比逐点 L1 敏感），(c) 训练加长（800→3-5k settle）+ lr 微调。**门禁：train 幅度比中位 ≥0.85 且无 clip <0.5；heldseed sel ≥0.75 / dir ≥+0.8 不回退。**
+- **R2 刚性表示真解决（~3天，R1 后）**：保留推理投影为底线；表示层试 **v11-structured-decode**：每实体 SE(3) 由实体控制点特征 **输出空间 cross-attention 学习聚合**（≈可学习加权 Kabsch，端到端可微、无 SVD 反向问题；区别于失败的 V3-detach 与特征池化 entity head），arm 逐子部件；用 LIBERO-goal 的开抽屉/旋钮动作补**旋转丰富数据**。**门禁：投影前原始投票残差 <0.5cm；旋转 5°5cm 在旋转 clip 上 ≥0.7；方向/选择不回退。**
+- **R3 真实视频管线试点（~1周，可与 R2 并行）**：SpatialTrackerV2 集成（伪 GT：世界系 3D 轨迹+相机+深度）→ 既有 ego-ready schema（§63 viewmats 已验证）+ openvocab（§64 推理就绪，目标选择改 CoTracker/StV2 运动仲裁，无 GT）→ **先 DROID 20 clip**（真深度校尺度）→ AgiBot 20 clip（已在服务器）→ 人工目检 + MoSca 黄金子集校验伪 GT → v12 sim+real 共训 → 真实 heldout 用 3D-AJ/APD 评。**门禁：伪 GT 黄金子集 EPE3D <3cm；真实 heldout 模型 APD@10cm 显著 > static 基线。**
+- **R4 Scale-up（~2周+，R1-R3 收敛后）**：数据：LIBERO-90/goal/spatial openvocab 重生成（B3，4k+ ep、fps20 stride2、词汇 30+ 名词）+ 真实视频扩 DROID→EgoDex；训练：batch>1 ragged（segment-op 已就绪）、sim:real 课程混采、settle→长训（≥20k 步）；按需 v11-bases（关节/柔性）。**门禁：heldtask（未见名词）sel 显著 >0（首次）；真实视频 3D-AJ 持续提升；长时域 10s 漂移有界。**
+
+### 风险
+伪 GT 尺度歧义（单目）→ DROID 真深度先校准；StV2 非商用许可核查；塌缩簇若是数据(失败演示残留)非模型 → §50 过滤复用；R2 若再伤方向 → 即回退推理投影底线（已 ship）；真实视频遮挡重 → StV2 遮挡感知 + 可见性掩码已在损失。
+
+## §71 R0 完成：3D 诚实重基线——2D 指标掩盖的全暴露（COVERAGE 门禁通过）
+
+建成 `code/scripts/eval_3d.py`（EPE3D/Acc3DS-R/5°5cm/mag-ratio中位+P10/rot-err/coherence，全 vs clip["traj"] 解析 GT，复用 eval_langswap helper）。`libero_v9lang_rigid` 三划分重基线：
+
+| split | mag 中位/**P10** | EPE3D 中位 | **5°5cm** | rot-err 中位 | Acc3DS/R | rigRes |
+|---|---|---|---|---|---|---|
+| train(40) | 0.63× / **0.11×** | 13.6cm | **0.00** | 26.8° | 0.12/0.34 | 0.01cm |
+| heldseed(8) | 0.65× / **0.10×** | 13.1cm | **0.00** | 28.1° | 0.23/0.32 | 0.01cm |
+| heldtask(8) | 0.00× / 0.00× | 20.9cm | 0.00 | 16.8° | 0.12/0.13 | 0.00cm |
+
+**2D langswap(sel 0.75/dir +0.81)系统性掩盖了**：
+1. **幅度塌缩成片**：中位 0.63×、**P10 0.10×**；塌缩簇 epi100/110/130/150/160/180（GT 25-32cm 只走 2-4cm = 0.02-0.15×）。
+2. **EPE3D ≈ 物体运动的一半**（13cm vs ~27cm）。
+3. **5°5cm = 0.00（全划分）**——从不接近 GT 位姿。
+4. **旋转误差 27-28°（首次测量）**：模型给纯平移加了大旋转。coherence 好(0.01cm)说明 rigid_agg 生效——**物体是刚性的，但刚性地错（错幅度+伪旋转）**。caveat：小位移 clip 的 Kabsch 旋转病态(epi240_e GT5cm→83°)，但大位移 clean clip 真有伪旋转(epi100_c GT32cm→11°、epi40_c GT29cm→22°)；未来旋转指标应门控 GT disp>10cm。
+
+**R0 COVERAGE 门禁 = 通过**：套件全跑通、各指标出数、复现塌缩簇(P10 0.10×)、旋转首次有数。"暴露完整即过——它确实难看，且就该难看。"**用户判断（效果未达标 / 2D 无意义）被 3D 指标完全证实。** 现有诚实 3D 基线，R1 目标量化：mag 中位 0.63→≥0.85、P10 0.10→≥0.5 + 处理 28° 伪旋转。
+
+## §72 R1 诊断：幅度塌缩 = dyn-gate 在真实 mover 上关闭（非 head 欠预测）
+
+`_diag_collapse.py` 对照塌缩 clip vs 健康 clip，dump mover 实体的 gate=sigmoid(p_dyn)、rel、predMag/gtMag：
+| | gate(T) | predMag/gtMag |
+|---|---|---|
+| 塌缩(epi100/110/130/160_c) | **0.08-0.15**（gate 关 ~90%）| 0.09-0.14× |
+| 健康(epi0/30_c, epi240/330) | **0.75-1.00**（gate 开）| 0.89-1.24× |
+
+**根因定位**：head 的 raw v 正常，但 **dyn-gate 把 25-32cm 的真 mover 误判为静止**→ v×0.1 → 塌缩。rel(T)=0.69-0.80 还行，但 pooled p_dyn 的**视觉 dyn_logit 极负**，+rel 也开不动。swap/true 0.3-0.44 的真相：gate(T)=0.11、gate(W)=0.04 都很小，比值是噪声不是真泄漏。
+**修法（证据驱动）**：`mover_magnitude_loss`（losses.py:87，多步，§44 建过但从未入 v9 配方）直接惩罚欠幅，梯度经 gate 流回 → 在 GT 动的地方把 gate 顶开（GT 静止处 target~0 → 不破坏静止抑制）。R1 = resume v9lang + --w_mag 重训 → eval_3d 看 mag-ratio。
+
+## §73 R1 验收：幅度塌缩实质修复（mover_magnitude_loss），选择 0.75→1.00；旋转留给 R2
+
+v11mag = resume v9lang + `--w_mag 0.5`，settle 1500 步（0 跳过）。eval_3d（production config +rigid_agg）+ langswap 守卫：
+
+| 指标 | v9lang_rigid(R0) | **v11mag(R1)** | R1 门禁 |
+|---|---|---|---|
+| mag 中位 train/heldseed | 0.63/0.65× | **0.91/0.85×** | ≥0.85 ✓ |
+| mag **P10** train/heldseed | 0.11/0.10× | 0.29 / **0.51×** | ≥0.5：heldseed✓ train✗ |
+| EPE3D 中位 train/heldseed | 13.6/13.1cm | **10.5/10.3cm** | ↓✓ |
+| EPE3D **P90** heldseed | 23.5cm | **11.4cm** | 尾部腰斩 ✓ |
+| **langswap sel** train/heldseed | 0.57/0.75 | **0.82/1.00** | ≥0.75 ✓✓ |
+| dir heldseed | +0.81 | +0.75 | ≥+0.8 ✗(n=8噪声内) |
+| 5°5cm / rot-err | 0.00/28° | 0.00/**31.9°** | R2 目标 |
+
+**核心目标(幅度)实质修复**：median 两划分 ≥0.85、heldseed P10 过、EPE3D 全面降、尾部 P90 23.5→11.4cm。**附带白拿**：selection 0.75→1.00（因 R0 诊断的"塌缩使物体没过 0.25×GT 地板"被解除）。
+**残留（折进 R2）**：(a) train P10 0.29（少数 train clip 仍塌，heldseed 不受影响）；(b) heldseed dir +0.81→+0.75（n=8 噪声内，但低于严格门禁）；(c) **旋转未动（31.9°、5°5cm=0）——本就是 R2 目标**。heldtask 0.00×=词汇问题(R4)非幅度。
+**判定**：R1 在主目标上实质成功，残留交 R2（R2 重训会同时管旋转+守方向，自然吸收 (b)(c)；(a) 视 R2 后情况）。v11mag 暂作 R2 的 resume 基座，不急 ship。
+
+## §74 R2: 旋转源从 v-Kabsch 改为 supervised omega-mean（去 SVD→可训练在环）；GT 物体确实在转
+
+诊断确认 §73 假设：rigid_agg 的旋转来自**速度场 Kabsch**（拟合 vote 噪声→28-31° 误差），而 rot_l 监督的 per-control omega 被**丢弃**。修法（rigid_agg.py，rot_from_omega 默认 True）：实体旋转 = supervised omega 的加权均值（exp），平移仍取速度质心；`y_hat=R(x-mux)+muy`。**去掉 SVD**→数值稳定 + **完全可微（omega 得梯度，无需 V3 的 detach hack）→ rigid_agg 现可训练在环**（V3 的拦路 SVD-backward 消失）。单元 5/5 过（test1 改为提供一致的 v+omega）。
+
+**重大发现**：eval_3d 加 GT-rot 列 → **heldseed GT-rot 中位 17.5°**——**pick-place 物体真的在转**（抓起/放下时倾斜），R0"伪旋转"框架错误。omega-mean 把 rot-err 31.9→**19.0°**（最干净的 epi040_c 仅 **4.8°**），但 5°5cm 仍 0：模型预测的旋转幅度对、方向/量不够准；且 GT 旋转本身含伪 GT 噪声（Procrustes on tracked points，小位移 clip 病态 epi240_e 82°）。
+**重估 R2**：(1) omega-mean 是对的旋转源（严格改进 + 可训练），ship 为默认；(2) "原始投票即刚性"现可实现——训练时开 rigid_agg(omega-mean) 让 raw votes 直接刚性（V3 做不到、现在能）；(3) 干净旋转评估需 LIBERO-goal 抽屉/旋钮（R3/R4 数据），libero_object 的入射旋转太噪。
+
+## §75 R2 验收：omega-mean 旋转推理投影有效；in-loop 训练再次失败（V3 教训重演）；5°5cm 待干净数据
+
+omega-mean rigid_agg（§74）作两种用法：
+- **推理投影（有效，ship）**：v11mag + omega-mean → rot-err 31.9→**19.0°**（最干净 clip 4.8°）、mag 0.85×/0.51× 保持、coherence 0.07cm。比 v-Kabsch 旋转源严格更好。
+- **训练在环（失败）**：v11rigid（resume v11mag + rigid_agg=1 训练）前 20 步干净、之后退化成**持续非有限梯度（1068 跳过/1160 步）**——和 V3 同类失败。omega-mean 去了 SVD 但 12 步 rollout 的旋转梯度累积仍不稳。已杀。**第三次印证：刚性投影该在推理后处理，不该回训练环。**
+
+**R2 判定（部分达成）**：架构修复（旋转源 = supervised omega-mean）正确且已 ship；"原始投票即刚性"经训练实现的路再次失败（接受推理投影为底线）。**5°5cm 仍 0**——因 (a) 模型旋转预测未够准，(b) libero_object 入射旋转的伪 GT 噪声大（GT-rot 17.5° 但小位移 clip 病态）。真正的旋转达标需 **LIBERO-goal 抽屉/旋钮干净旋转数据 + 更强旋转监督**，并入 R3/R4。
+
+**生产模型 = `checkpoints/libero_v11_rigid`**（v11mag 权重 + rigid_agg=1 omega-mean，12GB）：R0 暴露 + R1 幅度修复(塌缩 0.63→0.91×、sel 0.75→1.00) + R2 旋转源修复(31.9→19°) + coherence。取代 libero_v9lang_rigid 为当前最佳。
+
+**v11 计划进度**：R0 ✓、R1 ✓、R2 ✓(架构修复 ship,5°5cm 待干净数据)、R3 真实视频未开始(侦察✓)、R4 未开始。
+
+## §76 R3 数据侦察：AgiBot digital-world 有标定 + 物体 6D pose（可能升级伪 GT→真 GT）
+
+R3 真实视频数据源勘探（AgiBot 已在服务器，DROID 用户否决）：
+- **主 lerobot**（`agibot-world-beta-lerobot`，reader 已验证）：8 cam RGB(AV1)+ **真实 EEF 6-DOF**(observation.states.end.position[T,2,3]+orientation[T,2,4])+gripper+细粒度子任务语言(action_config)。**无标定、无物体 GT**。
+- **digital-world**（`agibot-digital-world` 2.6TB，每 episode = task_info.json + proprio_states.h5 + parameter.json）：**parameter.json 有相机标定**（每 cam intrinsic fx/fy/ppx/ppy + extrinsic pose[4x4]）——主 dump 缺的标定这里有！+ proprio_states.h5(全本体感知)+ task_info.json 物体 `omni6DPose_*` id(6D pose 基准物体)。**无 RGB(在主 lerobot)、物体 per-frame pose 待确认**。digital-world 用 uuid、主 lerobot 用 task/episode——配对关系待查。
+- **R3 评估分层（据此）**：操作器(gripper/arm) = 真实 EEF GT(严格 5°5cm/EPE3D)；物体 = 伪 GT(StV2/Pi3+CoTracker)，**若 digital-world 配对成功 + 物体 per-frame pose 存在 → 物体也升级为真 GT**(omni6DPose)。标定若可用 → 度量深度 + EEF 投影 + 多视角解锁。
+- **R3 里程碑1（在建）**：主 lerobot 一个操作 episode → 头 cam RGB 窗 + EEF + 语言 → Pi3 抬升 3DGS → 存 clip + 目检。证明真实视频→3DGS+真实 EEF 管线通。digital-world 标定/物体GT 为下一步增强。
+
+## §77 R3 里程碑1 达成：真实 AgiBot 视频 → Pi3 3DGS + 真实 EEF GT（管线基础通）
+
+`code/scripts/agibot_video_gt.py`：读 task_327 ep0（"Place the held cucumber into the plastic bag in the shopping cart"）→ 按 EEF 位移挑运动子任务窗 [187,235] → decode 头 cam RGB(640x480,13帧) → Pi3 抬升 **574x434、相机 ego 移动、N=140572 高斯**（超市场景/果蔬可辨）→ 存 clip(means/colors/uv + **真实 EEF 6-DOF[Kf+1,2,3]+ori+grip** + 子任务语言) + 目检图 `viz/agibot/r3_m1.png`（RGB t0/tK | Pi3 3DGS 点云 | 双臂 EEF xy 轨迹）。**真实视频→3DGS + 真实 EEF GT 基础打通。**
+
+**R3 剩余（多日）**：(2) 运动伪 GT（StV2 集成或 Pi3+CoTracker 出 object 3D 轨迹）；(3) openvocab seg frame-0（无 GT mask）；(4) **EEF 尺度校准**（EEF 米 ↔ Pi3 gauge，gripper 2D track 对齐 或 digital-world 标定）；(5) 操作器 5°5cm/EPE3D vs 真实 EEF；(6) digital-world 配对（标定+omni6DPose 物体 GT）；(7) MoSca 黄金子集校验伪 GT。里程碑1 是基础，(2)-(7) 是 R3 主体。
+
+## §78 R3 里程碑2：运动伪 GT（CoTracker+Pi3）跑通但噪声大 → 印证需 StV2
+
+agibot_video_gt.py 加运动:CoTracker 网格(1008点)+ Pi3 canonical 点图 3D 抬升 + 运动 ID。结果:median-disp 0.5cm(多数静止✓)、movers>4cm=157、**max 186.8cm(Pi3 深度 outlier)**;目检 movers 散布全场、未干净定位到黄瓜/夹爪。**Pi3+CoTracker(LIBERO sim 够用)在真实 AgiBot 上深度噪声太大 → 伪 GT 不干净**。**这正印证计划选 SpatialTrackerV2(遮挡/深度感知 3D 跟踪)+ MoSca 黄金子集校验**的必要性。viz/agibot/r3_m2.png(5 panel:RGB t0/tK | 3DGS | 运动伪GT | EEF 轨迹)。
+
+**R3 状态**:里程碑1(真实视频→3DGS+EEF GT)✓、里程碑2(运动伪GT,噪声,需StV2)✓-部分。剩余里程碑3-7(openvocab seg、StV2 干净运动、EEF 尺度校准、操作器5°5cm评估、digital-world真GT、MoSca校验)是多 session 工作量——尤其 StV2 需下载安装。
+
+## §79 R3 m3+m4：openvocab 真实场景成立 + EEF 度量尺度校准 PASS
+
+**m3 openvocab on real AgiBot**（_agibot_ovtest.py，viz/agibot/r3_m3_openvocab.png）：超市帧上 GroundingDINO ground 全部开放名词（plastic bag 0.65/robot gripper 0.53/robotic arm 0.52/shopping cart 0.41/cucumber 0.38 多候选——货架上真有一排黄瓜）；segment_frame_amg schema 映射成立（双臂→id8、塑料袋/购物车→id2 容器、果蔬→干扰物）。**诚实缺口**：名词 grounding 选"货架某根黄瓜"而非"夹爪里那根"（the held cucumber）→ 目标实例选择必须靠运动仲裁（StV2，符合设计）。
+
+**m4 EEF 度量尺度校准**（_agibot_eefcal.py）三轮迭代：box median（scale12.7、场景 23m ✗）→ mover-filter（6.2、7m ✗）→ **逐 track Umeyama + RANSAC 式共识**：每条 track 单独拟合 EEF 轨迹形状，刚性附着夹爪的 track 以低残差胜出。**结果 PASS**：右臂 box 3 tracks 过 sanity，**scale=0.697、最佳残差 1.1cm（6% rel on 19cm）、场景中位深度×s=0.79m（物理合理）**；左臂框 0/25 过（正确，不随右 EEF 动）。**Pi3 重建获得米制尺度（真实本体感知锚定）→ 解锁 m5 操作器 5°5cm 真 GT 评估。** 方法注记：consensus spread 0.40-0.88 偏宽（仅 3 tracks）——多 clip 校准时用更密 gripper 点 + 双窗。
+
+**R3 进度**：m1✓ m2部分(CoTracker噪声,待StV2) m3✓ m4✓ | 剩 m2-redo(StV2)、m5(操作器评估)、m6(digital-world 配对)、m7(MoSca 校验)。
+
+## §80 R3 m5：零样本操作器评估（真实 EEF GT 上的诚实基线）
+
+`_agibot_m5_eval.py`：完整管线一气呵成——真实帧→Pi3 g0(14万)→openvocab seg(id8 机器人 11426 点)→m4 逐 track 共识尺度(0.697, rel 6%)→v11_rigid 零样本 forward(指令"Place the held cucumber...")→夹爪框区控制点预测位移×s 转米制→对真实 EEF。
+
+**结果（LIBERO sim 训练 → 真实超市，零样本）**：GT |ΔEEF|=18.6cm；PRED=6.6cm(**0.35×欠幅**)；**方向 cos +0.51**(粗对)；**EPE3D 16.3cm < static 18.6cm(弱胜 static)**；gate 0.47(半开)。
+**判读**：不可用但非零——分布大偏移(franka→双臂人形、桌面→超市、模板指令→自由文本)下方向仍粗对且弱胜 static。这是 R4 sim+real 共训的诚实起点。**Caveat**：夹爪框内 seg==8∧box 控制点仅 3 → 回退框内全部(混入背景) → 预测幅度被稀释,真实欠幅可能没 0.35× 那么糟;待 StV2 m2-redo 后用运动仲裁取干净夹爪点重测。
+
+**R3 进度：m1✓ m3✓ m4✓ m5✓(基线) | m2-redo 等 StV2(安装中,已重启) m6 digital-world 配对 m7 MoSca。R4：libero_90 下载中。**
+
+## §81 R3 m2-redo 达成:StV2 在真实 AgiBot 上出干净 3D 运动伪 GT(卡点#2 解决)
+
+**安装战记**(供后人):torch2.4.1 专属 venv 路线被代理反复杀死(pip 无续传、wget 与代理不兼容、git 依赖 503、torch 的 nvidia-cu12 依赖群又是 2GB+)。**最终解**:发现 StV2 模型代码不 import xformers → 直接跑主 venv(torch 2.8),uv 补 11 个小依赖(easydict/decord/moviepy/kornia/pycolmap/pyceres/einx/flow_vis/hydra/omegaconf/timm)+ 本地装 utils3d(pinned commit)/segment-anything。**curl -C - 25 秒拉完 797MB**(wget 0 字节,坑)。权重 HF 直拉(Yuxihenry/SpatialTrackerV2_Front + -Offline)。
+
+**m2-redo 结果**(_agibot_stv2.py,viz/agibot/r3_m2redo_stv2.png):VGGT4Track 前端(深度+内参+位姿,13×392×518)→ StV2 offline 729 tracks、vis 93%。**世界系 3D 位移:静止中位 0.1cm、p90 0.3cm、最大 44.7cm(合理)——对比 m2 CoTracker+Pi3 的 max 186.8cm 疯狂离群 + movers 散布全场**。目检:运动热力干净集中在右臂+持黄瓜区,top movers 轨迹一致地货架→购物车。**真实视频干净物体 3D 运动伪 GT 可用;输出含 c2w_traj/intrs/point_map(供 clip schema viewmats)**。npz 存 data/_agibot/stv2_tracks.npz。
+
+**R3 进度:m1✓ m2-redo✓(StV2) m3✓ m4✓ m5✓ | 剩 m6 digital-world 配对、m7 MoSca 黄金子集校验、clip schema 总装(StV2 轨迹+openvocab seg+EEF 尺度+viewmats → 训练格式)。**
+
+## §82 R3 clip 总装 v1：schema 跑通；伪 GT 质量两缺陷待修（目标身份 + 臂刚性化）
+
+`agibot_clip_stv2.py`：真实 AgiBot → 完整训练格式 clip（StV2 后端,单 gauge=cam0）：VGGT4Track 前端(逐帧 cam-frame pointmap+内参+c2w) → StV2 世界系轨迹 → canonical 重 gauge → g0(20.3万) + openvocab seg + 运动仲裁 + 逐实体 trimmed-Kabsch traj + `viewmats[t]=inv(c2w[t])@c2w[0]`(ego schema §63) → clip_stv2_ep0.pt + 审核图。
+
+**v1 诚实判定（viz/agibot/r3_clip_stv2.png）**：
+1. ✅ 总装端到端成立（schema 完整、臂子部件 50-52 携带运动、保存可加载）。
+2. ✗ **目标身份错**：运动仲裁在 openvocab 物体实体上全静（~2mm,货架物），选了噪声 id6——**持握中的黄瓜在夹爪里被 openvocab 归进 robot id8**（place 子任务的普遍情形:抓住的物体与夹爪同刚体）。修法：mover ∩ GD-"cucumber"-box（含末帧,物体离开货架后可分离）或 mover 簇内做外观分割。
+3. ✗ **臂刚性化涂抹**：k=3 子部件对关节臂太粗（t12 青色云漂移走样）。修法：更细子部件/逐帧重聚类，或臂放弃刚性化、直接 nearest-track 位移监督（schema 的 traj 本就支持非刚性）。
+
+**结论**：StV2 原始轨迹干净（§81），损失在"逐实体刚性化"。批量生成（20 clip）前先修这两点。R3 剩：clip-builder v1.1（上述两修）、m6 digital-world 配对、m7 MoSca 校验。R4 备料：libero_90 重启下载中（重试循环,已 1715 mp4）。
+
+## §83 R3 clip-builder v1.1：两缺陷修复（持握物仲裁 + 臂非刚性转移）；残留同类实例渗漏
+
+v1.1 双修（agibot_clip_stv2.py）：
+1. **持握物仲裁**：GD 指令名词("held (\w+)"→cucumber)在 frame0+末帧出框，**target = mover ∩ noun-box**（6/18 movers 命中）→ 从 robot lump 中按邻近 moving tracks 切出目标高斯。**结果：obj_gauss=3392、位移中位 41.4cm（吻合 §81 mover 簇；v1 是静止货架物 0.2cm）**。
+2. **臂非刚性化**：放弃 k-means 刚性子部件轨迹，改 **3-NN 逆距离加权的轨迹位移转移**（StV2 原始轨迹本来就干净）；k-means 子 id(50-53) 仅留给 entity-LBS 绑定。审核图 v1 的涂抹云消失，青色随臂走。
+
+**审核图（viz/agibot/r3_clip_stv2_v11.png）**：红色目标主簇 t0(夹爪/货架顶)→t12(购物袋) 连贯移动 ✓；臂干净 ✓。**残留（v1.2 todo）**：货架同类黄瓜少量误并入目标（同类实例歧义：GD 框叠到 mover 2D 路径附近的静止同类）→ 修法：carve 时要求该高斯邻近的 track 自身在动（运动一致性过滤），或限制 carve 半径/限定包含 moving tracks 的那个框。
+
+**R3 状态：m1✓ m2-redo✓ m3✓ m4✓ m5✓ clip-v1.1✓(可用,留 v1.2 小修) | 剩：v1.2 同类渗漏修 → 批量 20 clip → m7 MoSca 抽查 → R4 共训。m6(digital-world 配对)降级为可选（标定可从 EEF 校准替代）。**
+
+## §84 R3 批量生产 + R4 入口：50 episode 生成、31 过质量门、v12 sim+real 共训启动
+
+**clip-builder 迭代链**（每轮诚实盘点驱动）：v1.2 名词解析坏(3/20 PASS) → **v1.3** 多模式名词提取+容器黑名单（修 15 个 'shelf.' 误解析）+ GD 框内播种 query（修小物体 grid 漏检）→ 8/20 → **v1.4** Retrieve 类锚定段尾取窗（段首是伸手、物体未动 = 12 个失败共因）→ 9/20 → **不再调参、改拓宽**：ep20-49 再生成 30 个（v1.4 在新批通过率 ~73%）。
+**终态：50 个 clip、31 过质量门（62%）**，质量门=目标位移∈[5,80]StV2cm ∧ 物体高斯∈[500,30k]。词汇：cucumber/pear/carambola/corn、双动词模板（Place held/Retrieve）、位移 5.6-60cm。失败模式记录：同类实例歧义 + 抓取时机异质（v1.5 候选：多窗扫描取过门窗口）。
+
+**v12 共训（R4 第一炮，运行中）**：mix_v12 = 56 sim(LIBERO) + 25 real train + 6 heldreal（symlink，epi9xxxxx_r_{split}.pt 命名兼容 loader）。resume v11mag、w_mag 配方、2500 步 settle。**判据**：真实 heldreal 显著改善零样本基线（dir +0.51 / EPE3D 16.3cm / mag 0.35×，§80 m5）；sim heldseed 不回退（mag 0.85×/EPE3D 10.3cm/sel 1.00）。orchestrate_v12.sh，日志 logs/orchestrate_v12.log。
+
+## §85 R4 第一炮：v12 sim+real 共训 = 模型首次在真实开放世界视频上 work
+
+v12mix（56 sim + 25 real train + 6 heldreal，resume v11mag，2500 步 0 跳过）双评：
+
+**REAL heldreal（headline）vs 零样本基线（§80 m5: dir+0.51/EPE16.3/mag0.35×）**：
+| | 零样本 | v12 共训 |
+|---|---|---|
+| 幅度比中位/P10 | 0.35× | **0.93× / 0.77×** |
+| EPE3D 中位 | 16.3cm | **10.8cm**（追平 sim）|
+| 最佳 clip | — | epi48 EPE5.3/Acc3DR0.90、epi20 4.8/0.72、epi25 8.7/0.61 |
+| 5°5cm | — | 0/6（GT-rot **48.7°**，货架抓取倾斜极大，模型旋转未解）|
+| coherence | — | 0.07cm 刚性 |
+**真实物体幅度 0.35→0.93×、EPE 16.3→10.8cm、3/6 真实 heldout genuinely 好。模型首次在真实超市视频上有用。**
+
+**SIM 回归守卫**：mag 0.91×(持平)、EPE3D 10.3→12.4cm(轻微)、langswap sel 1.00→**0.88**、dir +0.76、coherence 0.06cm。**轻微退化、基本守住**（sim/real 容量分配代价）。
+
+**生产模型 = `checkpoints/libero_v12_rigid`**（真实可用）。**剩余前沿 = 旋转**（sim GT-rot 17.5° / real 48.7°，5°5cm 始终 0，R2 已定位为"训练学不进、投影从噪声 omega 取"——需干净旋转监督，是下一个主攻）。
+**v11 计划完成度**：R0✓ R1✓ R2✓(投影) R3✓ **R4 第一炮 ✓**(共训证明 real 可用)；R4 后半 = 词汇扩展(libero_90 已下 3.3G/7842mp4)+ 旋转主攻 + 规模化。
+
+## §86 R4 双轨：旋转实验(运行中) + 词汇扩展前置(libero_90 可载、18 新名词)
+
+**轨 A 旋转攻坚(运行中)**：orchestrate_rot.sh = resume v11mag、**w_traj_rot 0.2→1.0**、1000 步、eval_3d sim heldseed。测 R2 遗留假设"加强旋转监督能否降 rot-err"(sim 19° ≈ GT-rot 17.5°,即模型基本没捕捉旋转)。注:5°5cm 还受平移门控(EPE 10cm>5cm),但 rot-err 改善+正确旋转也会带动 EPE。
+
+**轨 B 词汇扩展前置(已确认可行)**：libero_90(3921 ep、fps20、73 任务)是 **LeRobot v2.1**,**AgiBotLeRobotTask 直接可读**(video_key=observation.images.image,decode 出 256² agentview,instruction 从 episodes.jsonl)——无需写新 loader。**18 个新名词**(book/red mug/white mug/black bowl/caddy + 空间指代 left/right/middle compartment)vs 现 8 名词。clip 生成路径=复用 agibot_clip_stv2 的"frames+instruction→StV2/Pi3→openvocab→运动仲裁→clip"(parse_target_noun 已支持"pick up the X and place..."),sim 无需 EEF/尺度。待轨 A 出结果后执行(GPU 让给旋转实验)。
+
+**生产模型链**:v9lang_rigid(R0基线)→ v11_rigid(R1+R2)→ **v12_rigid(R4 共训,真实可用,当前最佳)**。
+
+## §88 v13 验尸（book 数据毒化：fps 域错位）+ v14erot dtype 崩修复
+
+**v13 全面否决**：held90 未见 book 实例"接合了"（会动——对比 heldtask=0 时代）但幅度狂野（2.53×过冲、EPE 49.9cm）；**守卫全烂**：sim heldseed EPE 12.4→24.7cm、Acc3DR 0.37→0.13、mag P10→0.00（有 clip 彻底塌）；real heldreal EPE 10.8→31.5cm、过冲 2.27×。**根因**：libero_90 是 fps20，book 批量生成 WIN=48 帧=2.4s（fps10 的一半 wall-clock）→ 每步运动时长/尺度域错位 → 训练被污染（§86 备料标注过 stride×2，批量时漏执行）。**修法**：book 重生成 WIN=96（同 wall-clock）+ 重训；v12_rigid 保持生产。教训：**异 fps 数据源必须按 wall-clock 对齐窗口**。
+
+**v14erot 启动即崩（exit=1, 45s）**：autocast 混精度——DiT 输出 xr 是 fp32（LayerNorm autocast 规则回 fp32），erot_val(xr) 是 bf16（Linear），`alpha.to(xr.dtype)` 选错基准 → f32 源 vs bf16 ro 的 index_add_ 冲突。**修复**：alpha 对齐 val.dtype。重启成功（s0 正常）。bases 头无此模式（一直在跑）。
+**当前**：v14erot(卡0-1, 1500步~3h) + v14bases(卡2-3, 3000步~6h) 并行训练中；编排器等 bases 结束后自动评估两者（erot 届时已完成 → ckpt_last 正确）。
+
+## §89 v14 旋转架构 A/B 终评：双判负（第 5/6 次结构化运动失败）；"逐点平移场不可替代"定律成形
+
+公平对照（补测 v12 RAW + v14erot+投影）后的 sim heldseed 矩阵：v12 RAW 12.2cm/29.7°/Acc .36；v12+投影 12.4/19.7°/.37；**v14erot RAW 16.2/34.3°/.18（全面差于基线）**，+投影 16.0/28.2°/.18；**v14bases(pure) 40.9cm/60.4°/.00 + langswap 方向 −0.14（v8-ent 同款方向崩溃签名）**；heldreal 同样（erot rot 48.8°≈信号 48.7°=零捕捉；bases 过冲 1.37×）。两套训练本身都健康（0 跳过——detach_state_rot 治住了递归爆炸；§86 的数值诊断是对的），**但学出来的旋转是噪声/有害**。
+
+**六次结构化运动尝试全负的统一规律**（v8-ent 特征池化、V3 v-Kabsch 在环、R2 omega 在环、w_rot↑、§87-A erot、§87-B bases-pure）：**逐控制点平移场是本架构唯一可靠的运动载体**——结构化/低秩/实体级运动要么训练爆炸（在环投影/强权重）、要么替换场后杀方向（池化/低秩）、要么叠加后注入噪声（erot）。**几何结构唯一稳定的施加点 = 推理期投影**（v12+omega-mean：29.7→19.7°，仍是最佳旋转处理）。
+
+**旋转的剩余可行杠杆（非架构）**：(1) **旋转丰富数据**——现数据旋转贫乏（17.5°中位 → 杠杆臂位置信号 ~1.5cm，埋在 12cm EPE 里）；libero_goal 抽屉/旋钮 90° 弧 → 位置 L1 本身就携带强旋转梯度给现有场（fps20 注意 WIN=96）。(2) bases-residual 模式（已实现未测，一个 flag）。(3) 更长训练。
+**生产模型不变 = libero_v12_rigid。** v14erot/v14bases ckpt 保留作记录。
+
+## §90 v13b 验收：词汇修复成功（wall-clock 对齐 = v13 毒化全部根因）
+
+v13b（v12 基座 + book96 WIN=96 数据，2500 步 0 跳过）三评：
+| 划分 | v13(WIN=40 坏数据) | **v13b(WIN=96)** | v12 基线 |
+|---|---|---|---|
+| held90 未见 book | EPE 49.9cm/过冲 2.53× | **15.0cm / 0.80×** | （不动） |
+| sim heldseed | 24.7cm(回退) | **9.3cm / Acc3DR 0.57** | 12.2cm / 0.36 |
+| real heldreal | 31.5cm(回退) | **11.4cm / Acc3DR 0.45** | 10.8cm / 0.37 |
+
+**①未见名词泛化首次成立**（book EPE 49.9→15.0、运动校准 0.80×）；**②零回退、sim 守卫反而大幅变好**（多样数据益）；**③确认 v13 毒化唯一根因 = fps20 窗口未按 wall-clock 对齐**。v13b = 当前候选最佳（待 v15/v16 对照后定生产）。
+
+## §91 R4 收官序列（自动运行中）：v15（数据杠杆）→ v16（低秩基 residual，用户钦点）
+
+**v15**（运行中，14:03 起）：mix_v15 = 106 train（56 sim + 25 real + 17 book96 + **24 libero_goal 旋转**，30/30 过门）；v12 基座、w_traj_rot 0.3；四重终评 = **heldgoal 5°5cm（旋转靠数据的终检）** + held90 + 双守卫 + langswap。
+**v16 bases-residual**（已挂队，v15 完自动起）：用户指示"低秩基排为下一件事"。干净 A/B：同基座（v12mix）+ 同数据（mix_v15）± `--motion_bases 10 --bases_mode residual`（叠加不替换——pure 杀方向 §89）。kill 判据 = langswap 方向（pure 死在 −0.14）；赢 = 任一指标超 v15 且方向不回退。
+**出齐后**：v13b vs v15 vs v16 对照表 → 旋转靠数据还是低秩结构定谳 → 生产模型三选一。
+
+## §91 addendum: 旋转数据审计 + v17 强旋转数据(turn-focused)生成中
+
+**审计 v15 吃的 libero_goal 旋转数据**:GT 旋转中位仅 **20.1°**(最大 43.4° turn-on-stove)——只比 pick-place(17.5°)多 3°,远非设想的 90° 弧。原因:旋转物体是小旋钮(StV2 track 少/噪声大、运动仲裁含夹爪平移稀释)。**对 v15 判读的影响**:若 heldgoal 5°5cm 仍 0,**不能下"数据救不了旋转"结论**(数据本身旋转不够强,20° 切向信号埋在 10cm EPE 里)。
+**v17 后手(数据生成中,GPU0 与 v15 共存无 OOM)**:24 个 **turn-on-stove 专批**(GT 旋转 35-43°,是 mixed goal 20° 的近 2 倍)→ 对"旋转靠数据"的更干净检验。**v17 训练暂不排队——按 v15 旋转结果定**(若 v15 旋转有任何松动 → v17 值得;若 v15+v16 旋转全死 → v17 是最后的数据杠杆)。
+
+## §92 训练数据视觉核验(用户要求)+ 架构机制澄清 + 关键点选择待设计
+
+**核验方法**:`viz_traindata_verify.py`(新)——把每个 clip 的 canonical 高斯**按 pseudo-GT `traj` 移动并从 clip 相机渲染**,三行对照 [真实 RGB | 完整重建 | 仅物体]。纯 GT 无模型,直接暴露训练目标保真度。
+
+**发现(决定性)**:
+| 数据 | 完整重建 | 仅物体(训练目标) |
+|---|---|---|
+| **sim(40,pi3/LIBERO)** | ✅ 逐帧吻合 | ✅ 致密实心物体,刚性平移干净 |
+| **真实(66,stv2/AgiBot)** | ❌ 一片白雾(单目深度背景填充占 97% 高斯) | ⚠️ **稀疏模糊点云团** |
+
+**关键:旋转训练目标是坏的**。"turn on the stove" 真正转的是小旋钮(~90°),但分割出的"物体"有 11k-18k 高斯 = **整个锅/灶台区域(不转)**。Kabsch 量的 40°/24° ≈ **跟踪噪声+夹爪平移+形变的混合,不是旋钮真旋转**。⇒ **v15/v17 的旋转一直在对着一个噪声目标学/评**;heldgoal 5°5cm=0 既不能证明架构败也不能证明数据量不够。**干净的铰接-旋转 sim 源 `data/libero_goal_lerobot`(解析 GT)在服务器上,却从没进过训练 mix**——"旋转靠数据"从未在干净目标上做过公平检验。
+
+**架构机制澄清(用户问:逐高斯 vs 每段一个 SE(3)?)——都不是,是 SC-GS**:
+1. 从 ~26 万稠密高斯随机抽 **2048 控制点**([scgs.py:38](code/igsw/dynamics/scgs.py:38) `torch.randperm`),网络**只在这 2048 个上跑**。
+2. **逐控制点**独立出 SE(3)(v 平移 + ω 旋转,[model.py:184](code/igsw/dynamics/model.py:184))= 2048 个独立 SE(3) 投票。
+3. **LBS** 把控制点运动插值回稠密:每个高斯绑最近 4 控制点加权混合([deform.py:9](code/igsw/gaussians/deform.py:9) `x_i'=Σ w_ij[R_j(x_i−p_j)+p_j+v_j]`);`entity_lbs` 限同分割实体内绑定。
+粒度**介于逐高斯与每段之间**。"每段一个 SE(3)" = 失败 6 次那条路(entity_head/rigid_agg 在环/低秩基)。
+
+**旋转难的根因(架构侧,与 §89 定律合流)**:一物体的几十个控制点**各出各的 SE(3),无耦合** → 不一致就散(scatter);旋转要求 ω 场协调变化(对侧切向相反),独立预测学不出。`rigid_agg` 只能推理期 Kabsch 强行刚性化,在训练环即爆炸。
+
+**用户新指示(待设计)**:**关键点(控制点)的选择本身也需要专门设计的方式去学习**——当前是 `torch.randperm` 纯随机抽 2048 个,既不按物体结构、也不按运动学关节/旋转轴。合理方向:可学习/结构感知的控制点选择(关节点、旋转轴邻域、运动显著点),让稀疏控制集天然承载铰接旋转,而非靠 26 万随机点里的运气。记为旋转问题的**第三维**(前两维:架构耦合、数据质量)。
+
+**结论:旋转 = 架构 + 数据 + 关键点选择 三重卡点。** 先换干净 sim 旋转数据排除"数据"维,才能干净判断架构/关键点维。
