@@ -1261,3 +1261,20 @@ v12mix（56 sim + 25 real train + 6 heldreal，resume v11mag，2500 步 0 跳过
 
 **旋转的剩余可行杠杆（非架构）**：(1) **旋转丰富数据**——现数据旋转贫乏（17.5°中位 → 杠杆臂位置信号 ~1.5cm，埋在 12cm EPE 里）；libero_goal 抽屉/旋钮 90° 弧 → 位置 L1 本身就携带强旋转梯度给现有场（fps20 注意 WIN=96）。(2) bases-residual 模式（已实现未测，一个 flag）。(3) 更长训练。
 **生产模型不变 = libero_v12_rigid。** v14erot/v14bases ckpt 保留作记录。
+
+## §90 v13b 验收：词汇修复成功（wall-clock 对齐 = v13 毒化全部根因）
+
+v13b（v12 基座 + book96 WIN=96 数据，2500 步 0 跳过）三评：
+| 划分 | v13(WIN=40 坏数据) | **v13b(WIN=96)** | v12 基线 |
+|---|---|---|---|
+| held90 未见 book | EPE 49.9cm/过冲 2.53× | **15.0cm / 0.80×** | （不动） |
+| sim heldseed | 24.7cm(回退) | **9.3cm / Acc3DR 0.57** | 12.2cm / 0.36 |
+| real heldreal | 31.5cm(回退) | **11.4cm / Acc3DR 0.45** | 10.8cm / 0.37 |
+
+**①未见名词泛化首次成立**（book EPE 49.9→15.0、运动校准 0.80×）；**②零回退、sim 守卫反而大幅变好**（多样数据益）；**③确认 v13 毒化唯一根因 = fps20 窗口未按 wall-clock 对齐**。v13b = 当前候选最佳（待 v15/v16 对照后定生产）。
+
+## §91 R4 收官序列（自动运行中）：v15（数据杠杆）→ v16（低秩基 residual，用户钦点）
+
+**v15**（运行中，14:03 起）：mix_v15 = 106 train（56 sim + 25 real + 17 book96 + **24 libero_goal 旋转**，30/30 过门）；v12 基座、w_traj_rot 0.3；四重终评 = **heldgoal 5°5cm（旋转靠数据的终检）** + held90 + 双守卫 + langswap。
+**v16 bases-residual**（已挂队，v15 完自动起）：用户指示"低秩基排为下一件事"。干净 A/B：同基座（v12mix）+ 同数据（mix_v15）± `--motion_bases 10 --bases_mode residual`（叠加不替换——pure 杀方向 §89）。kill 判据 = langswap 方向（pure 死在 −0.14）；赢 = 任一指标超 v15 且方向不回退。
+**出齐后**：v13b vs v15 vs v16 对照表 → 旋转靠数据还是低秩结构定谳 → 生产模型三选一。
