@@ -1393,3 +1393,18 @@ v13b（v12 基座 + book96 WIN=96 数据，2500 步 0 跳过）三评：
 
 **E2 结果(heldseed,xyz,1250 DDP 步 +w_mag0.5)**:L512mag EPE15.6/dcos**−0.39**/magR0.70;L1024mag EPE8.7/dcos+0.38/magR0.46。**两个发现**:① **token 数:L1024 > L512**(EPE 8.7<15.6,dcos +0.38>−0.39)——多 token 有用,验证"256 太稀"。② **w_mag 0.5 反噬**:magR 改善(0.32→0.46-0.70)但**杀方向**(dcos 0.74→负/低)——同 step 下 E1(无mag)skill 已正、E2(有mag)还负,**不是欠训,是 mag 损失太重**(相对幅度项不约束方向→往错方向放大,呼应 §89)。**DDP step 注意**:1250 DDP步(2×batch)= 1250 优化步 ≠ E1 的 2500 单卡步,比较 E1 时有 step 混淆;E2 内部(L512 vs L1024 同 1250 步)干净。
 **续 = 干净幅度测试**(`orchestrate_gpswm_mag.sh`):xyz L1024 2000 DDP 步,**w_mag=0 vs 0.1**(GPU0,1 vs 2,3),隔离"轻幅度推动能否修 magR 而不伤方向"。
+
+## §95 续2: 幅度问题定谳 + DDP 教训 + v1 配置锁定
+**坑1 — DDP 训得更差**:所有 DDP run 的 heldseed dcos 都 ≤0.42(单卡 E1 是 0.74);怀疑 lr 没按 batch 缩放。**→ 干净实验一律单卡。**
+**坑2 — mover_magnitude 数值不稳**:相对项 `/gt_disp` 在微位移 mover 上爆炸 → 非有限梯度(magsweep sw005 发散 433 次、loss 4.9)。**已稳定化**(只算 >3cm mover、除数 floor 3cm、ratio cap 4)→ 非有限 0。
+**坑3 — EPE 在低运动 heldseed 上误导**:GT-rot 仅 10°,欠预测反而 EPE 低。**诚实轴 = dcos(方向)+ mag-ratio(幅度)。**
+**干净 2×2 定谳(单卡,稳定 loss,non-finite 0)**:
+| | EPE | dcos | magR | 5°5cm |
+|---|---|---|---|---|
+| L512 no-mag | 8.6 | +0.51 | 0.18 | 13% |
+| L512 mag0.1 | 15.1 | −0.09 | 0.71 | 0% |
+| **L1024 no-mag** | **5.8** | **+0.45** | 0.24 | 10% |
+| L1024 mag0.1 | 10.6 | −0.11 | 0.32 | 0% |
+**① mover_magnitude 损失 = 死路**(no-mag 方向正,mag 方向全负,任何 token 数、即便轻+稳定)——相对幅度项不约束方向 → 往错方向放大,正是 §89 失败模式。**弃用。** ② **token 数 L1024 ≥ L512**(EPE 5.8<8.6,方向/旋转相当)。③ **幅度欠预测(magR ~0.2)仍是真短板,但不可经此损失修**——留作后续(可能靠数据/训练量,m0 的 1.04 是 DDP 假象)。④ **n=8 heldseed 评估噪声大**(c512 重跑 E1 配置得 dcos 0.51 vs E1 的 0.74)——需更大评估集。
+**v1 配置锁定 = xyz + L1024 + 无 mag 损失 + 单卡**(EPE 5.8cm/dcos ~0.5/magR 0.24/5°5cm 10%)。`checkpoints/gpswm_c1024/wm_002500.pt`。
+**下一步(真正的奖品)= E4 干净旋转检验**:heldseed 仅 10° 旋转测不出旋转真本事;需从 `data/libero_goal_lerobot`(解析-GT 抽屉/旋钮强旋转)建 clip(§65 IPEC mp4+jsonl loader 仍欠)。这是判定"涌现旋转 13% 是真学会还是低旋转撞运气"的唯一干净台子。
