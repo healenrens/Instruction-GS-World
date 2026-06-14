@@ -24,6 +24,18 @@ def geom_loss(xyz1_pred: torch.Tensor, xyz1_gt: torch.Tensor, weight: torch.Tens
     return loss
 
 
+def mover_magnitude(xyz1_pred: torch.Tensor, xyz0: torch.Tensor, xyz1_gt: torch.Tensor,
+                    disp_tok: torch.Tensor, thresh: float = 0.01, eps: float = 1e-3):
+    """RELATIVE displacement-magnitude loss on the movers — fights smooth-L1's median-seeking
+    UNDER-prediction (the mag-ratio 0.32 collapse). |‖pred_disp‖−‖gt_disp‖|/‖gt_disp‖ on movers."""
+    mv = disp_tok > thresh
+    if mv.sum() == 0:
+        return xyz1_pred.new_zeros(())
+    pd = (xyz1_pred - xyz0)[mv].norm(dim=-1)
+    gd = (xyz1_gt - xyz0)[mv].norm(dim=-1)
+    return ((pd - gd).abs() / gd.clamp_min(eps)).mean()
+
+
 def jepa_loss(feat_pred: torch.Tensor, feat_target: torch.Tensor, weight: torch.Tensor | None = None,
               beta: float = 0.5):
     """Future-feature JEPA: predicted vs frozen-encoded-future (target is stop-grad in the trainer)."""

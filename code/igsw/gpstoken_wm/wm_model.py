@@ -23,6 +23,9 @@ import torch.nn.functional as F
 from ..dynamics.conditioning import QwenVLEncoder
 from ..dynamics.transformer import DiTBlock, CrossAttention
 from ..dynamics.pe import FourierPE3D
+from .sigreg import SIGReg
+from .tokens import sample_grid_feat, project_to_uv
+from .losses import geom_loss, jepa_loss, relevance_infonce, mover_magnitude
 
 
 class GPSTokenWM(nn.Module):
@@ -55,6 +58,9 @@ class GPSTokenWM(nn.Module):
         self.content_head = nn.Linear(d, fdim)
         self.rel_proj = nn.Sequential(nn.Linear(fdim, d), nn.SiLU(), nn.Linear(d, H))
         self.rel_temp = 0.07
+        self.sigreg = SIGReg(num_proj=512)
+        self.w_jepa, self.w_sigreg, self.w_ground = 0.5, 0.05, 1.0   # set by the trainer from args
+        self.w_mag = 0.5                                             # mover-magnitude (fights under-prediction)
 
     # ---------------- conditioning ----------------
     def encode_cond(self, vlm_inputs: dict):
@@ -121,6 +127,46 @@ class GPSTokenWM(nn.Module):
         q = F.normalize(self.rel_proj(tok_feat), dim=-1)
         t = F.normalize(text_emb, dim=-1)[None]
         return (q * t).sum(-1) / self.rel_temp
+
+    def forward(self, b: dict):
+        """One training step (DDP-safe single entrypoint). b carries the prepared per-clip tensors +
+        vlm_inputs. Returns (loss, logs) — loss has grad through all trainable params; logs detached."""
+        import torch.nn.functional as F
+        ctx, ctxm, cond, text_feats = self.encode_cond(b["vlm0"])
+        grid0, ghw0 = self.encoder.image_grid_features(b["vlm0"])
+        tok_feat = self.feat_in(sample_grid_feat(grid0, ghw0, b["cen"], b["H"], b["W"])).float()
+        x = self.predict(b["tok_xyz0"], tok_feat, b["sig_n"], b["center"], b["radius"], ctx, ctxm, cond)
+        xyz1_pred, feat_pred = self.heads(x, b["tok_xyz0"], b["K_intr"], b["viewmat"])
+        with torch.no_grad():
+            gridK, ghwK = self.encoder.image_grid_features(b["vlmK"])
+            fut_uv = project_to_uv(b["xyz1_gt"], b["K_intr"], b["viewmat"])
+            tgt = self.feat_in(sample_grid_feat(gridK, ghwK, fut_uv, b["H"], b["W"])).float().detach()
+        l_geom = geom_loss(xyz1_pred.float(), b["xyz1_gt"].float())
+        l_mag = mover_magnitude(xyz1_pred.float(), b["tok_xyz0"].float(), b["xyz1_gt"].float(), b["disp_tok"])
+        l_jepa = jepa_loss(F.layer_norm(feat_pred.float(), (self.fdim,)),
+                           F.layer_norm(tgt, (self.fdim,)).detach())
+        l_sig = self.sigreg(tok_feat)
+        l_inst = tok_feat.new_zeros(())
+        relsel = torch.zeros((), device=tok_feat.device)
+        if b.get("is_obj_tok") is not None and self.w_ground > 0:
+            rel = self.relevance(tok_feat, text_feats.mean(0))
+            pos = b["is_obj_tok"].bool()
+            l_inst = relevance_infonce(rel, pos)
+            if pos.any():
+                relsel = pos[rel.argmax()].float()
+        loss = (l_geom + self.w_mag * l_mag + self.w_jepa * l_jepa
+                + self.w_sigreg * l_sig + self.w_ground * l_inst)
+        with torch.no_grad():
+            err_pred = (xyz1_pred - b["xyz1_gt"]).norm(dim=-1).mean()
+            err_static = (b["tok_xyz0"] - b["xyz1_gt"]).norm(dim=-1).mean()
+            mv = b["disp_tok"] > 0.01
+            dcos = (F.cosine_similarity((xyz1_pred - b["tok_xyz0"])[mv], (b["xyz1_gt"] - b["tok_xyz0"])[mv],
+                    dim=-1).mean() if mv.any() else torch.zeros((), device=tok_feat.device))
+        logs = {"loss": loss.detach(), "geom": l_geom.detach(), "mag": l_mag.detach(), "jepa": l_jepa.detach(),
+                "sig": l_sig.detach(), "inst": l_inst.detach() if torch.is_tensor(l_inst) else l_inst,
+                "skill": (err_static - err_pred).detach(), "errp": err_pred.detach(),
+                "dcos": dcos.detach(), "relsel": relsel.detach(), "fstd": tok_feat.float().std().detach()}
+        return loss, logs
 
     def num_trainable(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

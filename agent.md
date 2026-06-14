@@ -1377,3 +1377,16 @@ v13b（v12 基座 + book96 WIN=96 数据，2500 步 0 跳过）三评：
 
 **要"分别试"的实验(用户指示)**:**E1 几何预测空间——2D光流+深度变化 vs 直接3D位移,分别实现对照**(定几何头形态,v1 地基,先做);E2 token 数扫(256/512/1024);E3 JEPA 值不值/α;E4 干净 sim 上涌现旋转 5°5cm(§92 干净检验)。
 **Staging**:S0 表征落地 → S1 几何头(E1 纯几何先通)→ S2 +JEPA+grounding+双线 → S3 旋转 readout 验收 → S4 接 VLA。
+
+## §95 续: v1 实现完成 + E1 训练/测试 + 幅度修复/E2(2026-06-14)
+**实现**:新包 `igsw/gpstoken_wm/`(sigreg / tokens 提取+升3D+冻结Qwen特征 / wm_model 1.66B DiT 容量预测器 + E1 双几何头 + forward(batch) / losses)+ DDP 训练器 `train_gpstoken_wm.py` + 评估器 `eval_gpstoken_wm.py`。单步:帧0 熵+saliency 放 token → 最近稠密升 3D → 冻结 Qwen patch 特征 → DiT 预测逐 token 未来 xyz(几何,载重)+ 未来特征(JEPA 辅)。损失 = geom + w_mag·mover_mag + w_jepa·JEPA + w_sigreg·SIGReg + w_ground·(InfoNCE)。旋转不训,Kabsch readout 评估。
+**E1 裁决(heldseed sim-clean,各 2500 步)**:
+| | EPE3D | dcos | mag-ratio | 5°5cm | rot-err/GT-rot |
+|---|---|---|---|---|---|
+| **xyz(直接3D)** | **7.2cm** | **+0.74** | 0.32 | **13%** | 11.5°/10.4° |
+| flowd(2D流+深度) | 10.9cm | +0.10 | 0.20 | 8% | 12.4°/10.4° |
+→ **直接 3D 位移胜**(2D流+深度的相机反投影病态、杀方向)。**几何头定 xyz。**
+**两个关键结论**:① **稀疏表征 work**:EPE 7.2cm/dcos 0.74,持平甚至优于旧稠密(~10cm),但 token 少 500×、0 跳无塌缩——转向正确。② **5°5cm 0→13%**(项目数月首次非零),**但诚实**:rot-err 11.5°≈GT-rot 10.4°,旋转没真学会,那 13% 是低旋转实体靠好平移过阈值;真旋转检验(E4)需干净大旋转数据(heldseed 仅 10° 旋转)。
+**短板**:mag-ratio 0.32 欠预测(老幅度塌缩);旋转仍近似。
+**续(满 4 卡 DDP)**:加 `mover_magnitude` 损失(--w_mag 0.5);**E2 token 数扫 + 幅度修复**:xyz L512(GPU0,1)vs L1024(GPU2,3),1250 步 DDP。`orchestrate_gpswm_e2.sh`。DDP 基建已 smoke 通过(world=2,forward(batch) 同步,1.4× 吞吐)。
+**踩坑记**:`pkill -f "[o]rchestrate..."` 的 bracket pattern 会匹配 ssh 自身命令串 → 自杀(那次 DDP 重启没生效、旧 2 卡 run 继续)。主线程应**直接 ssh 查实况**不只信 watcher(用户指示)。
