@@ -1339,3 +1339,41 @@ v13b（v12 基座 + book96 WIN=96 数据，2500 步 0 跳过）三评：
 - **v15 四评(收官,旧线)**:held90 词汇 EPE 8.7cm/Acc3DR 0.48、heldreal 10.6cm、heldseed 10.2cm、langswap sel 1.00 **零回退**;heldgoal 5°5cm=0(GT-rot 24.6°=噪声目标,如 §92 预言,**不可判读**)。v16 orchestrator 已死(不自动起),4 卡空闲。
 - **代码集成完成**:`igsw/gaussians/gpstoken.py`(单一真源:grad_mag/complexity/gpstoken_init/mover_saliency/gpstoken_ctrl_idx)+ train_sim `--use_gpstoken/--gps_motion_beta` + line325 分支(下游 ctrl_idx 全复用)。CPU 烟测过:effM=256 无碰撞,beta=30 集中度 sim 8.52× / real 9.02×。
 - **M0 A/B 启动中**(`orchestrate_gps_m0.sh`,4 卡,600 步×2):ARM-B GPSToken(M=256,beta=30,GT saliency)vs ARM-A 随机(M=256 匹配预算),warm-start v12mix,唯一变量=控制点选择。判据:train_corr/dcos/ratio + dir-cos 不回退。
+- **M0 结果(完成)**:ARM-B 0 skip / ARM-A **315/600 skip(non-finite grad)**——低 M 下随机散点的 rotation_loss 邻域 Kabsch 退化爆炸,GPSToken 结构化选点全稳。dcos:ARM-B 0.55(守卫安全,1/15<0)> ARM-A 0.34;ratio 反过来 ARM-A 0.75>0.65。**但对比被 315-skip 污染(ARM-A 欠训),且两臂 dcos(0.55/0.34)都 < 生产 M2048 的 0.8**。**用户判定:这仍是稠密表征上的半吊子改动,弃。** → 触发下面的彻底转向。
+
+## §94 彻底转向:v-JEPA 式「稀疏高斯 + 潜空间」世界模型(用户拍板的新方向)
+
+**用户的核心纠正(2 步)**:① M0 的"换控制点下标"还是**稠密表征**,预测一定不好;要的是**用稀疏 2D 高斯当表征本身,替换 26 万稠密,升 3D 再预测**。② 这些特征都在 **latent-space,整个类似 v-JEPA**;甚至**不需要解码器/不需要 tokenizer**。我查了 v-JEPA 资料后,架构如下:
+
+**冻结的部分(免训)**:
+1. **编码器 = 冻结 2D ViT(建议 DINOv2,高分稠密特征;Qwen 留作语言条件)**:一帧 → 稠密**均匀**特征图 `F[gh,gw,C]`。ViT 永远均匀切 patch,**我们一字不改**。
+2. **放置(training-free)**:熵+saliency 划分 → ~256 稀疏位置(聚焦该动的东西,忽略背景)。**这是 GPSToken 唯一要的东西,不是它的 tokenizer。**
+3. **深度模型(冻结)**:单目深度(Depth-Anything-V2 / UniDepth / Metric3D)或已有 Pi3/sim 深度 → 每点深度,**给压缩球加第 3 维**。
+
+**唯一可训练 = predictor**:指令条件,输入 frame0 的稀疏 3D token,预测每 token 的 **3D 运动 + 未来潜特征**,rollout。
+
+**三个被追问清楚的关键概念**:
+- **"非均匀不在编码器里"**:编码器永远吐均匀稠密 F;非均匀只活在**读出**——每个 token 用**高斯加权池化 / RoIAlign** 在 F 上按自己的足迹(中心 μ、范围 σ)聚合成一个特征 `feat_i=Σ G_i·F/Σ G_i`。大背景 token 池一大片、小物体 token 池一小块——**非均匀性从权重 G_i 进来**。这是"均匀编码器↔非均匀 token"的桥(GPSToken 也用 RoIAlign 取区域特征)。
+- **Lagrangian 原理**:把每个高斯当**被标记的物理粒子**。v-JEPA 是 **Eulerian**(钉死均匀网格,预测固定格子里下一帧是什么,对应=同格子号,网格白送);我们是 **Lagrangian**(跟着粒子跑,**轨迹=跨帧身份**)。非均匀 → 没网格白送的对应 → 必须显式跟踪;而**我们的交付物本就是"每高斯往哪动"= 粒子运动**,本来就该 Lagrangian。
+- **怎么训(免解码器,治塌缩)**:v-JEPA 那套——`target = EMA(encoder)(真实未来帧)` 在 token 的**被轨迹追踪到的未来足迹**处池化,**stop-grad**;`loss = L1(pred潜特征, sg(target))`。**EMA+stop-grad 防表征塌缩**(可加 VICReg 方差/协方差兜底)。轨迹来自伪GT(StV2/sim),它**同时**当①位置监督②"去哪采 target"的对应。
+
+**关键岔路已定**:Eulerian(v-JEPA-2,无需追踪但拿不到显式逐高斯运动)vs **Lagrangian(选它:显式运动=交付物,对应由我们的伪GT轨迹提供)**。
+**潜在优势(治 §92)**:JEPA 潜空间 L1 对轨迹噪声更宽容(位置差几像素 → 潜特征只差一点),很可能比现在的 3D 位置 L1 更抗真实视频伪GT噪声。
+**参考**:v-JEPA 2 (arXiv 2506.09985, 动作条件潜空间世界模型,62h 机器人数据零样本规划)、v-JEPA (2404.08471, EMA+stop-grad)、Volumetric-JEPA。
+**下一步**:读团队的 GPSToken-based 3D-WM 仓库 `SII-LeiL/instruction-3d-wm`(用户说这是基于 GPSToken 的新想法)再定怎么建。
+
+## §95 参考项目对照 + v1 计划沉淀(锁档)→ **`PLAN_GPSTOKEN_JEPA_zh.md`**
+
+**读了 `SII-LeiL/instruction-3d-wm`(克隆到 `~/instruction-3d-wm`)**:一个已 work 的「3D Gaussian-token JEPA 世界模型」(RoboTwin sim)。三轴本质 = 稀疏 3D 高斯 token(显式几何+特征)+ 冻结感知 + 小 predictor;潜空间 JEPA(外观)+ 显式 3D 几何(运动,载重)+ SIGReg(防塌缩,无 EMA);动作驱动、指令选相关。**它独立设计出了我们讨论的几乎一切**(relevance 加权熵划分 = 我们 §93、持久 token/anchor 传播 = Lagrangian、冻结特征+蒸馏)。
+**两条最值钱的实证(直接定我们的目标设计)**:① **纯潜空间 JEPA 没用(+0.002),显式 3D 几何监督才载重(+0.09m)**;② **EMA 会时间塌缩 → 改用 SIGReg**(纠正我先前 EMA 建议)。它当前缺口 = 旋转/SE(3)(G1 未做,只平移)、对应靠 sim instance-id(野外作弊)、sim-only——**正好是我们的互补牌**(旋转避坑知识、真实视频管线、§93 partition、反事实 grounding)。
+
+**与用户讨论后锁定的 v1(详见 `PLAN_GPSTOKEN_JEPA_zh.md`)**:
+1. **Scope**:双模式为目标,先做世界模型(意图模式:指令→运动),具体 action 留 VLA;WM 里的"驱动"= 抽象意图特征。
+2. **架构**:**保留我们 Qwen 冻结 + 1.66B DiT 容量**(弃参考的 9.4M 小头),只把表征换成**稀疏 2D 高斯 token + 深度→3D + 冻结 SigLIP/DINO 特征**。
+3. **数据**:我们的方式,sim 干净 + real 噪声**双线同训**。
+4. **学习**:**几何为载重(逐 token 平移)+ JEPA 为辅(塑造 dynamics-aware 特征,为 VLA,不扛运动)+ SIGReg + grounding(relevance+反事实)**。
+5. **★ 旋转通过平移学,不专门学**:逐 token 平移场数学上能表达刚体旋转 `Δx=(R−I)(x−c)`;旋转**涌现 + Kabsch readout 当评估**,不加 SE(3) 头 → 免疫 6 次失败;夹爪精细旋转难的问题被绕开(从不显式预测夹爪旋转)。这条是用户独立提出、与我们 §89 定律一致。
+6. **JEPA 的职责 = 特征不是运动**:为下游 VLA 备 dynamics-aware 特征(底座=冻结 SigLIP,JEPA 轻量塑造)。
+
+**要"分别试"的实验(用户指示)**:**E1 几何预测空间——2D光流+深度变化 vs 直接3D位移,分别实现对照**(定几何头形态,v1 地基,先做);E2 token 数扫(256/512/1024);E3 JEPA 值不值/α;E4 干净 sim 上涌现旋转 5°5cm(§92 干净检验)。
+**Staging**:S0 表征落地 → S1 几何头(E1 纯几何先通)→ S2 +JEPA+grounding+双线 → S3 旋转 readout 验收 → S4 接 VLA。
