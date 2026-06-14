@@ -25,15 +25,16 @@ def geom_loss(xyz1_pred: torch.Tensor, xyz1_gt: torch.Tensor, weight: torch.Tens
 
 
 def mover_magnitude(xyz1_pred: torch.Tensor, xyz0: torch.Tensor, xyz1_gt: torch.Tensor,
-                    disp_tok: torch.Tensor, thresh: float = 0.01, eps: float = 1e-3):
-    """RELATIVE displacement-magnitude loss on the movers — fights smooth-L1's median-seeking
-    UNDER-prediction (the mag-ratio 0.32 collapse). |‖pred_disp‖−‖gt_disp‖|/‖gt_disp‖ on movers."""
+                    disp_tok: torch.Tensor, thresh: float = 0.03, eps: float = 0.03, ratio_cap: float = 4.0):
+    """RELATIVE displacement-magnitude loss on the WELL-MOVING tokens — fights smooth-L1's median-seeking
+    UNDER-prediction. STABILIZED (the naive eps=1e-3 version exploded on tiny-disp movers → non-finite
+    grads, magsweep sw005 diverged): only movers with gt-disp > 3cm, divisor floored at 3cm, ratio capped."""
     mv = disp_tok > thresh
     if mv.sum() == 0:
         return xyz1_pred.new_zeros(())
     pd = (xyz1_pred - xyz0)[mv].norm(dim=-1)
     gd = (xyz1_gt - xyz0)[mv].norm(dim=-1)
-    return ((pd - gd).abs() / gd.clamp_min(eps)).mean()
+    return ((pd - gd).abs() / gd.clamp_min(eps)).clamp(max=ratio_cap).mean()
 
 
 def jepa_loss(feat_pred: torch.Tensor, feat_target: torch.Tensor, weight: torch.Tensor | None = None,
