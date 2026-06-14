@@ -1390,3 +1390,6 @@ v13b（v12 基座 + book96 WIN=96 数据，2500 步 0 跳过）三评：
 **短板**:mag-ratio 0.32 欠预测(老幅度塌缩);旋转仍近似。
 **续(满 4 卡 DDP)**:加 `mover_magnitude` 损失(--w_mag 0.5);**E2 token 数扫 + 幅度修复**:xyz L512(GPU0,1)vs L1024(GPU2,3),1250 步 DDP。`orchestrate_gpswm_e2.sh`。DDP 基建已 smoke 通过(world=2,forward(batch) 同步,1.4× 吞吐)。
 **踩坑记**:`pkill -f "[o]rchestrate..."` 的 bracket pattern 会匹配 ssh 自身命令串 → 自杀(那次 DDP 重启没生效、旧 2 卡 run 继续)。主线程应**直接 ssh 查实况**不只信 watcher(用户指示)。
+
+**E2 结果(heldseed,xyz,1250 DDP 步 +w_mag0.5)**:L512mag EPE15.6/dcos**−0.39**/magR0.70;L1024mag EPE8.7/dcos+0.38/magR0.46。**两个发现**:① **token 数:L1024 > L512**(EPE 8.7<15.6,dcos +0.38>−0.39)——多 token 有用,验证"256 太稀"。② **w_mag 0.5 反噬**:magR 改善(0.32→0.46-0.70)但**杀方向**(dcos 0.74→负/低)——同 step 下 E1(无mag)skill 已正、E2(有mag)还负,**不是欠训,是 mag 损失太重**(相对幅度项不约束方向→往错方向放大,呼应 §89)。**DDP step 注意**:1250 DDP步(2×batch)= 1250 优化步 ≠ E1 的 2500 单卡步,比较 E1 时有 step 混淆;E2 内部(L512 vs L1024 同 1250 步)干净。
+**续 = 干净幅度测试**(`orchestrate_gpswm_mag.sh`):xyz L1024 2000 DDP 步,**w_mag=0 vs 0.1**(GPU0,1 vs 2,3),隔离"轻幅度推动能否修 magR 而不伤方向"。
