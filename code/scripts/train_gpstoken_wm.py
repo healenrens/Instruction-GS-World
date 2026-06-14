@@ -39,7 +39,8 @@ def main():
     ap.add_argument("--beta", type=float, default=30.0)
     ap.add_argument("--steps", type=int, default=1500)
     ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--w_mag", type=float, default=0.5, help="mover-magnitude loss (fights under-prediction)")
+    ap.add_argument("--w_mag", type=float, default=0.0, help="mover-magnitude loss (DEAD END — kills direction)")
+    ap.add_argument("--w_motion", type=float, default=0.0, help="motion-weighted geom loss (direction-preserving mag fix)")
     ap.add_argument("--w_jepa", type=float, default=0.5)
     ap.add_argument("--w_sigreg", type=float, default=0.05)
     ap.add_argument("--w_ground", type=float, default=1.0)
@@ -62,7 +63,7 @@ def main():
     for p in model.encoder.parameters():
         p.requires_grad_(False)
     model.w_jepa, model.w_sigreg, model.w_ground = args.w_jepa, args.w_sigreg, args.w_ground
-    model.w_mag = args.w_mag
+    model.w_mag, model.w_motion = args.w_mag, args.w_motion
     enc = model.encoder
     mdl = DDP(model, device_ids=[local], find_unused_parameters=True) if ddp else model
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=0.0)

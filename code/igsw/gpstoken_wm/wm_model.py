@@ -60,7 +60,8 @@ class GPSTokenWM(nn.Module):
         self.rel_temp = 0.07
         self.sigreg = SIGReg(num_proj=512)
         self.w_jepa, self.w_sigreg, self.w_ground = 0.5, 0.05, 1.0   # set by the trainer from args
-        self.w_mag = 0.5                                             # mover-magnitude (fights under-prediction)
+        self.w_mag = 0.0                                             # mover-magnitude (DEAD END, kept off)
+        self.w_motion = 0.0                                          # motion-weighted geom loss (direction-preserving mag fix)
 
     # ---------------- conditioning ----------------
     def encode_cond(self, vlm_inputs: dict):
@@ -141,7 +142,16 @@ class GPSTokenWM(nn.Module):
             gridK, ghwK = self.encoder.image_grid_features(b["vlmK"])
             fut_uv = project_to_uv(b["xyz1_gt"], b["K_intr"], b["viewmat"])
             tgt = self.feat_in(sample_grid_feat(gridK, ghwK, fut_uv, b["H"], b["W"])).float().detach()
-        l_geom = geom_loss(xyz1_pred.float(), b["xyz1_gt"].float())
+        # direction-PRESERVING magnitude fix: up-weight high-motion tokens in the POSITION loss (vs the
+        # dead-end relative mover_magnitude which inflated wrong directions). Still smooth-L1 on xyz => no
+        # direction damage; just makes the model serve big movers (which smooth-L1's median-seeking under-serves).
+        mw = None
+        if self.w_motion > 0:
+            d = b["disp_tok"]
+            mv = d > 0.01
+            mvmed = d[mv].median() if mv.any() else d.new_tensor(0.05)
+            mw = (1.0 + self.w_motion * (d / mvmed.clamp_min(1e-3))).clamp(max=10.0)
+        l_geom = geom_loss(xyz1_pred.float(), b["xyz1_gt"].float(), weight=mw)
         l_mag = mover_magnitude(xyz1_pred.float(), b["tok_xyz0"].float(), b["xyz1_gt"].float(), b["disp_tok"])
         l_jepa = jepa_loss(F.layer_norm(feat_pred.float(), (self.fdim,)),
                            F.layer_norm(tgt, (self.fdim,)).detach())
