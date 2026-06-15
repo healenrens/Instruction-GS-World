@@ -40,7 +40,8 @@ def main():
 
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     cargs = ck.get("args", {})
-    model = GPSTokenWM(geom_mode=cargs.get("geom_mode", "xyz"), fdim=cargs.get("fdim", 128)).to(dev)
+    model = GPSTokenWM(geom_mode=cargs.get("geom_mode", "xyz"), fdim=cargs.get("fdim", 128),
+                       feat_source=cargs.get("feat_source", "qwen")).to(dev)
     missing, unexpected = model.load_state_dict(ck["model"], strict=False)
     miss_train = [k for k in missing if not k.startswith("encoder.")]
     print(f"[eval] {args.ckpt} geom_mode={cargs.get('geom_mode')} | non-encoder missing={len(miss_train)} unexpected={len(unexpected)}", flush=True)
@@ -78,7 +79,7 @@ def main():
         vlm0 = mv_in(enc.build_inputs(instr, rgb0))
         with torch.no_grad(), amp:
             ctx, ctxm, cond, text_feats = model.encode_cond(vlm0)
-            grid0, ghw0 = enc.image_grid_features(vlm0)
+            grid0, ghw0 = (model.dino.grid(rgb0) if model.dino is not None else enc.image_grid_features(vlm0))
             tok_feat = model.feat_in(sample_grid_feat(grid0, ghw0, cen, H, W)).float()
             x = model.predict(tok_xyz0, tok_feat, sig_n, center, radius, ctx, ctxm, cond)
             xyz1_pred, _ = model.heads(x, tok_xyz0, Ki, vm)

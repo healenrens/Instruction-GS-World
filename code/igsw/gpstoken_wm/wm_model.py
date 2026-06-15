@@ -30,10 +30,21 @@ from .losses import geom_loss, jepa_loss, relevance_infonce, mover_magnitude
 
 class GPSTokenWM(nn.Module):
     def __init__(self, qwen_path: str | None = None, d_model: int = 1536, n_heads: int = 16,
-                 n_query: int = 16, fdim: int = 128, geom_mode: str = "xyz", num_freqs: int = 10):
+                 n_query: int = 16, fdim: int = 128, geom_mode: str = "xyz", num_freqs: int = 10,
+                 feat_source: str = "qwen"):
         super().__init__()
         self.encoder = QwenVLEncoder(qwen_path) if qwen_path else QwenVLEncoder()
         H = self.encoder.hidden_size
+        # direction A: token VISUAL feature source — "qwen" (VLM patches) or "dino" (frozen DINOv2 dense).
+        # Qwen always does the LANGUAGE conditioning regardless; this only swaps the per-token visual feat.
+        self.feat_source = feat_source
+        if feat_source == "dino":
+            from .dino_features import DinoFeatures
+            self.dino = DinoFeatures()
+            feat_dim_in = self.dino.embed_dim
+        else:
+            self.dino = None
+            feat_dim_in = H
         n_l = self.encoder.num_layers
         d = d_model
         self.d, self.fdim, self.geom_mode, self.n_query = d, fdim, geom_mode, n_query
@@ -46,7 +57,7 @@ class GPSTokenWM(nn.Module):
         self.agg_norm = nn.LayerNorm(d, eps=1e-6)
         # ---- token embed: FourierPE(3D pos) ⊕ frozen feat ⊕ sigma -> d ----
         self.pe = FourierPE3D(num_freqs=num_freqs)
-        self.feat_in = nn.Linear(H, fdim)                      # frozen Qwen patch feat -> token feature ch.
+        self.feat_in = nn.Linear(feat_dim_in, fdim)            # frozen visual patch feat -> token feature ch.
         tok_in = self.pe.out_dim + fdim + 2
         self.tok_embed = nn.Sequential(nn.Linear(tok_in, d), nn.SiLU(), nn.Linear(d, d))
         # ---- DiT predictor (the kept 1.66B capacity) ----
@@ -134,12 +145,14 @@ class GPSTokenWM(nn.Module):
         vlm_inputs. Returns (loss, logs) — loss has grad through all trainable params; logs detached."""
         import torch.nn.functional as F
         ctx, ctxm, cond, text_feats = self.encode_cond(b["vlm0"])
-        grid0, ghw0 = self.encoder.image_grid_features(b["vlm0"])
+        grid0, ghw0 = (self.dino.grid(b["rgb0_np"]) if self.dino is not None
+                       else self.encoder.image_grid_features(b["vlm0"]))
         tok_feat = self.feat_in(sample_grid_feat(grid0, ghw0, b["cen"], b["H"], b["W"])).float()
         x = self.predict(b["tok_xyz0"], tok_feat, b["sig_n"], b["center"], b["radius"], ctx, ctxm, cond)
         xyz1_pred, feat_pred = self.heads(x, b["tok_xyz0"], b["K_intr"], b["viewmat"])
         with torch.no_grad():
-            gridK, ghwK = self.encoder.image_grid_features(b["vlmK"])
+            gridK, ghwK = (self.dino.grid(b["rgbK_np"]) if self.dino is not None
+                           else self.encoder.image_grid_features(b["vlmK"]))
             fut_uv = project_to_uv(b["xyz1_gt"], b["K_intr"], b["viewmat"])
             tgt = self.feat_in(sample_grid_feat(gridK, ghwK, fut_uv, b["H"], b["W"])).float().detach()
         # direction-PRESERVING magnitude fix: up-weight high-motion tokens in the POSITION loss (vs the

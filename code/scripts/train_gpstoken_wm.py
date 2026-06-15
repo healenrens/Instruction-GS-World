@@ -34,6 +34,8 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--geom_mode", default="xyz", choices=["xyz", "flowd"])
+    ap.add_argument("--feat_source", default="qwen", choices=["qwen", "dino"],
+                    help="token visual feature source: qwen VLM patches (baseline) or frozen DINOv2 dense (A)")
     ap.add_argument("--L", type=int, default=512)
     ap.add_argument("--fdim", type=int, default=128)
     ap.add_argument("--beta", type=float, default=30.0)
@@ -59,7 +61,7 @@ def main():
     if is_main:
         os.makedirs(args.out, exist_ok=True)
 
-    model = GPSTokenWM(geom_mode=args.geom_mode, fdim=args.fdim).to(dev)
+    model = GPSTokenWM(geom_mode=args.geom_mode, fdim=args.fdim, feat_source=args.feat_source).to(dev)
     for p in model.encoder.parameters():
         p.requires_grad_(False)
     model.w_jepa, model.w_sigreg, model.w_ground = args.w_jepa, args.w_sigreg, args.w_ground
@@ -102,7 +104,7 @@ def main():
                 "is_obj_tok": (c["is_obj"].to(dev)[idx] if "is_obj" in c else None),
                 "center": center, "radius": (means[:n_keep] - center).norm(dim=-1).amax().clamp_min(1e-6),
                 "K_intr": c["K_intr"].to(dev).float(), "viewmat": c["viewmat"].to(dev).float(),
-                "H": H, "W": W,
+                "H": H, "W": W, "rgb0_np": rgb0, "rgbK_np": imgK,
             }
         except Exception as e:
             ok = False
