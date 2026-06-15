@@ -367,11 +367,15 @@ def _quat_angle(qa, qb):
     return float(2.0 * np.arccos(min(1.0, abs(float(np.dot(qa, qb))))))
 
 
-def _script_rotate(env, rec, spin_steps: int = 64, drz: float = 0.9):
+def _script_rotate(env, rec, spin_steps: int = 64, drz: float = 0.9, rng=None):
     """Track B (rotation-rich data): grasp the cube CENTRALLY, lift, then SPIN the wrist in place.
-    The rigidly-grasped cube rotates about ~its own centroid => ROTATION-DOMINANT motion (translation
-    ~0), so the rotational displacement clears the position-noise floor (PLAN §7 / §95续10 diagnosis:
-    in the old data rotation was only 7% of motion, below the EPE floor, hence unlearnable)."""
+    The rigidly-grasped cube rotates about ~its own centroid. When `rng` is given, the spin DIRECTION
+    (cw/ccw) and MAGNITUDE are RANDOMIZED per episode => VARIED rotation (angle ~40-150deg, both
+    signs) instead of a constant ~120deg. This kills the constant-rotation confound (the model must
+    express the rotation through the per-token field, not memorize one fixed angle)."""
+    if rng is not None:
+        spin_steps = int(rng.integers(30, 73))
+        drz = float(rng.choice([-1.0, 1.0]) * rng.uniform(0.7, 1.0))
     u = env.unwrapped
     OPEN, CLOSE = 1.0, -1.0
     target = u.cube if hasattr(u, "cube") else u.cubeA
@@ -423,7 +427,7 @@ def generate_episode(env_id: str, seed: int, cam_w: int, cam_h: int, max_retries
         except AttributeError:
             obj, cube0, cube0_q = None, None, None
         if policy == "rotate":
-            _script_rotate(base, rec)
+            _script_rotate(base, rec, rng=np.random.default_rng(s))
         elif env_id in ("PushCube-v1", "PullCube-v1"):
             _script_push(base, rec)
         else:
