@@ -412,7 +412,7 @@ def generate_episode(env_id: str, seed: int, cam_w: int, cam_h: int, max_retries
     doc = (type(base.unwrapped).__doc__ or "").strip().split("\n")
     doc = " ".join(l.strip() for l in doc if l.strip() and not l.strip().startswith("**"))[:200]
     instruction = INSTRUCTIONS.get(env_id, doc or env_id)
-    if policy == "rotate":
+    if policy in ("rotate", "rotateconst"):
         instruction = "Pick up the red cube and rotate it in place."
     rec = _ObsRecorder(base)
 
@@ -426,8 +426,8 @@ def generate_episode(env_id: str, seed: int, cam_w: int, cam_h: int, max_retries
             cube0_q = obj.pose.q[0].cpu().numpy().copy()
         except AttributeError:
             obj, cube0, cube0_q = None, None, None
-        if policy == "rotate":
-            _script_rotate(base, rec, rng=np.random.default_rng(s))
+        if policy in ("rotate", "rotateconst"):
+            _script_rotate(base, rec, rng=(None if policy == "rotateconst" else np.random.default_rng(s)))
         elif env_id in ("PushCube-v1", "PullCube-v1"):
             _script_push(base, rec)
         else:
@@ -437,7 +437,7 @@ def generate_episode(env_id: str, seed: int, cam_w: int, cam_h: int, max_retries
         if obj is not None and cube0 is not None:
             moved = float(np.linalg.norm(obj.pose.p[0].cpu().numpy() - cube0))
             rot = _quat_angle(cube0_q, obj.pose.q[0].cpu().numpy())
-        ok = (rot > 0.5 if policy == "rotate" else moved > 0.04) and len(rec.frames) > 4
+        ok = (rot > 0.5 if policy in ("rotate", "rotateconst") else moved > 0.04) and len(rec.frames) > 4
         print(f"  episode seed={s}: cube moved {moved:.3f} m / rot {np.degrees(rot):.0f}deg over "
               f"{len(rec.frames)} frames ({'OK' if ok else 'retry'})", flush=True)
         if ok:

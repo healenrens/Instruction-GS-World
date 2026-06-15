@@ -166,7 +166,28 @@ class GPSTokenWM(nn.Module):
             mv = d > 0.01
             mvmed = d[mv].median() if mv.any() else d.new_tensor(0.05)
             mw = (1.0 + self.w_motion * (d / mvmed.clamp_min(1e-3))).clamp(max=10.0)
-        l_geom = geom_loss(xyz1_pred.float(), b["xyz1_gt"].float(), weight=mw)
+        if getattr(self, "norm_target", False):
+            # SCALE-NORMALIZED target (user's relative-distance idea, §95续16): the model predicts the
+            # per-token displacement field DIVIDED by the clip's global motion scale = a unit-scale
+            # RELATIVE field. The aleatoric absolute scale is FACTORED OUT of the regression target
+            # (recovered separately at inference). Only the TARGET is normalized (normalizing pred too
+            # would just be per-clip loss reweighting = the dead-end §95 path).
+            pd = xyz1_pred.float() - b["tok_xyz0"].float(); gd = b["xyz1_gt"].float() - b["tok_xyz0"].float()
+            m = b["disp_tok"] > 0.01
+            if m.sum() >= 5:
+                # Scale-EQUALIZE the target to a fixed reference magnitude sref (~the absolute regime),
+                # NOT to unit: target = gd * (sref / s_gt). This factors out the per-clip aleatoric scale
+                # (the user's relative-field idea) while keeping the target in the SAME gradient regime as
+                # the stable absolute baseline (bounded rescale ~0.33-1.25x with the 8cm floor) -> avoids
+                # the 10x-hot-gradient + per-clip-amplification instability that collapsed direction.
+                sref = 0.1
+                s_gt = gd[m].norm(dim=-1).mean().detach().clamp_min(0.08)
+                per = F.smooth_l1_loss(pd, gd * (sref / s_gt), beta=0.02, reduction="none").mean(-1)
+                l_geom = (per * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else per.mean()
+            else:
+                l_geom = geom_loss(xyz1_pred.float(), b["xyz1_gt"].float(), weight=mw)
+        else:
+            l_geom = geom_loss(xyz1_pred.float(), b["xyz1_gt"].float(), weight=mw)
         l_mag = mover_magnitude(xyz1_pred.float(), b["tok_xyz0"].float(), b["xyz1_gt"].float(), b["disp_tok"])
         l_jepa = jepa_loss(F.layer_norm(feat_pred.float(), (self.fdim,)),
                            F.layer_norm(tgt, (self.fdim,)).detach())

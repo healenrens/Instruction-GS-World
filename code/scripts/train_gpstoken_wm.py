@@ -44,6 +44,8 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--w_mag", type=float, default=0.0, help="mover-magnitude loss (DEAD END — kills direction)")
     ap.add_argument("--w_motion", type=float, default=0.0, help="motion-weighted geom loss (direction-preserving mag fix)")
+    ap.add_argument("--norm_target", type=int, default=0, help="1=scale-decoupled geom (predict scale-invariant FIELD + single global scale); attacks the aleatoric-scale under-prediction")
+    ap.add_argument("--w_scale", type=float, default=0.1, help="weight on the single-global-scale loss (low = treat scale as aleatoric, focus on the field)")
     ap.add_argument("--w_jepa", type=float, default=0.5)
     ap.add_argument("--w_sigreg", type=float, default=0.05)
     ap.add_argument("--w_ground", type=float, default=1.0)
@@ -67,6 +69,7 @@ def main():
     for p in model.encoder.parameters():
         p.requires_grad_(False)
     model.w_jepa, model.w_sigreg, model.w_ground = args.w_jepa, args.w_sigreg, args.w_ground
+    model.norm_target, model.w_scale = bool(args.norm_target), args.w_scale
     model.w_mag, model.w_motion = args.w_mag, args.w_motion
     enc = model.encoder
     mdl = DDP(model, device_ids=[local], find_unused_parameters=True) if ddp else model
