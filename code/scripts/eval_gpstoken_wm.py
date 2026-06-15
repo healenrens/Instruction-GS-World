@@ -53,7 +53,9 @@ def main():
         return {k: (v.to(dev, dtype=torch.bfloat16) if (torch.is_tensor(v) and v.is_floating_point())
                     else (v.to(dev) if torch.is_tensor(v) else v)) for k, v in inp.items()}
 
-    clips = sorted(glob.glob(f"{args.data}/*_{args.split}.pt"))
+    # substring match so --split held aggregates ALL held splits (heldseed/held90/heldreal/heldgoal = n~24,
+    # 3-6x the per-split n=4-8 that made every earlier comparison noise-dominated). --split heldseed etc. still work.
+    clips = sorted(glob.glob(f"{args.data}/*{args.split}*.pt"))
     epe, dcos, magr, rote, transe, fivefive, hit, gtrot = [], [], [], [], [], [], [], []
     amp = torch.autocast("cuda", dtype=torch.bfloat16)
     for cp in clips:
