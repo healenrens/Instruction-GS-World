@@ -36,6 +36,7 @@ def main():
     ap.add_argument("--geom_mode", default="xyz", choices=["xyz", "flowd"])
     ap.add_argument("--feat_source", default="qwen", choices=["qwen", "dino"],
                     help="token visual feature source: qwen VLM patches (baseline) or frozen DINOv2 dense (A)")
+    ap.add_argument("--dino_imgsize", type=int, default=518, help="DINOv2 input res (mult of 14); 770=55x55 finer grid = lower noise floor")
     ap.add_argument("--L", type=int, default=512)
     ap.add_argument("--fdim", type=int, default=128)
     ap.add_argument("--beta", type=float, default=30.0)
@@ -61,7 +62,8 @@ def main():
     if is_main:
         os.makedirs(args.out, exist_ok=True)
 
-    model = GPSTokenWM(geom_mode=args.geom_mode, fdim=args.fdim, feat_source=args.feat_source).to(dev)
+    model = GPSTokenWM(geom_mode=args.geom_mode, fdim=args.fdim, feat_source=args.feat_source,
+                       dino_imgsize=args.dino_imgsize).to(dev)
     for p in model.encoder.parameters():
         p.requires_grad_(False)
     model.w_jepa, model.w_sigreg, model.w_ground = args.w_jepa, args.w_sigreg, args.w_ground

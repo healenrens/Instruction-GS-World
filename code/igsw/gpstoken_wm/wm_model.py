@@ -31,16 +31,18 @@ from .losses import geom_loss, jepa_loss, relevance_infonce, mover_magnitude
 class GPSTokenWM(nn.Module):
     def __init__(self, qwen_path: str | None = None, d_model: int = 1536, n_heads: int = 16,
                  n_query: int = 16, fdim: int = 128, geom_mode: str = "xyz", num_freqs: int = 10,
-                 feat_source: str = "qwen"):
+                 feat_source: str = "qwen", dino_imgsize: int = 518):
         super().__init__()
         self.encoder = QwenVLEncoder(qwen_path) if qwen_path else QwenVLEncoder()
         H = self.encoder.hidden_size
         # direction A: token VISUAL feature source — "qwen" (VLM patches) or "dino" (frozen DINOv2 dense).
         # Qwen always does the LANGUAGE conditioning regardless; this only swaps the per-token visual feat.
+        # dino_imgsize raises DINOv2 input res (518->770 = 37->55 patch grid) = FINER per-token features =
+        # lower position-noise floor (PLAN §7 / §95续10: the floor is what surfaces rotation).
         self.feat_source = feat_source
         if feat_source == "dino":
             from .dino_features import DinoFeatures
-            self.dino = DinoFeatures()
+            self.dino = DinoFeatures(img_size=dino_imgsize)
             feat_dim_in = self.dino.embed_dim
         else:
             self.dino = None

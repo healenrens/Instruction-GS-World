@@ -41,7 +41,8 @@ def main():
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     cargs = ck.get("args", {})
     model = GPSTokenWM(geom_mode=cargs.get("geom_mode", "xyz"), fdim=cargs.get("fdim", 128),
-                       feat_source=cargs.get("feat_source", "qwen")).to(dev)
+                       feat_source=cargs.get("feat_source", "qwen"),
+                       dino_imgsize=cargs.get("dino_imgsize", 518)).to(dev)
     missing, unexpected = model.load_state_dict(ck["model"], strict=False)
     miss_train = [k for k in missing if not k.startswith("encoder.")]
     print(f"[eval] {args.ckpt} geom_mode={cargs.get('geom_mode')} | non-encoder missing={len(miss_train)} unexpected={len(unexpected)}", flush=True)
