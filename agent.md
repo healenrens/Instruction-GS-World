@@ -1540,3 +1540,15 @@ v1(c1024)跨 4 split:
 - **数据 `data/mix_rot_v2`(~410 clip,3 次 gen 调用 4-shard)**:① **PickCube@rotate ×170**(per-seed 变角 40-150° 双向、纯 spin 窗 start_frac 0.72、fuse_stride 3 补全 cube→半径更大)= 最大桶;② PickCube+PushCube auto ×110(变 mid-episode 窗 window_sec 4 + random_start)= 平移骨架;③ StackCube auto ×40 **整体 heldtask**(跨任务平移泛化);④ StackCube@rotate ×45 **整体 heldtask**(跨任务**旋转**泛化=最强测试,seed_base 7000 与训练 rotate 5000 disjoint);⑤ 真实 held clip symlink(仅 eval,sim-only 训练)。变角已 smoke 验证(57/68/73/88/120°)。
 - **训练 `gpswm_unified_dino`**:locked-v1 DINOv2(img 518 不用 770、xyz、L1024、w_mag 0)、**单卡 3000 步**、save_every 750、rotate clip 磁盘翻倍。+ 消融:`rotonly`(只 rotate,测稀释是否伤旋转)、`const-spin`(固定角,测"多样性 vs 仅更多 clip")。
 - **eval(主指标 = `_gps_rotread` rot-err vs GT-rot,不是 EPE)**:heldseed rotate(同分布旋转泛化)、heldtask StackCube@rotate(跨物体旋转泛化)、dcos/magR(平移没被旋转数据搞坏的回归守门)、grounding、5°5cm(报但不当成败标准,小 cube 几何苛刻)。链式 gen 编排 `_gen_mixrot_v2_chain.sh` 后台跑(~2h)。
+
+## §95 续15: ★ 规模化结果 = 旋转回退(纯spin提纯害事) + 可视化坐实"大运动欠预测更狠"
+**修了 1 个 bug**:`_gen_mixrot_v2_chain.sh` 里 `--held_task StackCube-v1` 对 task `"StackCube-v1@rotate"` 不匹配(build_jobs 比的是完整 task 串)→ stackcuberot 泄漏进 train。手动 rename 全部 → heldtask。最终干净:train 328(rotate 145+auto 183)/ heldseed 62 / heldtask 85。
+**三臂 @3000 eval(`_gps_rotread` thresh60,cube/hand)**:
+| 臂 | in-dist 旋转 | 没见过物体(stackcuberot) | 干净平移 dcos(n=8) |
+|---|---|---|---|
+| uni_nat 44%rot | 24° | 51° | -0.08 |
+| uni_os 61%rot | 0° | 0° | +0.69 |
+| rotonly2 100%rot | 0° | 0° | — |
+**★ 关键负向:`rotonly2`(纯新数据)旋转 0° —— 而旧 `rot_v1`(整段episode、固定124°、无fuse)纯旋转到了 99°。同样"只训旋转",新数据 0°、旧数据 99°。** 不是步数(3000>旧1500)。**病因:新 rotate 用 `start_frac 0.72` 纯spin窗切掉了抬起平移 → 整段位移只剩~1.7cm纯旋转 → smooth-L1 被总位移驱动,太小就预测~0(零位移是低损失躲避)。旧的6.8cm抬起平移是旋转梯度的"承重脚手架"。我为"干净"切掉的平移恰恰承重。** uni_nat 的 51°(没见过物体)有信号但 in-dist 仅24°、不稳;平移 dcos 是 n=8 噪声不可信。**纠正我一度的过度解读"多样性正则化、自然混合赢"——完整数据是三臂旋转都弱。**
+**★★ 可视化(`_gps_tokenviz.py`,表征级:带深度2D高斯token椭圆按深度着色,frame0→GT未来→PRED未来)坐实欠幅度,且大运动更狠**:旋转clip mag-ratio 0.69(GT14→PRED10cm,dir-cos0.89);平移搬运clip **0.30**(GT29→PRED**9**cm,dir-cos0.73)。**运动越大缩越狠(0.69→0.30),~9cm像个"安全保守值"。** = aleatoric hedging 签名(单帧+指令不定→确定性回归往均值缩)。**与旋转欠转同病。** 加幅度损失顶不动(§95试过伤方向)→ **真正的解大概率=生成式预测器(预测未来分布并采样,而非回归均值)**,回到 JEPA/世界模型本意。
+**新增脚本(均已同步)**:`_gps_rotread.py`(cube专属旋转读出,避开手臂link稀释)、`_gps_rotviz.py`(GT绿vs预测红旋转quiver)、`_gps_tokenviz.py`(表征级时序可视化+mag-ratio标注)。**预测是显式3D per-token坐标(可直接投回2D画),JEPA只是旁路特征损失。** 下一步候选:(a) whole-episode变角rotate重生成验证"纯spin是元凶";(b) 生成式head治本欠幅度。待用户定。
