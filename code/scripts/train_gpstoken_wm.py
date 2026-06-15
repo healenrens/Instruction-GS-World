@@ -46,6 +46,7 @@ def main():
     ap.add_argument("--w_motion", type=float, default=0.0, help="motion-weighted geom loss (direction-preserving mag fix)")
     ap.add_argument("--norm_target", type=int, default=0, help="1=scale-decoupled geom (predict scale-invariant FIELD + single global scale); attacks the aleatoric-scale under-prediction")
     ap.add_argument("--w_scale", type=float, default=0.1, help="weight on the single-global-scale loss (low = treat scale as aleatoric, focus on the field)")
+    ap.add_argument("--cond_scale", type=int, default=0, help="1=condition the predictor on the (oracle) global motion scale; tests whether SUPPLYING the scale fixes magnitude (path-1 premise)")
     ap.add_argument("--w_jepa", type=float, default=0.5)
     ap.add_argument("--w_sigreg", type=float, default=0.05)
     ap.add_argument("--w_ground", type=float, default=1.0)
@@ -70,6 +71,7 @@ def main():
         p.requires_grad_(False)
     model.w_jepa, model.w_sigreg, model.w_ground = args.w_jepa, args.w_sigreg, args.w_ground
     model.norm_target, model.w_scale = bool(args.norm_target), args.w_scale
+    model.cond_scale = bool(args.cond_scale)
     model.w_mag, model.w_motion = args.w_mag, args.w_motion
     enc = model.encoder
     mdl = DDP(model, device_ids=[local], find_unused_parameters=True) if ddp else model

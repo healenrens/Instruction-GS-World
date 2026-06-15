@@ -53,6 +53,12 @@ class GPSTokenWM(nn.Module):
         # ---- conditioning (faithfully copied from model_full.encode: per-layer proj + query aggregator) ----
         self.layer_proj = nn.ModuleList([nn.Linear(H, d) for _ in range(n_l)])
         self.cond_proj = nn.Linear(H, d)
+        # (path-1 probe) scale-conditioning: inject the per-clip GLOBAL motion scale into cond so the
+        # model can output full magnitude when the otherwise-aleatoric scale is SUPPLIED. zero-init last
+        # layer => no-op at start (warm-start safe). Decision test: does supplying the scale fix magR
+        # (=> path 1 'supply the scale via goal/action' suffices) or not (=> path 2 generative needed)?
+        self.scale_head = nn.Sequential(nn.Linear(1, d), nn.SiLU(), nn.Linear(d, d))
+        nn.init.zeros_(self.scale_head[-1].weight); nn.init.zeros_(self.scale_head[-1].bias)
         self.query = nn.Parameter(torch.randn(n_query, d) * 0.02)
         self.layer_id_emb = nn.Parameter(torch.randn(n_l, d) * 0.02)
         self.aggregator = CrossAttention(d, n_heads, ctx_dim=d)
@@ -147,6 +153,10 @@ class GPSTokenWM(nn.Module):
         vlm_inputs. Returns (loss, logs) — loss has grad through all trainable params; logs detached."""
         import torch.nn.functional as F
         ctx, ctxm, cond, text_feats = self.encode_cond(b["vlm0"])
+        if getattr(self, "cond_scale", False):                                # supply the (oracle) global scale
+            gdm = b["xyz1_gt"].float() - b["tok_xyz0"].float(); mm = b["disp_tok"] > 0.01
+            s = (gdm[mm].norm(dim=-1).mean() if mm.any() else gdm.norm(dim=-1).mean()).clamp_min(1e-3)
+            cond = cond + self.scale_head(torch.log(s).reshape(1, 1))
         grid0, ghw0 = (self.dino.grid(b["rgb0_np"]) if self.dino is not None
                        else self.encoder.image_grid_features(b["vlm0"]))
         tok_feat = self.feat_in(sample_grid_feat(grid0, ghw0, b["cen"], b["H"], b["W"])).float()

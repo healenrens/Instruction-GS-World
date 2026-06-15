@@ -80,6 +80,10 @@ def main():
         vlm0 = mv_in(enc.build_inputs(instr, rgb0))
         with torch.no_grad(), amp:
             ctx, ctxm, cond, text_feats = model.encode_cond(vlm0)
+            if cargs.get("cond_scale", False):                               # supply the oracle global scale (path-1 test)
+                gdm = xyz1_gt - tok_xyz0; mm = disp[idx] > 0.01
+                s = (gdm[mm].norm(dim=-1).mean() if mm.any() else gdm.norm(dim=-1).mean()).clamp_min(1e-3)
+                cond = cond + model.scale_head(torch.log(s).reshape(1, 1))
             grid0, ghw0 = (model.dino.grid(rgb0) if model.dino is not None else enc.image_grid_features(vlm0))
             tok_feat = model.feat_in(sample_grid_feat(grid0, ghw0, cen, H, W)).float()
             x = model.predict(tok_xyz0, tok_feat, sig_n, center, radius, ctx, ctxm, cond)
