@@ -91,14 +91,16 @@ def main():
 
     n_ok = n_drop = n_skip = n_fail = 0
     t0 = time.time()
-    for ji, (env, seed, split) in enumerate(mine):
-        short = env.replace("-v1", "").lower()
+    for ji, (env_spec, seed, split) in enumerate(mine):
+        env, _, policy = env_spec.partition("@")          # "PickCube-v1@rotate" -> env + rotate policy
+        policy = policy or "auto"
+        short = env.replace("-v1", "").lower() + ("rot" if policy == "rotate" else "")
         out = os.path.join(args.out, f"{short}_s{seed:04d}_{split}.pt")
         if os.path.isfile(out) and not args.overwrite:
             n_skip += 1
             continue
         try:
-            rec, instruction, success = generate_episode(env, seed, args.cam, args.cam)
+            rec, instruction, success = generate_episode(env, seed, args.cam, args.cam, policy=policy)
             if not success:
                 print(f"[gen {args.shard}] {env} s{seed}: NO motion -> drop", flush=True)
                 n_drop += 1
