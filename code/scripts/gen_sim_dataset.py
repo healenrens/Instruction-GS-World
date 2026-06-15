@@ -69,6 +69,8 @@ def main():
                     help="sim control Hz (PickCube/PushCube=20) to map window_sec -> sim steps")
     ap.add_argument("--random_start", type=int, default=0,
                     help="1: random clip start within the episode (deterministic per env+seed); needs episodes longer than the window")
+    ap.add_argument("--start_frac", type=float, default=0.0,
+                    help="when random_start=0: anchor the window at this frac of the valid range (e.g. 0.72 = onto the spin phase, AFTER the lift = PURE rotation, no translation)")
     ap.add_argument("--fuse_stride", type=int, default=0,
                     help=">0: WHOLE-VIDEO temporal fusion of the canonical G0 (every Nth frame registered into canonical via known poses) -> complete, low-uncertainty geometry; 0=single-frame G0 (legacy)")
     ap.add_argument("--min_val_psnr", type=float, default=16.0, help="drop clips whose mean(t>=1) full PSNR is below this")
@@ -107,7 +109,7 @@ def main():
                 continue
             sseed = int(hashlib.md5(f"{env}:{seed}:start".encode()).hexdigest()[:8], 16)
             rng = np.random.default_rng(sseed) if args.random_start else None
-            clip = build_clip(rec, args.K, dev, depth_max=args.depth_max,
+            clip = build_clip(rec, args.K, dev, depth_max=args.depth_max, start_frac=args.start_frac,
                               window_steps=window_steps, rng=rng, fuse_stride=args.fuse_stride)
             full, dyn, mover_names = validate(clip, dev, out_dir=None)
             mean_full = float(np.mean(full[1:]))
