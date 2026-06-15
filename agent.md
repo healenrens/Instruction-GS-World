@@ -1534,3 +1534,9 @@ v1(c1024)跨 4 split:
 **★ 结论(反转 §95 续2/核心):用 per-token 平移学旋转【确实可行】。** 之前"不行"是两件事叠加:(1) 原始 sim 数据旋转几乎为零(9°);(2) 旋转收敛比平移慢得多(小残差),~750-1800 步看着像"学不出",到 1500 步真相大白。**这验证了用户最初的核心设计赌注(无旋转头,靠平移学旋转)。** rel-rot-err 仍 ~56°(轴有抖动+幅度欠 23%+逐 token 噪声)→ 不完美但决定性地"会转"。
 - 仍欠 23%(99 vs 129):是优化/收敛,不是表达极限 —— **overfit 单 clip 铁证:`gpswm_rotof@400` 预测 125° = GT 125°,rel-rot-err 仅 13°(近乎完美)。架构能【完整】表达旋转,数据集上的 99° 纯属没训够/多 clip 平均。** 续12"表达极限"彻底作废。
 - magR 在 rot 数据上也 ~0.68(pred 7.8 vs 11.5)→ "欠预测"部分也可能是欠训,待验(`gpswm_rot3k` 跑 3000 步,看 99→129 是否闭合 + 平移 magR 是否随步数上爬)。
+
+## §95 续14: 用户拍板"上更大数据规模" → Workflow 设计 vetted spec → 生成 mix_rot_v2 + 统一训练
+用户 `我觉得没问题 以及我们是不是应该在更大的数据规模性去训练?`。ultracode 开,用 **Workflow(whdi98cwb,4 agent:3 提案+综合/对抗审查)** 设计了规模化 spec(full 见 task 输出)。Workflow 抓出真问题:`--seeds/start_frac/fuse` 是**全局**flag(须拆 3 次 gen 调用)、trainer **无 --resume**(curriculum 不可行→flat 训练)、旋转会被平移淹没(→旋转设最大桶 + **磁盘 oversample**:复制 rotate `_train.pt` 使有效占比~55%)、PSNR 过滤可能掉旋转 clip(→生成后数 count)、seed 泄漏(→disjoint seed_base)。
+- **数据 `data/mix_rot_v2`(~410 clip,3 次 gen 调用 4-shard)**:① **PickCube@rotate ×170**(per-seed 变角 40-150° 双向、纯 spin 窗 start_frac 0.72、fuse_stride 3 补全 cube→半径更大)= 最大桶;② PickCube+PushCube auto ×110(变 mid-episode 窗 window_sec 4 + random_start)= 平移骨架;③ StackCube auto ×40 **整体 heldtask**(跨任务平移泛化);④ StackCube@rotate ×45 **整体 heldtask**(跨任务**旋转**泛化=最强测试,seed_base 7000 与训练 rotate 5000 disjoint);⑤ 真实 held clip symlink(仅 eval,sim-only 训练)。变角已 smoke 验证(57/68/73/88/120°)。
+- **训练 `gpswm_unified_dino`**:locked-v1 DINOv2(img 518 不用 770、xyz、L1024、w_mag 0)、**单卡 3000 步**、save_every 750、rotate clip 磁盘翻倍。+ 消融:`rotonly`(只 rotate,测稀释是否伤旋转)、`const-spin`(固定角,测"多样性 vs 仅更多 clip")。
+- **eval(主指标 = `_gps_rotread` rot-err vs GT-rot,不是 EPE)**:heldseed rotate(同分布旋转泛化)、heldtask StackCube@rotate(跨物体旋转泛化)、dcos/magR(平移没被旋转数据搞坏的回归守门)、grounding、5°5cm(报但不当成败标准,小 cube 几何苛刻)。链式 gen 编排 `_gen_mixrot_v2_chain.sh` 后台跑(~2h)。
