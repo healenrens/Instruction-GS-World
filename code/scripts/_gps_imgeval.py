@@ -9,7 +9,7 @@ import numpy as np, torch
 import torch.nn.functional as F
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from igsw.gpstoken_wm import GPSTokenWM, place_tokens, sample_grid_feat  # noqa: E402
-from igsw.gpstoken_wm.tokens import project_to_uv  # noqa: E402
+from igsw.gpstoken_wm.tokens import project_to_uv, to_cam  # noqa: E402
 from igsw.gaussians.gpstoken import mover_saliency  # noqa: E402
 
 
@@ -63,13 +63,20 @@ def main():
         magr = float(fp[mv].norm(dim=-1).median() / fg[mv].norm(dim=-1).median().clamp_min(1e-9))
         gpx = float(fg[mv].norm(dim=-1).median()) * 100                      # GT image flow as % of image size
         ppx = float(fp[mv].norm(dim=-1).median()) * 100
-        rows.append((dcos, magr, gpx, ppx))
+        # depth-change (Δlog z): magnitude ratio + sign agreement (is depth motion learned?)
+        z0 = to_cam(tok_xyz0, vm)[:, 2].clamp_min(1e-3)
+        ldp = torch.log(to_cam(xyz1_pred, vm)[:, 2].clamp_min(1e-3) / z0)
+        ldg = torch.log(to_cam(xyz1_gt, vm)[:, 2].clamp_min(1e-3) / z0)
+        dmagr = float(ldp[mv].abs().median() / ldg[mv].abs().median().clamp_min(1e-9))
+        dsign = float((torch.sign(ldp[mv]) == torch.sign(ldg[mv])).float().mean())
+        rows.append((dcos, magr, gpx, ppx, dmagr, dsign))
     A = np.array(rows)
     def md(x): return float(np.median(x))
     print(f"[{os.path.basename(args.ckpt)} on {args.split}]  n_clip={len(A)}  IMAGE-space:")
     print(f"  image dir-cos: {md(A[:,0]):+.2f}")
     print(f"  image-flow MAG-RATIO (pred/GT): {md(A[:,1]):.2f}   <== ~1.0 = magnitude SOLVED (vs 3D magR ~0.5)")
     print(f"  GT image flow {md(A[:,2]):.1f}% of img  vs PRED {md(A[:,3]):.1f}%")
+    print(f"  DEPTH Δlogz mag-ratio: {md(A[:,4]):.2f}   sign-agreement: {md(A[:,5])*100:.0f}%   <== is depth motion learned?")
 
 
 if __name__ == "__main__":

@@ -1579,3 +1579,11 @@ v1(c1024)跨 4 split:
 - **★ 用户直觉对了**:按图像 W,H 归一化 = 用固定已知常数归一化,目标是图像分数(~0.3)尺度一致 → 不像 3D 米动态范围巨大 → 不再赌小缩水;且视觉接地。**方向 +0.81 优秀,幅度 0.73 远好于 3D 一贯的 ~0.5,更碾压 3D 投到图像的 0.11。** 与续16(按 motion-scale 归一化失败,只搬家)的关键区别:**归一化的【分母】是图像尺寸(固定常数)而非 per-clip 运动量(数据相关→不稳)。**
 - **保留**:@750 还欠训(magR 0.22),@1500 才 0.73;train magR 1.21 vs held 0.73 = 过拟合(仅 183 clip)→ 差到 1.0 的部分主要是数据少。纯 2D,深度还用 0.1 锚没正经学。
 - **下一步(待用户定)**:① 扩干净平移数据 + 训久,把 held magR 0.73→逼近 1(过拟合 gap 可补);② 把深度从锚换成正经归一化深度预测,拿回完整 3D。`gpswm_img` 保留。
+
+## §96: ★★ 架构 v2(用户拍板)—— DDP 多卡 + 融合(grounding=门、JEPA 从运动派生进预训练 latent)
+用户三条质疑全采纳:(1)**"DDP 更差"无依据**(我早撤回过,是 n=8 噪声+mag损失混淆)→ **以后所有训练 torchrun 多卡**(更大有效 batch = 更稳,正治幅度不稳)。(2)**多头会让方向漂移**(geom 和 JEPA 共享主干互拽,且 JEPA 作为 head 近乎没用 +0.002)。(3)**DINOv2 冻结但对齐太薄**(只一个 Linear,被 4 目标共享)。
+**纠正对 JEPA 的理解(用户)**:JEPA 不该是 head,而是 **world-model 附加部分** —— DiT 预测的"未来"一支预测绝对位移、一支在 latent space 预测该处 latent 如何变;**JEPA 目标要用预训练模型(非我们 feat_in),且适配非均匀 patch**(DINOv2 是均匀切分预训练)。融合方向(用户认可我的设计):**grounding 当门调制运动(非并行 head)、JEPA 从运动派生(动完那个位置的特征)**。
+**实现 `--fuse`(wm_model.py)**:① grounding = `sigmoid(relevance(tok_feat,text))` 的**门**,`motion = gate × geom_head(x)`;监督用 BCE-with-logits(门 vs mover掩码,autocast 安全),**去掉并行 InfoNCE**。② JEPA = `jepa_head(x)→raw 冻结 DINOv2 latent(1024,非 feat_in)`,目标在**未来位置 footprint 池化**(`_footprint_sample` 5点±0.7σ,适配非均匀 token);cosine 损失 + SIGReg(jepa_pred)。③ 两支都从同一个未来 hidden x 读出 = 一致的两个视图,不抢主干。④ DDP `find_unused_parameters=True`(fuse 下 content_head 闲置)。
+**smoke 验证(25步单卡)通过**:loss 有限下降,geom(运动)学、**jepa 0.97→0.65**(预测预训练未来 latent)、**inst 0.9→0.1**(门学会预测 mover,relSel 1)。
+**①数据扩了**:`trans_v2` = trans_v1 + 新生成 PickCube/Push/Pull auto = **556 train + 98 heldseed + 40 heldtask**(原 183,补过拟合 gap)。**②深度**已并入(img_loss + Δlogz)。
+**当前**:`gpswm_fuse` = v2 全家桶(DDP 4卡 + fuse + img_loss + depth)在 trans_v2 上跑(1500 步)。待评:held 图像 magR(过拟合 gap 是否随数据+DDP 缩小)+ 门/JEPA 质量。DINOv2 加厚 adapter 留作下一步(本轮先验证融合+DDP+数据)。

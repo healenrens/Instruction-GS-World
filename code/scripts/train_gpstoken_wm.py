@@ -48,6 +48,8 @@ def main():
     ap.add_argument("--w_scale", type=float, default=0.1, help="weight on the single-global-scale loss (low = treat scale as aleatoric, focus on the field)")
     ap.add_argument("--accum", type=int, default=1, help="gradient accumulation: effective batch = accum clips/step (stabilizes 1-clip/step, esp. with norm_target)")
     ap.add_argument("--img_loss", type=int, default=0, help="1=supervise on NORMALIZED 2D image displacement (Δu/W,Δv/H) instead of 3D meters; logs 'mag'=image-flow magR, 'dcos'=image dcos")
+    ap.add_argument("--w_depth", type=float, default=0.5, help="weight on the normalized depth-change (Δlog z) term under img_loss (full 3D = image-flow + depth)")
+    ap.add_argument("--fuse", type=int, default=0, help="v2 fused arch: grounding=GATE modulating motion; JEPA=read-out into RAW pretrained latent (footprint-pooled, derived from motion), not parallel heads")
     ap.add_argument("--cond_scale", type=int, default=0, help="1=condition the predictor on the (oracle) global motion scale; tests whether SUPPLYING the scale fixes magnitude (path-1 premise)")
     ap.add_argument("--w_jepa", type=float, default=0.5)
     ap.add_argument("--w_sigreg", type=float, default=0.05)
@@ -74,6 +76,8 @@ def main():
     model.w_jepa, model.w_sigreg, model.w_ground = args.w_jepa, args.w_sigreg, args.w_ground
     model.norm_target, model.w_scale = bool(args.norm_target), args.w_scale
     model.img_loss = bool(args.img_loss)
+    model.w_depth = args.w_depth
+    model.fuse = bool(args.fuse)
     model.cond_scale = bool(args.cond_scale)
     model.w_mag, model.w_motion = args.w_mag, args.w_motion
     enc = model.encoder

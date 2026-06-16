@@ -24,8 +24,19 @@ from ..dynamics.conditioning import QwenVLEncoder
 from ..dynamics.transformer import DiTBlock, CrossAttention
 from ..dynamics.pe import FourierPE3D
 from .sigreg import SIGReg
-from .tokens import sample_grid_feat, project_to_uv
+from .tokens import sample_grid_feat, project_to_uv, to_cam
 from .losses import geom_loss, jepa_loss, relevance_infonce, mover_magnitude
+
+
+def _footprint_sample(grid, ghw, uv, sigma_px, H, W):
+    """JEPA non-uniform adaptation: pool a FROZEN pretrained feature grid over each token's sigma
+    footprint (5-point plus-pattern at center + ±0.7σ) instead of point-sampling — the pretrained grid
+    is UNIFORM-patch, our tokens are non-uniform, so we average the patch features the token covers."""
+    offs = torch.tensor([[0., 0.], [.7, 0.], [-.7, 0.], [0., .7], [0., -.7]], device=uv.device, dtype=uv.dtype)
+    acc = 0.
+    for o in offs:
+        acc = acc + sample_grid_feat(grid, ghw, uv + o[None] * sigma_px, H, W)
+    return acc / offs.shape[0]
 
 
 class GPSTokenWM(nn.Module):
@@ -75,6 +86,11 @@ class GPSTokenWM(nn.Module):
         self.geom_head = nn.Linear(d, 3)
         nn.init.zeros_(self.geom_head.weight); nn.init.zeros_(self.geom_head.bias)   # start = no motion
         self.content_head = nn.Linear(d, fdim)
+        # v2 fusion (--fuse): JEPA predicts into the FROZEN PRETRAINED latent (raw DINOv2, NOT our feat_in),
+        # as a world-model read-out of "how the latent at this place changes" — derived from the same future
+        # hidden x that produces motion (a consistent second view of the future, not a competing head).
+        self.jepa_head = nn.Sequential(nn.Linear(d, d), nn.SiLU(), nn.Linear(d, feat_dim_in))
+        self.fuse = False
         self.rel_proj = nn.Sequential(nn.Linear(fdim, d), nn.SiLU(), nn.Linear(d, H))
         self.rel_temp = 0.07
         self.sigreg = SIGReg(num_proj=512)
@@ -161,12 +177,28 @@ class GPSTokenWM(nn.Module):
                        else self.encoder.image_grid_features(b["vlm0"]))
         tok_feat = self.feat_in(sample_grid_feat(grid0, ghw0, b["cen"], b["H"], b["W"])).float()
         x = self.predict(b["tok_xyz0"], tok_feat, b["sig_n"], b["center"], b["radius"], ctx, ctxm, cond)
-        xyz1_pred, feat_pred = self.heads(x, b["tok_xyz0"], b["K_intr"], b["viewmat"])
+        if getattr(self, "fuse", False):
+            h = x[0]
+            gl = self.relevance(tok_feat, text_feats.mean(0))                     # gate logit [M]
+            gate = torch.sigmoid(gl)                                              # [M] instruction-relevance GATE
+            g = gate[:, None] * self.geom_head(h).float()                         # grounding GATES motion (not parallel head)
+            xyz1_pred = self.geom_to_xyz(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
+            jepa_pred = self.jepa_head(h).float()                                 # world-model latent read-out
+            feat_pred = None; self._gate = gate; self._gate_logit = gl
+        else:
+            xyz1_pred, feat_pred = self.heads(x, b["tok_xyz0"], b["K_intr"], b["viewmat"])
         with torch.no_grad():
             gridK, ghwK = (self.dino.grid(b["rgbK_np"]) if self.dino is not None
                            else self.encoder.image_grid_features(b["vlmK"]))
             fut_uv = project_to_uv(b["xyz1_gt"], b["K_intr"], b["viewmat"])
-            tgt = self.feat_in(sample_grid_feat(gridK, ghwK, fut_uv, b["H"], b["W"])).float().detach()
+            if getattr(self, "fuse", False):
+                # JEPA target = RAW frozen PRETRAINED feature (NOT our feat_in), footprint-pooled at the
+                # future location (= where the token moves) -> "latent at the moved place", a pretrained
+                # latent we predict to retain future-feature prediction without competing with motion.
+                sig_px = b["sig_n"] * float(max(b["H"], b["W"]))
+                tgt = _footprint_sample(gridK, ghwK, fut_uv, sig_px, b["H"], b["W"]).float().detach()
+            else:
+                tgt = self.feat_in(sample_grid_feat(gridK, ghwK, fut_uv, b["H"], b["W"])).float().detach()
         # direction-PRESERVING magnitude fix: up-weight high-motion tokens in the POSITION loss (vs the
         # dead-end relative mover_magnitude which inflated wrong directions). Still smooth-L1 on xyz => no
         # direction damage; just makes the model serve big movers (which smooth-L1's median-seeking under-serves).
@@ -190,7 +222,14 @@ class GPSTokenWM(nn.Module):
             self._fp = (uv1p - uv0) / Wn; self._fg = (uv1g - uv0) / Wn
             per = F.smooth_l1_loss(self._fp, self._fg, beta=0.02, reduction="none").mean(-1)
             img_l = (per * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else per.mean()
-            l_geom = img_l + 0.1 * geom_loss(xyz1_pred.float(), b["xyz1_gt"].float(), weight=mw)
+            # + normalized DEPTH change (Δlog z): full 3D = image-flow + depth, both consistent-scale
+            # targets (vs the failed flowd which used raw-pixel flow + loss on 3D position).
+            z0 = to_cam(b["tok_xyz0"].float(), vm_)[:, 2].clamp_min(1e-3)
+            ldp = torch.log(to_cam(xyz1_pred.float(), vm_)[:, 2].clamp_min(1e-3) / z0)
+            ldg = torch.log(to_cam(b["xyz1_gt"].float(), vm_)[:, 2].clamp_min(1e-3) / z0)
+            perz = F.smooth_l1_loss(ldp, ldg, beta=0.05, reduction="none")
+            depth_l = (perz * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else perz.mean()
+            l_geom = img_l + getattr(self, "w_depth", 0.5) * depth_l
         elif getattr(self, "norm_target", False):
             # SCALE-NORMALIZED target (user's relative-distance idea, §95续16): the model predicts the
             # per-token displacement field DIVIDED by the clip's global motion scale = a unit-scale
@@ -214,17 +253,25 @@ class GPSTokenWM(nn.Module):
         else:
             l_geom = geom_loss(xyz1_pred.float(), b["xyz1_gt"].float(), weight=mw)
         l_mag = mover_magnitude(xyz1_pred.float(), b["tok_xyz0"].float(), b["xyz1_gt"].float(), b["disp_tok"])
-        l_jepa = jepa_loss(F.layer_norm(feat_pred.float(), (self.fdim,)),
-                           F.layer_norm(tgt, (self.fdim,)).detach())
-        l_sig = self.sigreg(tok_feat)
-        l_inst = tok_feat.new_zeros(())
-        relsel = torch.zeros((), device=tok_feat.device)
-        if b.get("is_obj_tok") is not None and self.w_ground > 0:
-            rel = self.relevance(tok_feat, text_feats.mean(0))
-            pos = b["is_obj_tok"].bool()
-            l_inst = relevance_infonce(rel, pos)
-            if pos.any():
-                relsel = pos[rel.argmax()].float()
+        if getattr(self, "fuse", False):
+            jp = F.normalize(jepa_pred, dim=-1); jt = F.normalize(tgt, dim=-1)
+            l_jepa = (1.0 - (jp * jt).sum(-1)).mean()                        # cosine into RAW pretrained latent
+            l_sig = self.sigreg(jepa_pred)
+            mvr = (b["disp_tok"] > 0.01).float()                            # grounding GATE supervised to movers
+            l_inst = F.binary_cross_entropy_with_logits(self._gate_logit.float(), mvr)
+            relsel = ((self._gate > 0.5).float() == mvr).float().mean()
+        else:
+            l_jepa = jepa_loss(F.layer_norm(feat_pred.float(), (self.fdim,)),
+                               F.layer_norm(tgt, (self.fdim,)).detach())
+            l_sig = self.sigreg(tok_feat)
+            l_inst = tok_feat.new_zeros(())
+            relsel = torch.zeros((), device=tok_feat.device)
+            if b.get("is_obj_tok") is not None and self.w_ground > 0:
+                rel = self.relevance(tok_feat, text_feats.mean(0))
+                pos = b["is_obj_tok"].bool()
+                l_inst = relevance_infonce(rel, pos)
+                if pos.any():
+                    relsel = pos[rel.argmax()].float()
         loss = (l_geom + self.w_mag * l_mag + self.w_jepa * l_jepa
                 + self.w_sigreg * l_sig + self.w_ground * l_inst)
         with torch.no_grad():
