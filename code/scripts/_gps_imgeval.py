@@ -1,0 +1,76 @@
+"""Image-space held eval (for the --img_loss idea): does the model predict the NORMALIZED 2D image
+displacement (Δu/W, Δv/H) with the RIGHT MAGNITUDE? Compares any ckpt's mover image-flow vs GT:
+image dir-cos + image-flow magnitude ratio (median |pred|/|GT|). The decisive test of whether
+supervising in normalized image space cures the 3D magnitude under-prediction (3D magR ~0.5).
+Usage: _gps_imgeval.py --ckpt checkpoints/gpswm_img/wm_000750.pt --data data/trans_v1 --split held
+"""
+import argparse, glob, os, sys
+import numpy as np, torch
+import torch.nn.functional as F
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from igsw.gpstoken_wm import GPSTokenWM, place_tokens, sample_grid_feat  # noqa: E402
+from igsw.gpstoken_wm.tokens import project_to_uv  # noqa: E402
+from igsw.gaussians.gpstoken import mover_saliency  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ckpt", required=True); ap.add_argument("--data", required=True)
+    ap.add_argument("--split", default="held"); ap.add_argument("--L", type=int, default=1024)
+    ap.add_argument("--beta", type=float, default=30.0)
+    args = ap.parse_args(); dev = "cuda"
+    ck = torch.load(args.ckpt, map_location="cpu", weights_only=False); cargs = ck.get("args", {})
+    model = GPSTokenWM(geom_mode=cargs.get("geom_mode", "xyz"), fdim=cargs.get("fdim", 128),
+                       feat_source=cargs.get("feat_source", "qwen"), dino_imgsize=cargs.get("dino_imgsize", 518)).to(dev)
+    model.load_state_dict(ck["model"], strict=False); model.eval()
+    for p in model.parameters(): p.requires_grad_(False)
+    enc = model.encoder
+
+    def mv_in(inp):
+        return {k: (v.to(dev, dtype=torch.bfloat16) if (torch.is_tensor(v) and v.is_floating_point())
+                    else (v.to(dev) if torch.is_tensor(v) else v)) for k, v in inp.items()}
+
+    clips = sorted(glob.glob(f"{args.data}/*{args.split}*.pt"))
+    amp = torch.autocast("cuda", dtype=torch.bfloat16)
+    rows = []
+    for cp in clips:
+        c = torch.load(cp, map_location=dev, weights_only=False)
+        means = c["means"].to(dev).float(); uv = c["uv"].to(dev).float(); traj = c["traj"].to(dev).float()
+        N = means.shape[0]; H, W = int(c["H"]), int(c["W"]); K = int(c["Kf"])
+        Ki = c["K_intr"].to(dev).float(); vm = c["viewmat"].to(dev).float()
+        instr = c.get("instruction", ""); n_keep = N - int(c.get("n_fill", 0))
+        disp = (traj[K] - traj[0]).norm(dim=-1)
+        sal = mover_saliency(uv, disp, n_keep, H, W) if args.beta > 0 else None
+        rgb0 = c["gt_rgb"][0].cpu().numpy().astype(np.uint8)
+        cen, sig, idx = place_tokens(rgb0, uv, n_keep, args.L, dev, sal=sal, beta=args.beta)
+        tok_xyz0 = means[idx]; xyz1_gt = traj[K][idx]; sig_n = (sig / float(max(H, W))).clamp(0, 1)
+        center = means[:n_keep].mean(0, keepdim=True); radius = (means[:n_keep] - center).norm(dim=-1).amax().clamp_min(1e-6)
+        vlm0 = mv_in(enc.build_inputs(instr, rgb0))
+        with torch.no_grad(), amp:
+            ctxc, ctxm, cond, _ = model.encode_cond(vlm0)
+            grid0, ghw0 = (model.dino.grid(rgb0) if model.dino is not None else enc.image_grid_features(vlm0))
+            tok_feat = model.feat_in(sample_grid_feat(grid0, ghw0, cen, H, W)).float()
+            x = model.predict(tok_xyz0, tok_feat, sig_n, center, radius, ctxc, ctxm, cond)
+            xyz1_pred, _ = model.heads(x, tok_xyz0, Ki, vm)
+        xyz1_pred = xyz1_pred.float()
+        Wn = xyz1_pred.new_tensor([float(W), float(H)])
+        uv0 = project_to_uv(tok_xyz0, Ki, vm); uv1p = project_to_uv(xyz1_pred, Ki, vm); uv1g = project_to_uv(xyz1_gt, Ki, vm)
+        fp = (uv1p - uv0) / Wn; fg = (uv1g - uv0) / Wn                       # normalized image flow
+        mv = disp[idx] > 0.01
+        if mv.sum() < 5:
+            continue
+        dcos = float(F.cosine_similarity(fp[mv], fg[mv], dim=-1).mean())
+        magr = float(fp[mv].norm(dim=-1).median() / fg[mv].norm(dim=-1).median().clamp_min(1e-9))
+        gpx = float(fg[mv].norm(dim=-1).median()) * 100                      # GT image flow as % of image size
+        ppx = float(fp[mv].norm(dim=-1).median()) * 100
+        rows.append((dcos, magr, gpx, ppx))
+    A = np.array(rows)
+    def md(x): return float(np.median(x))
+    print(f"[{os.path.basename(args.ckpt)} on {args.split}]  n_clip={len(A)}  IMAGE-space:")
+    print(f"  image dir-cos: {md(A[:,0]):+.2f}")
+    print(f"  image-flow MAG-RATIO (pred/GT): {md(A[:,1]):.2f}   <== ~1.0 = magnitude SOLVED (vs 3D magR ~0.5)")
+    print(f"  GT image flow {md(A[:,2]):.1f}% of img  vs PRED {md(A[:,3]):.1f}%")
+
+
+if __name__ == "__main__":
+    main()

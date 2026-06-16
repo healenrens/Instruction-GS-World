@@ -176,7 +176,22 @@ class GPSTokenWM(nn.Module):
             mv = d > 0.01
             mvmed = d[mv].median() if mv.any() else d.new_tensor(0.05)
             mw = (1.0 + self.w_motion * (d / mvmed.clamp_min(1e-3))).clamp(max=10.0)
-        if getattr(self, "norm_target", False):
+        if getattr(self, "img_loss", False):
+            # IMAGE-NORMALIZED 2D-flow target (user's idea §95续18): supervise per-token motion as the
+            # NORMALIZED 2D IMAGE displacement (Δu/W, Δv/H) — how far it moves in the image as a fraction
+            # of image size. Tied to the GPSToken 2D representation, and a consistently-scaled target
+            # (image fractions, not wildly-varying meters) -> directly attacks magnitude under-prediction.
+            # Small 3D anchor (0.1*geom) keeps depth sane.
+            K_ = b["K_intr"].float(); vm_ = b["viewmat"].float()
+            Wn = xyz1_pred.new_tensor([float(b["W"]), float(b["H"])])
+            uv0 = project_to_uv(b["tok_xyz0"].float(), K_, vm_)
+            uv1p = project_to_uv(xyz1_pred.float(), K_, vm_)
+            uv1g = project_to_uv(b["xyz1_gt"].float(), K_, vm_)
+            self._fp = (uv1p - uv0) / Wn; self._fg = (uv1g - uv0) / Wn
+            per = F.smooth_l1_loss(self._fp, self._fg, beta=0.02, reduction="none").mean(-1)
+            img_l = (per * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else per.mean()
+            l_geom = img_l + 0.1 * geom_loss(xyz1_pred.float(), b["xyz1_gt"].float(), weight=mw)
+        elif getattr(self, "norm_target", False):
             # SCALE-NORMALIZED target (user's relative-distance idea, §95续16): the model predicts the
             # per-token displacement field DIVIDED by the clip's global motion scale = a unit-scale
             # RELATIVE field. The aleatoric absolute scale is FACTORED OUT of the regression target
@@ -218,7 +233,12 @@ class GPSTokenWM(nn.Module):
             mv = b["disp_tok"] > 0.01
             dcos = (F.cosine_similarity((xyz1_pred - b["tok_xyz0"])[mv], (b["xyz1_gt"] - b["tok_xyz0"])[mv],
                     dim=-1).mean() if mv.any() else torch.zeros((), device=tok_feat.device))
-        logs = {"loss": loss.detach(), "geom": l_geom.detach(), "mag": l_mag.detach(), "jepa": l_jepa.detach(),
+            img_magr = torch.zeros((), device=tok_feat.device)
+            if getattr(self, "img_loss", False) and mv.any():               # report IMAGE-space dcos + flow magR
+                dcos = F.cosine_similarity(self._fp[mv], self._fg[mv], dim=-1).mean()
+                img_magr = self._fp[mv].norm(dim=-1).median() / self._fg[mv].norm(dim=-1).median().clamp_min(1e-6)
+        logs = {"loss": loss.detach(), "geom": l_geom.detach(),
+                "mag": (img_magr if getattr(self, "img_loss", False) else l_mag).detach(), "jepa": l_jepa.detach(),
                 "sig": l_sig.detach(), "inst": l_inst.detach() if torch.is_tensor(l_inst) else l_inst,
                 "skill": (err_static - err_pred).detach(), "errp": err_pred.detach(),
                 "dcos": dcos.detach(), "relsel": relsel.detach(), "fstd": tok_feat.float().std().detach()}

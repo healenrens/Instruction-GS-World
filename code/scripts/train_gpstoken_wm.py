@@ -46,6 +46,8 @@ def main():
     ap.add_argument("--w_motion", type=float, default=0.0, help="motion-weighted geom loss (direction-preserving mag fix)")
     ap.add_argument("--norm_target", type=int, default=0, help="1=scale-decoupled geom (predict scale-invariant FIELD + single global scale); attacks the aleatoric-scale under-prediction")
     ap.add_argument("--w_scale", type=float, default=0.1, help="weight on the single-global-scale loss (low = treat scale as aleatoric, focus on the field)")
+    ap.add_argument("--accum", type=int, default=1, help="gradient accumulation: effective batch = accum clips/step (stabilizes 1-clip/step, esp. with norm_target)")
+    ap.add_argument("--img_loss", type=int, default=0, help="1=supervise on NORMALIZED 2D image displacement (Δu/W,Δv/H) instead of 3D meters; logs 'mag'=image-flow magR, 'dcos'=image dcos")
     ap.add_argument("--cond_scale", type=int, default=0, help="1=condition the predictor on the (oracle) global motion scale; tests whether SUPPLYING the scale fixes magnitude (path-1 premise)")
     ap.add_argument("--w_jepa", type=float, default=0.5)
     ap.add_argument("--w_sigreg", type=float, default=0.05)
@@ -71,6 +73,7 @@ def main():
         p.requires_grad_(False)
     model.w_jepa, model.w_sigreg, model.w_ground = args.w_jepa, args.w_sigreg, args.w_ground
     model.norm_target, model.w_scale = bool(args.norm_target), args.w_scale
+    model.img_loss = bool(args.img_loss)
     model.cond_scale = bool(args.cond_scale)
     model.w_mag, model.w_motion = args.w_mag, args.w_motion
     enc = model.encoder
@@ -86,49 +89,56 @@ def main():
         print(f"[gpswm] {len(clips)} train clips ({len(shard)}/rank)", flush=True)
     amp = torch.autocast("cuda", dtype=torch.bfloat16)
     step, t0, ci = 0, time.time(), 0
+    accum = max(1, args.accum)
     while step < args.steps:
-        cp = shard[ci % len(shard)]; ci += 1
-        ok = True
-        try:
-            c = torch.load(cp, map_location=dev, weights_only=False)
-            means = c["means"].to(dev).float(); uv = c["uv"].to(dev).float()
-            traj = c["traj"].to(dev).float(); N = means.shape[0]
-            H, W = int(c["H"]), int(c["W"]); K = int(c["Kf"])
-            instr = c.get("instruction", ""); n_keep = N - int(c.get("n_fill", 0))
-            disp = (traj[K] - traj[0]).norm(dim=-1)
-            sal = mover_saliency(uv, disp, n_keep, H, W) if args.beta > 0 else None
-            rgb0 = c["gt_rgb"][0].cpu().numpy().astype(np.uint8)
-            imgK = c["gt_rgb"][K].cpu().numpy().astype(np.uint8)
-            cen, sig, idx = place_tokens(rgb0, uv, n_keep, args.L, dev, sal=sal, beta=args.beta)
-            if idx.shape[0] < 16:
-                raise ValueError("too few tokens")
-            center = means[:n_keep].mean(0, keepdim=True)
-            batch = {
-                "vlm0": mv_in(enc.build_inputs(instr, rgb0), dev),
-                "vlmK": mv_in(enc.build_inputs(instr, imgK), dev),
-                "cen": cen, "sig_n": (sig / float(max(H, W))).clamp(0, 1),
-                "tok_xyz0": means[idx], "xyz1_gt": traj[K][idx], "disp_tok": disp[idx],
-                "is_obj_tok": (c["is_obj"].to(dev)[idx] if "is_obj" in c else None),
-                "center": center, "radius": (means[:n_keep] - center).norm(dim=-1).amax().clamp_min(1e-6),
-                "K_intr": c["K_intr"].to(dev).float(), "viewmat": c["viewmat"].to(dev).float(),
-                "H": H, "W": W, "rgb0_np": rgb0, "rgbK_np": imgK,
-            }
-        except Exception as e:
-            ok = False
-            if is_main:
-                print(f"[skip] prep {os.path.basename(cp)}: {type(e).__name__}: {e}", flush=True)
-        if ddp:
-            flag = torch.tensor([1.0 if ok else 0.0], device=dev)
-            dist.all_reduce(flag, op=dist.ReduceOp.MIN)
-            ok = flag.item() > 0.5
-        if not ok:
+        opt.zero_grad(set_to_none=True)
+        agg, n_ok = None, 0
+        for _m in range(accum):                                  # gradient accumulation -> effective batch = accum clips
+            cp = shard[ci % len(shard)]; ci += 1
+            ok = True
+            try:
+                c = torch.load(cp, map_location=dev, weights_only=False)
+                means = c["means"].to(dev).float(); uv = c["uv"].to(dev).float()
+                traj = c["traj"].to(dev).float(); N = means.shape[0]
+                H, W = int(c["H"]), int(c["W"]); K = int(c["Kf"])
+                instr = c.get("instruction", ""); n_keep = N - int(c.get("n_fill", 0))
+                disp = (traj[K] - traj[0]).norm(dim=-1)
+                sal = mover_saliency(uv, disp, n_keep, H, W) if args.beta > 0 else None
+                rgb0 = c["gt_rgb"][0].cpu().numpy().astype(np.uint8)
+                imgK = c["gt_rgb"][K].cpu().numpy().astype(np.uint8)
+                cen, sig, idx = place_tokens(rgb0, uv, n_keep, args.L, dev, sal=sal, beta=args.beta)
+                if idx.shape[0] < 16:
+                    raise ValueError("too few tokens")
+                center = means[:n_keep].mean(0, keepdim=True)
+                batch = {
+                    "vlm0": mv_in(enc.build_inputs(instr, rgb0), dev),
+                    "vlmK": mv_in(enc.build_inputs(instr, imgK), dev),
+                    "cen": cen, "sig_n": (sig / float(max(H, W))).clamp(0, 1),
+                    "tok_xyz0": means[idx], "xyz1_gt": traj[K][idx], "disp_tok": disp[idx],
+                    "is_obj_tok": (c["is_obj"].to(dev)[idx] if "is_obj" in c else None),
+                    "center": center, "radius": (means[:n_keep] - center).norm(dim=-1).amax().clamp_min(1e-6),
+                    "K_intr": c["K_intr"].to(dev).float(), "viewmat": c["viewmat"].to(dev).float(),
+                    "H": H, "W": W, "rgb0_np": rgb0, "rgbK_np": imgK,
+                }
+            except Exception as e:
+                ok = False
+                if is_main:
+                    print(f"[skip] prep {os.path.basename(cp)}: {type(e).__name__}: {e}", flush=True)
+            if ddp:
+                flag = torch.tensor([1.0 if ok else 0.0], device=dev)
+                dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+                ok = flag.item() > 0.5
+            if not ok:
+                continue
+            with amp:
+                loss, logs = mdl(batch)
+            (loss / accum).backward()
+            n_ok += 1
+            agg = ({k: v.detach() for k, v in logs.items()} if agg is None
+                   else {k: agg[k] + logs[k].detach() for k in agg})
+        if n_ok == 0:
             step += 1
             continue
-
-        with amp:
-            loss, logs = mdl(batch)
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
         gnorm = torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
         finite = torch.tensor([1.0 if torch.isfinite(gnorm) else 0.0], device=dev)
         if ddp:
@@ -137,6 +147,7 @@ def main():
             opt.step()
         elif is_main:
             print(f"[skip] non-finite grad @s{step}", flush=True)
+        logs = {k: v / n_ok for k, v in agg.items()}
 
         if is_main and step % args.log_every == 0:
             print(f"s{step} loss{logs['loss'].item():.3f} geom{logs['geom'].item():.4f} "
