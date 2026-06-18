@@ -102,6 +102,7 @@ class GPSTokenWM(nn.Module):
         for m in (self.cam_head, self.cam_tok_head):
             nn.init.zeros_(m[-1].weight); nn.init.zeros_(m[-1].bias)
         self.cam_cond = False
+        self.jepa_couple = False   # ablation: if True, JEPA grad flows INTO the trunk (multi-task) instead of stop-grad read-out
         self.rel_proj = nn.Sequential(nn.Linear(fdim, d), nn.SiLU(), nn.Linear(d, H))
         self.rel_temp = 0.07
         self.sigreg = SIGReg(num_proj=512)
@@ -219,7 +220,7 @@ class GPSTokenWM(nn.Module):
             gate = torch.sigmoid(gl)                                              # [M] instruction-relevance GATE
             g = gate[:, None] * self.geom_head(h).float()                         # grounding GATES motion (not parallel head)
             xyz1_pred = self.geom_to_xyz(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
-            jepa_pred = self.jepa_head(h.detach()).float()                        # READ-OUT from motion-trained trunk (stop-grad: JEPA does NOT compete for the trunk — your "不抢主干")
+            jepa_pred = self.jepa_head(h if getattr(self, "jepa_couple", False) else h.detach()).float()  # READ-OUT (stop-grad, "不抢主干"); --jepa_couple lets JEPA grad shape the trunk (ablation)
             feat_pred = None; self._gate = gate; self._gate_logit = gl
         else:
             xyz1_pred, feat_pred = self.heads(x, b["tok_xyz0"], b["K_intr"], b["viewmat"])

@@ -51,6 +51,7 @@ def main():
     ap.add_argument("--w_depth", type=float, default=0.5, help="weight on the normalized depth-change (Δlog z) term under img_loss (full 3D = image-flow + depth)")
     ap.add_argument("--fuse", type=int, default=0, help="v2 fused arch: grounding=GATE modulating motion; JEPA=read-out into RAW pretrained latent (footprint-pooled, derived from motion), not parallel heads")
     ap.add_argument("--cam_cond", type=int, default=0, help="B: condition the predictor on the camera pose (global emb -> cond + per-token cam-frame pos -> hidden); makes VARYING cameras a generalization asset not poison. Zero-init => warm-startable from the fixed-cam v2")
+    ap.add_argument("--jepa_couple", type=int, default=0, help="ablation: 1 = JEPA gradient flows INTO the trunk (multi-task, future-feature task helps motion?); 0 = stop-grad read-out (default, JEPA does not affect motion)")
     ap.add_argument("--init_from", default="", help="warm-start: load model weights from this ckpt (strict=False; new modules e.g. cam heads keep their zero-init) -> keep the fixed-cam v2 head start for B")
     ap.add_argument("--cond_scale", type=int, default=0, help="1=condition the predictor on the (oracle) global motion scale; tests whether SUPPLYING the scale fixes magnitude (path-1 premise)")
     ap.add_argument("--w_jepa", type=float, default=0.5)
@@ -83,6 +84,7 @@ def main():
     model.w_depth = args.w_depth
     model.fuse = bool(args.fuse)
     model.cam_cond = bool(args.cam_cond)
+    model.jepa_couple = bool(args.jepa_couple)
     model.cond_scale = bool(args.cond_scale)
     model.w_mag, model.w_motion = args.w_mag, args.w_motion
     if args.init_from:
