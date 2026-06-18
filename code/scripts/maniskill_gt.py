@@ -397,17 +397,24 @@ def _script_rotate(env, rec, spin_steps: int = 64, drz: float = 0.9, rng=None):
 
 
 def generate_episode(env_id: str, seed: int, cam_w: int, cam_h: int, max_retries: int = 8,
-                     policy: str = "auto"):
+                     policy: str = "auto", cam_eye=(0.3, 0.0, 0.6), cam_target=(-0.1, 0.0, 0.1)):
     """Drive the manipulation with a deterministic SCRIPTED end-effector policy (pd_ee_delta_pose;
     avoids mplib which segfaults in this headless container) while capturing obs every step.
-    Returns (recorder, instruction, success). Success here means 'the object moved a lot'."""
+    Returns (recorder, instruction, success). Success here means 'the object moved a lot'.
+    cam_eye/cam_target set the base_camera pose (defaults = canonical trans_v1 camera)."""
     import gymnasium as gym
     import mani_skill.envs  # noqa: F401 (registers envs)
+    from mani_skill.utils.sapien_utils import look_at
 
+    # FORCE one explicit camera on EVERY env (defaults = canonical trans_v1 camera). Different ManiSkill
+    # envs ship different default base_camera poses (e.g. PullCube-v1 sits on the OPPOSITE side,
+    # campos [-0.5,0,0.25] vs canonical [0.3,0,0.6]) -> same world motion projects to a FLIPPED image flow
+    # -> poisons image-space training (agent.md §97). For B (--cam_cond) cam_eye is varied per clip.
+    cam_pose = look_at(list(cam_eye), list(cam_target))
     base = gym.make(
         env_id, obs_mode="rgb+depth+segmentation", control_mode="pd_ee_delta_pose",
         render_mode="rgb_array", sim_backend="cpu", num_envs=1,
-        sensor_configs=dict(width=cam_w, height=cam_h),
+        sensor_configs=dict(width=cam_w, height=cam_h, pose=cam_pose),
     )
     doc = (type(base.unwrapped).__doc__ or "").strip().split("\n")
     doc = " ".join(l.strip() for l in doc if l.strip() and not l.strip().startswith("**"))[:200]

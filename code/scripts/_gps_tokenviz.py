@@ -47,11 +47,20 @@ def main():
     center = means[:n_keep].mean(0, keepdim=True); radius = (means[:n_keep] - center).norm(dim=-1).amax().clamp_min(1e-6)
     vlm0 = mv_in(enc.build_inputs(instr, rgb0))
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-        ctxc, ctxm, cond, _ = model.encode_cond(vlm0)
+        ctxc, ctxm, cond, text_feats = model.encode_cond(vlm0)
         grid0, ghw0 = (model.dino.grid(rgb0) if model.dino is not None else enc.image_grid_features(vlm0))
         tok_feat = model.feat_in(sample_grid_feat(grid0, ghw0, cen, H, W)).float()
-        x = model.predict(tok_xyz0, tok_feat, sig_n, center, radius, ctxc, ctxm, cond)
-        xyz1_pred, _ = model.heads(x, tok_xyz0, Ki, vm)
+        cam_tok = None
+        if cargs.get("cam_cond", False):                                 # B: inject camera pose
+            cg, cam_tok = model.cam_cond_signals(tok_xyz0.float(), center, radius, Ki.float(), vm.float())
+            cond = cond + cg
+        x = model.predict(tok_xyz0, tok_feat, sig_n, center, radius, ctxc, ctxm, cond, cam_tok=cam_tok)
+        if cargs.get("fuse", False):                                     # v2: grounding-gate modulates motion
+            gate = torch.sigmoid(model.relevance(tok_feat, text_feats.mean(0)))
+            g = gate[:, None] * model.geom_head(x[0]).float()
+            xyz1_pred = model.geom_to_xyz(g, tok_xyz0.float(), Ki.float(), vm.float())
+        else:
+            xyz1_pred, _ = model.heads(x, tok_xyz0, Ki, vm)
     xyz1_pred = xyz1_pred.float()
 
     # token image positions (frame0, GT future, pred future) + depths (camera-z)

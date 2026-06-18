@@ -1587,3 +1587,113 @@ v1(c1024)跨 4 split:
 **smoke 验证(25步单卡)通过**:loss 有限下降,geom(运动)学、**jepa 0.97→0.65**(预测预训练未来 latent)、**inst 0.9→0.1**(门学会预测 mover,relSel 1)。
 **①数据扩了**:`trans_v2` = trans_v1 + 新生成 PickCube/Push/Pull auto = **556 train + 98 heldseed + 40 heldtask**(原 183,补过拟合 gap)。**②深度**已并入(img_loss + Δlogz)。
 **当前**:`gpswm_fuse` = v2 全家桶(DDP 4卡 + fuse + img_loss + depth)在 trans_v2 上跑(1500 步)。待评:held 图像 magR(过拟合 gap 是否随数据+DDP 缩小)+ 门/JEPA 质量。DINOv2 加厚 adapter 留作下一步(本轮先验证融合+DDP+数据)。
+
+## §97: ★★★ 重大纠错(取证)—— "0.81 方向突破"是过拟合假象;数据扩充被相机随机化污染
+**起因**:复评 img_loss 锚点,同 ckpt+同数据+同代码,held image dcos 复现为 **0.19 而非记录的 0.81**。逐项排除(确认是原始 ckpt 未被覆盖、数据未变、用 bce4629 旧代码跑也是 0.19、metric 本就 movers-only)→ 锚点不可复现。
+
+**真相(全部可复现, 新增 _gps_imgeval 的 3D dcos 读数)**:
+| ckpt(data,步) | split | 3D dcos | image dcos | image magR | depth-sign |
+|---|---|---|---|---|---|
+| gpswm_img (trans_v1,1500) | **TRAIN** | **+0.41** | **+0.71** | 0.87 | — |
+| gpswm_img (trans_v1,1500) | held | +0.10 | +0.19 | 0.83 | 92% |
+| imgbase (trans_v2,4500) | held | **−0.16** | −0.39 | 1.05 | — |
+| fuse1g (trans_v2,4500) | held | −0.06 | −0.29 | 0.89 | — |
+
+**结论 1 — "0.81"=过拟合**:它其实是 TRAIN image dcos(此处 0.71)。held 只有 0.19。**方向是可学的(train 0.41/0.71 证明非纯 aleatoric),但在 183 clip + 1.66B 上严重过拟合、不泛化**。→ 之前"方向已好(dcos~0.7)、只剩幅度"的叙事**反了**:幅度确实治好(magR~1.0, depth-sign 92-97%, 都真), **方向才是未解的核心问题**。
+
+**结论 2 — 数据扩充(trans_v2new)有缺陷**:更多数据本应改善泛化,却把 held dcos 推成**负的**。取证:**干净 trans_v1-only 模型在 trans_v2new held 上 image dcos = −0.53(反相关)但 3D dcos = −0.01(随机)**。根因 = **相机**:trans_v1 相机**跨 clip 固定(campos std=[0,0,0])**,trans_v2new **每 clip 随机相机(campos std=[0.40,0,0.18])**。模型学的是 trans_v1 定相机的"世界运动→图像方向"映射;trans_v2new 变相机下同一运动投影不同(常翻转)→ 反预测 → 混训毒化先验。(trans_v2new 还把 Push 换 Pull, 次要。)
+
+**净状态**:✅幅度(img_loss)✅深度符号(92-97%) | ❌方向泛化(过拟合 183 clip)❌数据扩充(相机随机化污染, 不可用)。
+**待用户定的岔路**:(A) 重生成**定相机**干净扩充数据(对齐 trans_v1)→ 受控解决方向泛化;(B) 给模型**相机条件化**→ 让变相机变成泛化助力(贴近真实视频, 但更重)。推荐先 A 隔离方向问题。
+
+## §98: ★★★ 稳定可用的 v2(成功)—— 干净数据 + 稳定化,held 方向 0.92、无过拟合 gap
+§97 看清问题(方向过拟合 + 数据相机污染)后,两步到位:
+**① 干净数据 trans_v3**(440 train,全固定相机 [0.3,0,0.6],去掉相机在对侧的 PullCube)。
+**② 稳定化重训 `gpswm_v3fuseS`**(v2 全家桶: 门+JEPA-from-motion+深度; DDP-4卡): 关键三味药 —— `w_motion 2.0`(mover 加权 3-10×, **堵幅度中位数坍缩** = 上轮 magR 0.13 的病根)+ `accum 2`(有效 batch 8, 压 batch-2 震荡)+ `lr 2e-4 cosine→2e-5`(新加调度器, 收尾稳)。1500 步。
+
+**稳定性轨迹(held 3D dcos / magR)**: @250 .15/.72 → @500 .19/.42 → @750 .34/.73 → **@1000 .89/.83 → @1250 .92/.82 → @1500 .92/.87**。单调爬升后**平台稳住**(非震荡非坍缩)。
+
+**@1500 严格验证(都复现)**:
+| split | 3D dcos | 3D magR | img dcos | img magR |
+|---|---|---|---|---|
+| **heldseed**(异种子,同任务) | **+0.92** | 0.87 | **+0.95** | 0.93 |
+| **heldtask**(未训练任务 StackCube!) | **+0.91** | 0.66 | +0.87 | 0.61 |
+| train | +0.90 | 0.90 | +0.92 | 0.96 |
+
+**净结论**:① **held ≈ train(0.92 vs 0.90)→ 过拟合 gap 没了**(trans_v1 时是 0.10/0.41)。② **方向 0.9+ 泛化到完全没训过的 StackCube 任务**(magR 0.66 偏欠, 方向强迁移)。③ 幅度同任务 ~0.9(≈1)。④ 确定性复现(不是 §97 那个不可复现的 0.81)。⑤ 门(relSel=1, inst→0.10)+JEPA(0.99→0.53)+深度 都在学。
+**成功要素**:干净相机一致数据 + w_motion 抗坍缩 + 大 batch/lr 衰减抗震荡 + v2-fuse(比 img-only 更抗坍缩)。**待办**:视觉验证(用户金标准)+ 跑 img-only 对照确认 v2 增益 + DDP 已顺带验证多卡正常。
+
+## §99: B —— 相机条件化(让变相机成泛化助力)+ v2 增益确认(对照组)
+**v2 增益确认(img-only 对照, 同稳定化/数据, 去掉 fuse)**: v2-fuse > img-only, 泛化上尤甚 ——
+| | img-only | v2-fuse | Δ |
+|---|---|---|---|
+| heldseed 3D dcos | 0.84 | **0.92** | +0.08 |
+| heldtask 3D dcos | 0.75 | **0.91** | **+0.16** |
+| heldtask magR | 0.42 | **0.66** | **+0.24** |
+→ JEPA/门不是搭便车, 在更难的 held-task 上增益最大。用户的 v2 设计经得起对照。
+
+**B 设计(用户 /goal "Do it" 批准)**: 预测器输出 world 运动(本与相机无关)但输入(RGB外观+token放置)视角相关、且**没收到相机信号**→ 死记一个视角(§97 PullCube中毒根因)。注入相机两级, 都 zero-init→从 v2 0.92 **热启动 no-op**:
+- `cam_head`: 全局位姿(campos+look/up+fov 13维)→ + cond_global(每个 DiT block 看见视角)
+- `cam_tok_head`: 每 token 的**相机系坐标** → + 逐 token hidden(把视角相关 RGB 特征对齐到几何)
+实现: wm_model `cam_cond_signals`; trainer `--cam_cond`+`--init_from`(热启动); 生成器 `--rand_cam`(半球采样相机)+ heldcam(方位角 140-210°=新视角); eval/viz cam-aware。
+
+**实验(跑中, gpswm_B_*)**: 生成 camcond_v1(变相机, PickCube+PushCube, 250seed×2), 然后从 v3fuseS 热启动训 **B(cam_cond)** + **对照(no cam_cond)** 各 DDP-2卡, 评 heldcam(新视角)/heldseed。判据: B 在 heldcam 上泛化(~0.8) 而 fixed-cam v2 / no-cam 在新视角上崩 → 证明 cam_cond 把变相机变资产。结果待 logs/B_orchestrate.log。
+
+### §99 续: B 结果 + 重新定义测试(外推 vs 内插)
+**B 跑完(camcond_v1, heldcam=方位角140-210连续弧=外推):**
+| 模型 | heldcam(novel) 3D dcos | heldseed 3D dcos |
+|---|---|---|
+| v3fuseS(定相机,没见变相机) | 0.40 | 0.79 |
+| B_nocam(训变相机,无cam_cond) | **0.61** | 0.92 |
+| B_camcond(训变相机,有cam_cond) | 0.56 | 0.91 |
+**发现**:① cam_cond **无增益**(0.56≈0.61, 相机头确实激活但帮不上)。机制:模型本就拿到 **world 系 token 3D 坐标(相机无关)**→ 显式喂位姿冗余; novel-view 瓶颈是**新视角 RGB 外观漂移**(magR 0.9 对、dcos 0.6 差=知道动多少不知往哪), 位姿条件化治不了外观。② 但"在变相机上训练"本身有用(0.40→0.61), 且 **seen-view/内插 0.92(=变相机非毒药)**。③ §97 的"中毒"是 PullCube **极端对侧视角+定/变混训**, 不是视角变化本身。
+
+**测试重定义(关键)**:heldcam 用连续弧=**外推**(模型从没见过那侧), 比目标更狠。"变相机当资产"的公平测试是**内插**(训练覆盖视角分布, 测分布内的留出相机)。heldseed 0.92 已是内插证据。→ **Bv2**(跑中): 把弧折回训练(全方位角覆盖)+ 随机留出15%相机(全球面内插), 重训 cam_cond+nocam, 评 heldcam2。预期内插 ~0.85-0.9 = 变相机泛化成立。外推(0.6)是另一个更难的视觉前沿。
+
+### §99 续2: ★★ Bv2 成功 —— 变相机是泛化资产(目标达成)
+**Bv2(全方位角训练 + 随机15%相机内插留出, camcond_v2: 238 train/50 heldcam2):**
+| 模型 | heldcam2(新相机,内插) 3D dcos | magR | img dcos |
+|---|---|---|---|
+| v3fuseS(定相机,没见变相机) | 0.72 | 0.80 | 0.81 |
+| Bv2_nocam(无cam_cond) | 0.85 | 0.82 | 0.86 |
+| **Bv2_camcond** | **0.87** | **0.88** | **0.87** |
+
+**结论(目标达成)**:① **变相机=泛化资产**:在全视角分布上训练 → 泛化到留出的新相机 **0.87**(>0.8)。② **cam_cond 有小而稳的增益**(0.87 vs 0.85 dcos, 0.88 vs 0.82 magR)——在公平(内插)测试上确实帮上,主要帮幅度;不是巨杠杆但非无用。③ 视觉验证:3 个不同新视角,GT(绿)/PRED(红)箭头重合(dir-cos 0.95/0.88/0.87)。
+**诚实范围**:这是**内插**(留出相机来自训练分布=真实"变相机"场景)。**外推**到完全没见过的视角区域(连续弧)仍难(~0.6, 瓶颈是新视角 RGB 外观理解, 视觉前沿, 非位姿)。
+**净**:A(定相机方向泛化 0.92)+ B(变相机内插泛化 0.87)双双达成。框架现在能在变相机数据上训练并泛化到新相机。cam_cond 小幅有用、保留。
+
+## §100: 视频学习路 (用户重定向: 从video学GT才是真实路, sim位姿不可比)
+用户纠正: 「从video拿训练数据 vs 模拟器直接拿位姿 = 两个世界, 不能直接比较; 现实没位姿, 从video学非常重要」。遂**弃用 sim oracle 当验证器**(停了装 planner 的 agent), 全力做**位姿无关的 video GT**。验证靠**重投影**(预测/GT 未来 → 实际未来帧), 现实可用, 不需位姿。
+
+**基础设施(那次5.5T清理删了的)经代理重下**: Pi3(3.83G) + CoTracker(102M) + SAM2(1.7G, 留给P2)。Pi3 在 RoboTwin video 上验证 OK(深度 0.6-2.1m 合理)。
+
+**新脚本 `robotwin_video_gt.py`(Path 1, 位姿无关逐点GT)**: RoboTwin head_camera RGB → Pi3 逐帧深度 + CoTracker 稠密网格跟踪 → 逐点 3D 轨迹, 无 sim 位姿/无掩码。产同样 clip dict(means/uv/traj/K_intr/viewmat/gt_rgb), trainer 直接吃。关键: img_loss 目标是**图像归一化流+Δlogz, 尺度不变** → Pi3 仿射尺度不确定性不进损失。
+
+**★ 诊断到 video-GT 的核心病根**: RoboTwin 相机**真值完全静止(0.000m)**, 但 **Pi3 估成动了(0.30平移+9.8°)** —— Pi3(SfM, 假设静态场景)把**运动物体误判成相机自运动** → 全局 gauge 里到处是伪运动(median flow 59px)。**修复(静相机)**: 用**逐帧 local 点图 + 固定相机帧(viewmat=I)**, 不信 Pi3 的位姿 → 逐点运动=真物体运动。修后 median flow 59→11.6px, top movers 相干地落在被抓起的瓶子+夹爪上(视觉验证), 背景基本干净。
+**残留**: CoTracker 在无纹理白桌上漂移~11px(背景非全静); 27% 轨迹丢失(vis 0.73, 绿瓶运动欠捕捉)。缓解: 按 vis/conf 滤; saliency 本就选高位移 token(真 movers), 把漂移背景下权。
+**下一步**: 滤漂移 → 批量生成 video GT → 训(img_loss) → 重投影验证(预测未来 vs 实际帧)。
+
+### §100 续: video-learning 首个端到端结果 (Path 1, 6 干净任务 150 clip)
+干净任务 vis_frac **0.94-0.97**(vs pick_dual_bottles 0.73, 用户对了: 丢失是任务相关). vis_keep 0.6 滤后每 clip ~900-960 干净 token.
+**训练(img_loss, DDP4卡, 稳定化, 1000步)+ 重投影评估**:
+- 初评(disp>0.01 绝对阈, 误): train dcos 0.13/held 0.04-0.44 震荡 —— **阈值 gauge 错位**(Pi3 尺度 != sim 米, 0.01 选中噪声).
+- 修正(--mov_pct 0.2, top20% 相对 movers): **train 0.41, held 0.41@750 / 0.30@1000, magR 0.85-1.06**.
+**净结论**: ✅ **从 video 学是 work 的**(无位姿, GT 纯来自像素, 泛化 held≈train~0.41, 幅度~1.0). ⚠️ 但**封顶 ~0.4**(vs sim 0.9), 因 held≈train → 瓶颈是 **Path-1 逐点 GT 噪声**(CoTracker 漂移 + Pi3 深度), 非数据量 → 加数据没用, **要更干净的 GT**.
+**杠杆 = Path 2(逐物体刚性拟合 / 合成位姿)**: 对跟踪点做 Kabsch → 平均掉逐点噪声 → 更干净 GT → 抬高上限. = 用户"合成位姿"那条路.
+
+### §100 续2: Path 2 (rigid/合成位姿 GT) vs Path 1 —— 干净 GT 没大幅抬顶
+rigidify(运动聚类+逐物体 trimmed-Kabsch, 背景冻结 frame0; 验证: 背景 65% 静、movers 保形). 同配置重训+评(mov_pct 0.2):
+| | train dcos | held dcos | magR |
+|---|---|---|---|
+| Path-1 raw | 0.41 | 0.41@750/0.30@1000 | 0.85-1.06 |
+| Path-2 rigid | **0.49** | 0.49@250/0.45@1000 | 0.52-0.93(欠) |
+**净结论**: 刚性 GT 方向**略好**(0.41→0.49)但**幅度变差**(欠预测), **非大幅抬顶**. 关键诊断: ~0.45 的封顶**既不是逐点噪声**(刚性没修好)**也不是过拟合**(held≈train) → 更可能是 **① 数据量**(120 clip; sim 当年 183→440 才把 held 0.10→0.92)+ **② video regime 本就更难** + **③ 小数据训练震荡**.
+**净: video-learning 可行已坐实**(无位姿, ~0.45 dcos, 泛化 held≈train, 幅度~0.6-1.0). 两条路(raw/合成位姿)~相当, 刚性略偏方向。**下一杠杆(按 sim 经验): 扩干净 video 数据**(更多任务/episode), 非 raw-vs-rigid。
+
+## §101: 数据问题(用户重定向: 加宽FOV相机多样化 + demo_random 测泛化)
+用户判断"问题在数据" → RoboTwin 支持不同 FOV 相机, 加宽视角增多样性 + 用 demo_random(随机背景/杂乱) 测"学到的是真特征还是过拟合 clean".
+- **加了 fov67(67°)/fov73(73°)** 相机到 `_camera_config.yml`(fovy); 验证 fov67 gen OK(fx 363 vs D435 570, 更宽). 建了 demo_clean_fov67/73 + demo_random_fov67/73 配置.
+- **planner 环境**(agent 装): 侧 venv `/mnt/pfs/xuhaoming/xr-2/robotwin_gen_venv`(mplib 0.2.1 sapien_utils + sapien 3.0.0b1 + numpy<2), collect_data 可跑. 训练 venv 没动.
+- **任务可靠性问题**: beat_block_hammer 规划可靠(快出 26 eps); **handover_block/move_can_pot 卡在 planner start-state-collision 循环**(mplib_RRT 无 curobo, 双臂/某些场景解不出) → 弃用. 
+- **数据查看(用户要的)**: FOV 相机✓宽视角; clean(白桌)→random(杂乱彩色背景)**域差大**=好的泛化测试; **但 beat_block 物体运动小**(GT flow 中位 1-3px, 块几乎不动、臂从画外进) → 信号弱. **张力: 可靠规划的任务(beat_block)恰好低运动; 高运动任务(handover/move)卡 planner.**
+- **跑中**: beat_block 扩到 ~40 clean + 16 random → video-GT → 训 clean → 双测(clean-held + demo_random) gpswm_rtfov.

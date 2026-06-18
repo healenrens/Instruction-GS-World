@@ -91,6 +91,17 @@ class GPSTokenWM(nn.Module):
         # hidden x that produces motion (a consistent second view of the future, not a competing head).
         self.jepa_head = nn.Sequential(nn.Linear(d, d), nn.SiLU(), nn.Linear(d, feat_dim_in))
         self.fuse = False
+        # ---- B: camera-conditioning (--cam_cond). The predictor outputs world motion but its INPUT is
+        # viewpoint-dependent (frame0 RGB + which tokens get placed) with NO camera signal -> it overfits
+        # one viewpoint (agent.md §97/§98). Inject the camera pose at 2 levels so varying cameras become a
+        # generalization ASSET, not poison. BOTH zero-init => exact no-op at start => WARM-STARTABLE from the
+        # fixed-camera v2 (keep the 0.92), then learn to use the camera. cam_head: global pose -> cond;
+        # cam_tok_head: per-token camera-frame position -> hidden (aligns RGB feat with view geometry).
+        self.cam_head = nn.Sequential(nn.Linear(13, d), nn.SiLU(), nn.Linear(d, d))
+        self.cam_tok_head = nn.Sequential(nn.Linear(3, d), nn.SiLU(), nn.Linear(d, d))
+        for m in (self.cam_head, self.cam_tok_head):
+            nn.init.zeros_(m[-1].weight); nn.init.zeros_(m[-1].bias)
+        self.cam_cond = False
         self.rel_proj = nn.Sequential(nn.Linear(fdim, d), nn.SiLU(), nn.Linear(d, H))
         self.rel_temp = 0.07
         self.sigreg = SIGReg(num_proj=512)
@@ -120,17 +131,37 @@ class GPSTokenWM(nn.Module):
 
     # ---------------- predictor ----------------
     def predict(self, tok_xyz0, tok_feat_fdim, tok_sigma, center, radius,
-                ctx_per_block, ctx_mask, cond_global):
+                ctx_per_block, ctx_mask, cond_global, cam_tok=None):
         """tokens (frame0) -> per-token hidden x [1,M,d]. tok_feat_fdim [M,fdim] = self.feat_in(grid feat),
-        computed ONCE by the caller and reused for SIGReg/relevance/JEPA-target."""
+        computed ONCE by the caller and reused for SIGReg/relevance/JEPA-target.
+        cam_tok [M,d] (--cam_cond): per-token camera-frame geometry, zero at warm-start."""
         norm_xyz = (tok_xyz0 - center) / radius
         pe = self.pe(norm_xyz[None])[0]                                       # [M, pe_out]
         # fp32 cat (pe/sigma are fp32, feat is bf16 under autocast) -> tok_embed Linear re-casts
         x = torch.cat([pe.float(), tok_feat_fdim.float(), tok_sigma.float()], dim=-1)[None]
         x = self.tok_embed(x)
+        if cam_tok is not None:
+            x = x + cam_tok[None]                                             # inject per-token camera geometry
         for j, blk in enumerate(self.blocks):
             x = blk(x, cond_global, ctx_per_block[:, j], ctx_mask)
         return self.final_norm(x)                                            # [1,M,d]
+
+    def cam_cond_signals(self, tok_xyz0, center, radius, K_intr, viewmat):
+        """--cam_cond: encode the camera pose into (cam_global [1,d] added to cond, cam_tok [M,d] added to
+        per-token hidden). Zero-init heads => no-op at warm-start. World motion stays the target; the camera
+        lets the predictor interpret the viewpoint-dependent input -> viewpoint-INVARIANT prediction."""
+        R = viewmat[:3, :3]; t = viewmat[:3, 3]
+        campos = -(R.t() @ t)                                                # camera center in world
+        fx, fy, cx, cy = K_intr[0, 0], K_intr[1, 1], K_intr[0, 2], K_intr[1, 2]
+        Wn = (cx * 2).clamp_min(1.0); Hn = (cy * 2).clamp_min(1.0)
+        feats = torch.stack([campos[0], campos[1], campos[2],               # camera position (3)
+                             R[2, 0], R[2, 1], R[2, 2], R[1, 0], R[1, 1], R[1, 2],  # look-dir + up (6)
+                             fx / Wn, fy / Hn, cx / Wn, cy / Hn])            # fov/principal (4) = 13
+        cam_global = self.cam_head(feats)[None]                              # [1,d]
+        ones = torch.ones(tok_xyz0.shape[0], 1, device=tok_xyz0.device, dtype=tok_xyz0.dtype)
+        cam0 = (torch.cat([tok_xyz0, ones], -1) @ viewmat.T)[:, :3]          # token position in CAMERA frame
+        cam_tok = self.cam_tok_head(cam0 / radius)                          # [M,d], scene-scale normalized
+        return cam_global, cam_tok
 
     def heads(self, x, tok_xyz0, K_intr, viewmat):
         """x [1,M,d] -> predicted future xyz [M,3], predicted future feature [M,fdim]."""
@@ -176,14 +207,19 @@ class GPSTokenWM(nn.Module):
         grid0, ghw0 = (self.dino.grid(b["rgb0_np"]) if self.dino is not None
                        else self.encoder.image_grid_features(b["vlm0"]))
         tok_feat = self.feat_in(sample_grid_feat(grid0, ghw0, b["cen"], b["H"], b["W"])).float()
-        x = self.predict(b["tok_xyz0"], tok_feat, b["sig_n"], b["center"], b["radius"], ctx, ctxm, cond)
+        cam_tok = None
+        if getattr(self, "cam_cond", False):                                 # B: inject camera pose
+            cg, cam_tok = self.cam_cond_signals(b["tok_xyz0"].float(), b["center"], b["radius"],
+                                                b["K_intr"].float(), b["viewmat"].float())
+            cond = cond + cg
+        x = self.predict(b["tok_xyz0"], tok_feat, b["sig_n"], b["center"], b["radius"], ctx, ctxm, cond, cam_tok=cam_tok)
         if getattr(self, "fuse", False):
             h = x[0]
             gl = self.relevance(tok_feat, text_feats.mean(0))                     # gate logit [M]
             gate = torch.sigmoid(gl)                                              # [M] instruction-relevance GATE
             g = gate[:, None] * self.geom_head(h).float()                         # grounding GATES motion (not parallel head)
             xyz1_pred = self.geom_to_xyz(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
-            jepa_pred = self.jepa_head(h).float()                                 # world-model latent read-out
+            jepa_pred = self.jepa_head(h.detach()).float()                        # READ-OUT from motion-trained trunk (stop-grad: JEPA does NOT compete for the trunk — your "不抢主干")
             feat_pred = None; self._gate = gate; self._gate_logit = gl
         else:
             xyz1_pred, feat_pred = self.heads(x, b["tok_xyz0"], b["K_intr"], b["viewmat"])
@@ -274,6 +310,9 @@ class GPSTokenWM(nn.Module):
                     relsel = pos[rel.argmax()].float()
         loss = (l_geom + self.w_mag * l_mag + self.w_jepa * l_jepa
                 + self.w_sigreg * l_sig + self.w_ground * l_inst)
+        if getattr(self, "_ddp_touch", False):  # zero-weight touch so EVERY trainable param participates ->
+            loss = loss + 0.0 * sum(p.float().sum()  # DDP runs with find_unused_parameters=False (the correct path)
+                                    for p in self.parameters() if p.requires_grad)
         with torch.no_grad():
             err_pred = (xyz1_pred - b["xyz1_gt"]).norm(dim=-1).mean()
             err_static = (b["tok_xyz0"] - b["xyz1_gt"]).norm(dim=-1).mean()

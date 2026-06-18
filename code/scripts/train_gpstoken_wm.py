@@ -50,12 +50,16 @@ def main():
     ap.add_argument("--img_loss", type=int, default=0, help="1=supervise on NORMALIZED 2D image displacement (Δu/W,Δv/H) instead of 3D meters; logs 'mag'=image-flow magR, 'dcos'=image dcos")
     ap.add_argument("--w_depth", type=float, default=0.5, help="weight on the normalized depth-change (Δlog z) term under img_loss (full 3D = image-flow + depth)")
     ap.add_argument("--fuse", type=int, default=0, help="v2 fused arch: grounding=GATE modulating motion; JEPA=read-out into RAW pretrained latent (footprint-pooled, derived from motion), not parallel heads")
+    ap.add_argument("--cam_cond", type=int, default=0, help="B: condition the predictor on the camera pose (global emb -> cond + per-token cam-frame pos -> hidden); makes VARYING cameras a generalization asset not poison. Zero-init => warm-startable from the fixed-cam v2")
+    ap.add_argument("--init_from", default="", help="warm-start: load model weights from this ckpt (strict=False; new modules e.g. cam heads keep their zero-init) -> keep the fixed-cam v2 head start for B")
     ap.add_argument("--cond_scale", type=int, default=0, help="1=condition the predictor on the (oracle) global motion scale; tests whether SUPPLYING the scale fixes magnitude (path-1 premise)")
     ap.add_argument("--w_jepa", type=float, default=0.5)
     ap.add_argument("--w_sigreg", type=float, default=0.05)
     ap.add_argument("--w_ground", type=float, default=1.0)
     ap.add_argument("--log_every", type=int, default=20)
     ap.add_argument("--save_every", type=int, default=750)
+    ap.add_argument("--lr_min_frac", type=float, default=1.0,
+                    help="<1 = cosine-decay LR to lr*lr_min_frac over steps (stabilizes; 1.0=constant LR legacy)")
     args = ap.parse_args()
 
     ddp = "RANK" in os.environ
@@ -78,11 +82,20 @@ def main():
     model.img_loss = bool(args.img_loss)
     model.w_depth = args.w_depth
     model.fuse = bool(args.fuse)
+    model.cam_cond = bool(args.cam_cond)
     model.cond_scale = bool(args.cond_scale)
     model.w_mag, model.w_motion = args.w_mag, args.w_motion
+    if args.init_from:
+        sd = torch.load(args.init_from, map_location=dev, weights_only=False)["model"]
+        miss, _ = model.load_state_dict(sd, strict=False)
+        if is_main:
+            print(f"[gpswm] warm-start {args.init_from}: loaded {len(sd)} tensors, {len(miss)} new (zero-init, e.g. cam_head/cam_tok_head)", flush=True)
     enc = model.encoder
-    mdl = DDP(model, device_ids=[local], find_unused_parameters=True) if ddp else model
+    model._ddp_touch = ddp                                  # all params participate -> find_unused not needed
+    mdl = DDP(model, device_ids=[local], find_unused_parameters=False, broadcast_buffers=False) if ddp else model
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=0.0)
+    sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.steps, eta_min=args.lr * args.lr_min_frac)
+             if args.lr_min_frac < 1.0 else None)
     if is_main:
         print(f"[gpswm] trainable={model.num_trainable()/1e9:.3f}B geom_mode={args.geom_mode} L={args.L} "
               f"world={world}", flush=True)
@@ -151,6 +164,8 @@ def main():
             opt.step()
         elif is_main:
             print(f"[skip] non-finite grad @s{step}", flush=True)
+        if sched is not None:
+            sched.step()
         logs = {k: v / n_ok for k, v in agg.items()}
 
         if is_main and step % args.log_every == 0:
