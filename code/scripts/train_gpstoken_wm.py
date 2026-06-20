@@ -44,6 +44,7 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--w_mag", type=float, default=0.0, help="mover-magnitude loss (DEAD END — kills direction)")
     ap.add_argument("--w_motion", type=float, default=0.0, help="motion-weighted geom loss (direction-preserving mag fix)")
+    ap.add_argument("--mw_cap", type=float, default=10.0, help="cap on the per-token motion up-weight (raise to push magnitude on sparse big movers, e.g. SpaTracker GT)")
     ap.add_argument("--norm_target", type=int, default=0, help="1=scale-decoupled geom (predict scale-invariant FIELD + single global scale); attacks the aleatoric-scale under-prediction")
     ap.add_argument("--w_scale", type=float, default=0.1, help="weight on the single-global-scale loss (low = treat scale as aleatoric, focus on the field)")
     ap.add_argument("--accum", type=int, default=1, help="gradient accumulation: effective batch = accum clips/step (stabilizes 1-clip/step, esp. with norm_target)")
@@ -87,6 +88,7 @@ def main():
     model.jepa_couple = bool(args.jepa_couple)
     model.cond_scale = bool(args.cond_scale)
     model.w_mag, model.w_motion = args.w_mag, args.w_motion
+    model.mw_cap = args.mw_cap
     if args.init_from:
         sd = torch.load(args.init_from, map_location=dev, weights_only=False)["model"]
         miss, _ = model.load_state_dict(sd, strict=False)

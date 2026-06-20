@@ -19,6 +19,7 @@ def main():
     ap.add_argument("--split", default="held"); ap.add_argument("--L", type=int, default=1024)
     ap.add_argument("--beta", type=float, default=30.0)
     ap.add_argument("--mov_pct", type=float, default=0.0, help="if >0, define movers as the top fraction by displacement (gauge-agnostic) instead of the abs disp>0.01 (sim-meters) threshold")
+    ap.add_argument("--gt_flow_thr", type=float, default=0.0, help="if >0, define movers by GT image-flow magnitude > this fraction of image size (FAIR across GTs with different mover distributions)")
     args = ap.parse_args(); dev = "cuda"
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False); cargs = ck.get("args", {})
     model = GPSTokenWM(geom_mode=cargs.get("geom_mode", "xyz"), fdim=cargs.get("fdim", 128),
@@ -67,7 +68,9 @@ def main():
         uv0 = project_to_uv(tok_xyz0, Ki, vm); uv1p = project_to_uv(xyz1_pred, Ki, vm); uv1g = project_to_uv(xyz1_gt, Ki, vm)
         fp = (uv1p - uv0) / Wn; fg = (uv1g - uv0) / Wn                       # normalized image flow
         di = disp[idx]
-        if args.mov_pct > 0:                                                 # relative mover threshold (gauge-agnostic)
+        if args.gt_flow_thr > 0:                                             # movers by GT IMAGE-FLOW mag (FAIR across GTs)
+            mv = fg.norm(dim=-1) > args.gt_flow_thr
+        elif args.mov_pct > 0:                                               # relative mover threshold (gauge-agnostic)
             thr = float(di.quantile(1.0 - args.mov_pct)) if (di > 1e-6).any() else 1e9
             mv = di > max(thr, 1e-6)
         else:

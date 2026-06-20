@@ -244,7 +244,7 @@ class GPSTokenWM(nn.Module):
             d = b["disp_tok"]
             mv = d > 0.01
             mvmed = d[mv].median() if mv.any() else d.new_tensor(0.05)
-            mw = (1.0 + self.w_motion * (d / mvmed.clamp_min(1e-3))).clamp(max=10.0)
+            mw = (1.0 + self.w_motion * (d / mvmed.clamp_min(1e-3))).clamp(max=getattr(self, "mw_cap", 10.0))
         if getattr(self, "img_loss", False):
             # IMAGE-NORMALIZED 2D-flow target (user's idea §95续18): supervise per-token motion as the
             # NORMALIZED 2D IMAGE displacement (Δu/W, Δv/H) — how far it moves in the image as a fraction
