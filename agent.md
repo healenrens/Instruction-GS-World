@@ -1697,3 +1697,14 @@ rigidify(运动聚类+逐物体 trimmed-Kabsch, 背景冻结 frame0; 验证: 背
 - **任务可靠性问题**: beat_block_hammer 规划可靠(快出 26 eps); **handover_block/move_can_pot 卡在 planner start-state-collision 循环**(mplib_RRT 无 curobo, 双臂/某些场景解不出) → 弃用. 
 - **数据查看(用户要的)**: FOV 相机✓宽视角; clean(白桌)→random(杂乱彩色背景)**域差大**=好的泛化测试; **但 beat_block 物体运动小**(GT flow 中位 1-3px, 块几乎不动、臂从画外进) → 信号弱. **张力: 可靠规划的任务(beat_block)恰好低运动; 高运动任务(handover/move)卡 planner.**
 - **跑中**: beat_block 扩到 ~40 clean + 16 random → video-GT → 训 clean → 双测(clean-held + demo_random) gpswm_rtfov.
+
+## §102: 多任务数据 + JEPA 消融(用户 /goal)
+**数据**: 现有 demo_clean 有 **50 任务×50ep=2500**(无需规划器, video_gt 直接读)。生成 rtvid_multi = 40 训练任务 + 10 留出任务 → **200 train / 40 heldseed / 40 heldtask**。代码已推 origin/gpstoken-2dgs(§97-101 + jepa_couple flag)。
+**"够量多任务后 video 学习 work 吗"**: motion-only/JEPA-det 在 heldseed ~0.41-0.45 / heldtask ~0.15-0.24 / **train 仅 ~0.40-0.46**。→ **瓶颈是 video GT 噪声**(连 train 都喂不准), 非数据量(120→200 都 ~0.45)、非过拟合(train≈held)。更多数据救不了, 杠杆在 GT 质量。
+**JEPA 消融(3 方同配置 rtvid_multi)**:
+| | heldseed | heldtask | train |
+|---|---|---|---|
+| motion-only(w_jepa0) | 0.41 | 0.15 | 0.40 |
+| JEPA-detached(当前) | 0.45 | 0.24 | 0.46 |
+| JEPA-coupled(--jepa_couple) | **−0.34** | **−0.30** | **−0.10** |
+**结论**: ① 当前 detached JEPA 对动作预测**≈中性**(与 motion-only 噪声内持平; 按设计 stop-grad 不碰主干)。② **耦合 JEPA(梯度回传主干)→ 动作预测崩(负 dcos)**: "预测未来 latent"与"预测运动"目标冲突, 会带跑主干表征。③ **用户"JEPA 不抢主干(stop-grad)"设计被证实正确** —— JEPA 价值不在帮运动(帮不了), 在于不伤运动地保留未来特征预测能力。
