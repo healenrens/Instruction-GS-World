@@ -1708,3 +1708,19 @@ rigidify(运动聚类+逐物体 trimmed-Kabsch, 背景冻结 frame0; 验证: 背
 | JEPA-detached(当前) | 0.45 | 0.24 | 0.46 |
 | JEPA-coupled(--jepa_couple) | **−0.34** | **−0.30** | **−0.10** |
 **结论**: ① 当前 detached JEPA 对动作预测**≈中性**(与 motion-only 噪声内持平; 按设计 stop-grad 不碰主干)。② **耦合 JEPA(梯度回传主干)→ 动作预测崩(负 dcos)**: "预测未来 latent"与"预测运动"目标冲突, 会带跑主干表征。③ **用户"JEPA 不抢主干(stop-grad)"设计被证实正确** —— JEPA 价值不在帮运动(帮不了), 在于不伤运动地保留未来特征预测能力。
+
+## §103: GT 切换 Pi3+CoTracker → SpaTrackerV2(用户拍板"换了重训", 全量验证)
+**动机**: §102 定位 video 路 ~0.45 天花板 = GT 噪声。用户判断 SpaTracker 对比图更好 → 换 tracker 重做 GT。
+**诊断(为何 Pi3 差)**: 同一 handover clip, Pi3 "100% token 在动"但 2D 流仅 1.5px(没跟住物体, "运动"=深度噪声); SpaTracker 仅 18 mover 但 2D 流 208px(干净抓住真实运动)。
+**Producer `robotwin_spatrack_clip.py`**: SpaTrackerV2 联合 2D+3D 跟踪。`fixed_cam=True`(RoboTwin 静相机→c2w=I 全帧, `robotwin_spt_probe.py` 验证 track3d=相机系)→ 纯物体运动。`traj=unproject(track2d, track3d深度), viewmat=I` → project_to_uv 精确重现 track2d(重投影 0.000px)。格式兼容训练器; batch/shard/resumable。
+**指标坑**: SpaTracker mover 稀疏(2–18/clip); 旧 `--mov_pct` top-% 混静止稀释 v2(0.45)。新增 `--gt_flow_thr`(按 GT 图像流幅度选 mover, 跨 GT 公平)→ 真实 0.83。
+**幅度修复**: 新增 `--mw_cap`(mover 上权重上限, 原硬编码 10)。6 任务 sweep: **w_motion30/mw_cap80** 幅度 0.68→0.90, 方向守 0.93(w8/w15 噪声更差)。
+**全量对照(rtvid_multi 40任务/200train, 同 config, 唯一变量 GT; ckpt `checkpoints/wm_{mv1,mv2}/wm_002000.pt`, eval `--gt_flow_thr 0.05`)**:
+
+| | heldseed Pi3 | heldseed **SpaTracker** | heldtask Pi3 | heldtask SpaTracker |
+|---|---|---|---|---|
+| 图像 dir-cos | 0.51 | **0.82** | −0.07 | 0.24 |
+| 3D dir-cos | 0.75 | **0.85** | 0.39 | 0.19 |
+| mag-ratio | 0.30 | **0.53** | 0.11 | 0.04 |
+
+**结论**: ① **SpaTracker = 正式 GT**: heldseed 全面胜出, 全量验证通过, GT 质量问题解决("GT 干净→模型能学好运动")。② **heldtask(新任务)两 GT 都崩**(方向~0/随机) = 零样本任务泛化是下个硬骨头, **非 GT 问题**(两个都崩)。③ 全量幅度 0.53(< 6 任务 0.90, 多样性更难)可再调, 但方向 0.82 是关键、已达标。 cf. memory [[spatracker-gt-validated]].

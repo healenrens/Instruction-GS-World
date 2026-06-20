@@ -1,4 +1,4 @@
-# GPSToken-JEPA 世界模型 · 周进展汇总（§95–§101）
+# GPSToken-JEPA 世界模型 · 周进展汇总（§95–§103）
 
 > 语言条件化的 3D 高斯世界模型：给 frame0 RGB + 稀疏 2D-Gaussian token（lift 到 3D）+ 语言指令，预测每个 token 的未来 3D 运动。骨干 = 冻结 Qwen3-VL-2B（语言）+ 冻结 DINOv2-L（视觉）+ ~1.66B 可训练 DiT 预测器。
 
@@ -160,3 +160,37 @@
 - **未尽**：DINOv2 对非均匀 patch 的对齐（更厚 adapter）；novel-view 外推的视觉杠杆。
 
 > 详细流水日志见 `agent.md` §95–§101。
+
+---
+
+# ◆ 第二周（§102–§103）：GT 生产 Pi3+CoTracker → SpaTrackerV2
+
+> **一句话**：上周把 video 路天花板（~0.45）定位为 **GT 噪声**；本周换 tracker 重做 GT，全量 40 任务验证：**heldseed 方向 0.82 vs Pi3 0.51（GT 质量问题解决，定 SpaTracker 为正式 GT）；但 heldtask（全新任务）两个 GT 都崩 → 真正的瓶颈是零样本任务泛化，与 GT 无关。**
+
+## 1. 诊断：Pi3 的"运动"大多是深度噪声
+- 用户拉图判断 SpaTracker vs Pi3 的 GT-flow（6 任务对比图），SpaTracker 在遮挡（handover）上完胜、其余相当。
+- **量化诊断**（同一 handover clip）：Pi3 "100% token 都在动"但 2D 流仅 1.5px —— 它**没跟住积木**，所谓"运动"是**深度噪声**；SpaTracker 仅 18 个 mover 但 2D 流 208px —— **干净抓住真实运动**。这解释了 Pi3 为何卡 ~0.45：方向被噪声污染。
+
+## 2. SpaTracker GT producer（`robotwin_spatrack_clip.py`）
+- SpaTrackerV2 = 联合 2D+3D 点跟踪、动态场景感知。
+- **`fixed_cam=True`**：RoboTwin 相机固定 → c2w=I 全帧（`robotwin_spt_probe.py` 验证）→ track3d 运动 = **纯物体运动**（无 Pi3 的自运动误判）。
+- **`traj = unproject(track2d, track3d 深度)`，viewmat=I** → `project_to_uv(traj)` 精确重现 track2d（**重投影 0.000px**），同时用 SpaTracker 的 3D 深度。输出格式与训练器完全兼容；batch + shard + resumable（读 .pt 或 hdf5）。
+
+## 3. 指标坑 + 幅度修复
+- **指标坑**：SpaTracker 的 mover **稀疏**（每 clip 仅 2–18 个真动点）。旧 `--mov_pct`（按位移取 top-%）会混入静止点**稀释** v2，误判它更差（0.45）。新增 **`--gt_flow_thr`**（按 GT 图像流幅度选 mover，跨 GT 公平）才看出真实差距（0.83）。
+- **幅度修复**：稀疏大 mover 下模型回归静止 → 幅度欠预测。新增 **`--mw_cap`**（mover 上权重上限可调，原硬编码 10）。6 任务 sweep：**w_motion=30 / mw_cap=80** 把幅度 0.68→**0.90**，方向守住 0.93。
+
+## 4. 全量对照（rtvid_multi，40 任务 / 200 train，同 config，唯一变量 = GT）
+
+| 指标（公平 `gt_flow_thr 0.05`） | heldseed v1 Pi3 | heldseed **v2 SpaTracker** | heldtask v1 | heldtask v2 |
+|---|---|---|---|---|
+| 图像方向 dir-cos | 0.51 | **0.82** | −0.07 | 0.24 |
+| 3D 方向 dir-cos | 0.75 | **0.85** | 0.39 | 0.19 |
+| 幅度 mag-ratio | 0.30 | **0.53** | 0.11 | 0.04 |
+
+## 5. 结论 / 下一步
+1. **SpaTracker = 正式 GT**：heldseed 全面胜出，全量规模验证通过 —— GT 质量问题解决。
+2. **heldtask（新任务）两 GT 都崩**（方向 ~0/随机，幅度 ~0）= **零样本任务泛化是下一个硬骨头，非 GT 问题**（两个都崩）。这是项目核心难关。
+3. 幅度全量上 0.53（< 6 任务 sweep 的 0.90，多样性更难）可再调；但方向 0.82 是关键、已达标。
+
+> 复现：producer `robotwin_spatrack_clip.py --pt_glob ... --out_dir ...`；训练 `train_gpstoken_wm.py --img_loss 1 --fuse 1 --w_motion 30 --mw_cap 80`；评估 `_gps_imgeval.py --gt_flow_thr 0.05 --split heldseed|heldtask`。ckpt：`checkpoints/wm_{mv1,mv2}/wm_002000.pt`。
