@@ -22,8 +22,10 @@ def main():
     ap.add_argument("--gt_flow_thr", type=float, default=0.0, help="if >0, define movers by GT image-flow magnitude > this fraction of image size (FAIR across GTs with different mover distributions)")
     args = ap.parse_args(); dev = "cuda"
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False); cargs = ck.get("args", {})
+    _tp = bool(cargs.get("traj_pred", 0))
     model = GPSTokenWM(geom_mode=cargs.get("geom_mode", "xyz"), fdim=cargs.get("fdim", 128),
-                       feat_source=cargs.get("feat_source", "qwen"), dino_imgsize=cargs.get("dino_imgsize", 518)).to(dev)
+                       feat_source=cargs.get("feat_source", "qwen"), dino_imgsize=cargs.get("dino_imgsize", 518),
+                       traj_pred=_tp, Kf=12).to(dev)
     model.load_state_dict(ck["model"], strict=False); model.eval()
     for p in model.parameters(): p.requires_grad_(False)
     enc = model.encoder
@@ -57,12 +59,22 @@ def main():
                 cg, cam_tok = model.cam_cond_signals(tok_xyz0.float(), center, radius, Ki.float(), vm.float())
                 cond = cond + cg
             x = model.predict(tok_xyz0, tok_feat, sig_n, center, radius, ctxc, ctxm, cond, cam_tok=cam_tok)
+            traj_pred_xyz = None
             if cargs.get("fuse", False):                                     # v2: grounding-gate modulates motion
                 gate = torch.sigmoid(model.relevance(tok_feat, text_feats.mean(0)))
                 g = gate[:, None] * model.geom_head(x[0]).float()
-                xyz1_pred = model.geom_to_xyz(g, tok_xyz0.float(), Ki.float(), vm.float())
+                if _tp:
+                    traj_pred_xyz = model.geom_to_traj(g, tok_xyz0.float(), Ki.float(), vm.float())  # [Kf,M,3]
+                    xyz1_pred = traj_pred_xyz[-1]
+                else:
+                    xyz1_pred = model.geom_to_xyz(g, tok_xyz0.float(), Ki.float(), vm.float())
             else:
-                xyz1_pred, _ = model.heads(x, tok_xyz0, Ki, vm)
+                if _tp:
+                    g = model.geom_head(x[0]).float()
+                    traj_pred_xyz = model.geom_to_traj(g, tok_xyz0.float(), Ki.float(), vm.float())
+                    xyz1_pred = traj_pred_xyz[-1]
+                else:
+                    xyz1_pred, _ = model.heads(x, tok_xyz0, Ki, vm)
         xyz1_pred = xyz1_pred.float()
         Wn = xyz1_pred.new_tensor([float(W), float(H)])
         uv0 = project_to_uv(tok_xyz0, Ki, vm); uv1p = project_to_uv(xyz1_pred, Ki, vm); uv1g = project_to_uv(xyz1_gt, Ki, vm)
@@ -90,7 +102,26 @@ def main():
         ldg = torch.log(to_cam(xyz1_gt, vm)[:, 2].clamp_min(1e-3) / z0)
         dmagr = float(ldp[mv].abs().median() / ldg[mv].abs().median().clamp_min(1e-9))
         dsign = float((torch.sign(ldp[mv]) == torch.sign(ldg[mv])).float().mean())
-        rows.append((dcos, magr, gpx, ppx, dmagr, dsign, dcos3, magr3))
+        # TRAJECTORY metric: avg per-frame image dir-cos over t=1..Kf (does the model trace the curve?).
+        # GT = traj[t] for the SAME mover set. Only meaningful in traj mode; for the straight baseline the
+        # pred trajectory is the linear interpolation toward the endpoint (so per-frame cos == endpoint cos).
+        Kf_ = int(traj.shape[0]) - 1
+        traj_cos = float("nan")
+        cos_acc, ok_t = 0.0, 0
+        for t in range(1, Kf_ + 1):
+            gt_t = traj[t][idx]
+            fg_t = (project_to_uv(gt_t, Ki, vm) - uv0) / Wn
+            if traj_pred_xyz is not None:
+                pp_t = traj_pred_xyz[t - 1].float()
+            else:                                                            # straight base: lerp to endpoint
+                pp_t = tok_xyz0 + (xyz1_pred - tok_xyz0) * (t / Kf_)
+            fp_t = (project_to_uv(pp_t, Ki, vm) - uv0) / Wn
+            mvt = fg_t.norm(dim=-1) > args.gt_flow_thr if args.gt_flow_thr > 0 else mv
+            if mvt.sum() >= 5:
+                cos_acc += float(F.cosine_similarity(fp_t[mvt], fg_t[mvt], dim=-1).mean()); ok_t += 1
+        if ok_t > 0:
+            traj_cos = cos_acc / ok_t
+        rows.append((dcos, magr, gpx, ppx, dmagr, dsign, dcos3, magr3, traj_cos))
     A = np.array(rows)
     def md(x): return float(np.median(x))
     print(f"[{os.path.basename(args.ckpt)} on {args.split}]  n_clip={len(A)}  IMAGE-space:")
@@ -99,6 +130,9 @@ def main():
     print(f"  image-flow MAG-RATIO (pred/GT): {md(A[:,1]):.2f}   <== ~1.0 = magnitude SOLVED (vs 3D magR ~0.5)")
     print(f"  GT image flow {md(A[:,2]):.1f}% of img  vs PRED {md(A[:,3]):.1f}%")
     print(f"  DEPTH Δlogz mag-ratio: {md(A[:,4]):.2f}   sign-agreement: {md(A[:,5])*100:.0f}%   <== is depth motion learned?")
+    tc = A[:, 8]; tc = tc[~np.isnan(tc)]
+    if len(tc):
+        print(f"  TRAJECTORY avg per-frame image dir-cos (t=1..Kf): {float(np.median(tc)):+.2f}   <== does it trace the curve?")
 
 
 if __name__ == "__main__":

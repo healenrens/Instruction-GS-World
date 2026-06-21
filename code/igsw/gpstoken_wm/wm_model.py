@@ -42,7 +42,7 @@ def _footprint_sample(grid, ghw, uv, sigma_px, H, W):
 class GPSTokenWM(nn.Module):
     def __init__(self, qwen_path: str | None = None, d_model: int = 1536, n_heads: int = 16,
                  n_query: int = 16, fdim: int = 128, geom_mode: str = "xyz", num_freqs: int = 10,
-                 feat_source: str = "qwen", dino_imgsize: int = 518):
+                 feat_source: str = "qwen", dino_imgsize: int = 518, traj_pred: bool = False, Kf: int = 12):
         super().__init__()
         self.encoder = QwenVLEncoder(qwen_path) if qwen_path else QwenVLEncoder()
         H = self.encoder.hidden_size
@@ -83,7 +83,13 @@ class GPSTokenWM(nn.Module):
         self.blocks = nn.ModuleList([DiTBlock(d, n_heads, ctx_dim=d) for _ in range(n_l)])
         self.final_norm = nn.LayerNorm(d, eps=1e-6)
         # ---- heads ----
-        self.geom_head = nn.Linear(d, 3)
+        # CURVE/TRAJECTORY mode (--traj_pred): instead of ONE future xyz (frame Kf), the geom head outputs
+        # PER-FRAME displacements (Kf x 3) = (Δu_t,Δv_t,Δlogz_t) for t=1..Kf, each unprojected to 3D by the
+        # SAME flowd geometry. Captures the full curve + the non-uniform speed profile. The endpoint (last
+        # waypoint, t=Kf) is directly comparable to the straight baseline. Zero-init => no-motion start.
+        self.traj_pred, self.Kf = bool(traj_pred), int(Kf)
+        out_dim = 3 * self.Kf if self.traj_pred else 3
+        self.geom_head = nn.Linear(d, out_dim)
         nn.init.zeros_(self.geom_head.weight); nn.init.zeros_(self.geom_head.bias)   # start = no motion
         self.content_head = nn.Linear(d, fdim)
         # v2 fusion (--fuse): JEPA predicts into the FROZEN PRETRAINED latent (raw DINOv2, NOT our feat_in),
@@ -190,6 +196,31 @@ class GPSTokenWM(nn.Module):
         inv = torch.linalg.inv(viewmat.float()).to(cam1.dtype)
         return (torch.cat([cam1, ones], -1) @ inv.T)[:, :3]
 
+    def geom_to_traj(self, g, tok_xyz0, K_intr, viewmat):
+        """CURVE mode. g [M, 3*Kf] = per-frame (Δu_t,Δv_t,Δlogz_t) RELATIVE to frame0 (absolute offset from
+        the frame0 image position, NOT incremental) -> full 3D trajectory [Kf, M, 3] via the flowd unproject.
+        Each frame is unprojected from frame0's (u0,v0,z0) + the predicted offset (same math as geom_to_xyz
+        flowd). Returns the per-frame world xyz for t=1..Kf."""
+        M = tok_xyz0.shape[0]
+        ones = torch.ones(M, 1, device=tok_xyz0.device, dtype=tok_xyz0.dtype)
+        cam0 = (torch.cat([tok_xyz0, ones], -1) @ viewmat.T)[:, :3]
+        z0 = cam0[:, 2:3].clamp_min(1e-4)
+        fx, fy, cx, cy = K_intr[0, 0], K_intr[1, 1], K_intr[0, 2], K_intr[1, 2]
+        u0 = cam0[:, 0:1] / z0 * fx + cx
+        v0 = cam0[:, 1:2] / z0 * fy + cy
+        gk = g.view(M, self.Kf, 3)                                          # [M,Kf,3]
+        inv = torch.linalg.inv(viewmat.float()).to(tok_xyz0.dtype)
+        out = []
+        for t in range(self.Kf):
+            du, dv, dlz = gk[:, t, 0:1], gk[:, t, 1:2], gk[:, t, 2:3]
+            u1, v1 = u0 + du, v0 + dv
+            z1 = z0 * torch.exp(dlz.clamp(-2.0, 2.0))
+            xc = (u1 - cx) / fx * z1
+            yc = (v1 - cy) / fy * z1
+            cam1 = torch.cat([xc, yc, z1], -1)
+            out.append((torch.cat([cam1, ones], -1) @ inv.T)[:, :3])
+        return torch.stack(out, 0)                                          # [Kf, M, 3]
+
     def relevance(self, tok_feat, text_emb):
         """tok_feat [M,fdim], text_emb [H] -> relevance logits [M]."""
         q = F.normalize(self.rel_proj(tok_feat), dim=-1)
@@ -214,16 +245,27 @@ class GPSTokenWM(nn.Module):
                                                 b["K_intr"].float(), b["viewmat"].float())
             cond = cond + cg
         x = self.predict(b["tok_xyz0"], tok_feat, b["sig_n"], b["center"], b["radius"], ctx, ctxm, cond, cam_tok=cam_tok)
+        traj_pred_xyz = None
         if getattr(self, "fuse", False):
             h = x[0]
             gl = self.relevance(tok_feat, text_feats.mean(0))                     # gate logit [M]
             gate = torch.sigmoid(gl)                                              # [M] instruction-relevance GATE
             g = gate[:, None] * self.geom_head(h).float()                         # grounding GATES motion (not parallel head)
-            xyz1_pred = self.geom_to_xyz(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
+            if self.traj_pred:                                                    # CURVE: per-frame trajectory
+                traj_pred_xyz = self.geom_to_traj(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
+                xyz1_pred = traj_pred_xyz[-1]                                     # endpoint = last waypoint (t=Kf)
+            else:
+                xyz1_pred = self.geom_to_xyz(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
             jepa_pred = self.jepa_head(h if getattr(self, "jepa_couple", False) else h.detach()).float()  # READ-OUT (stop-grad, "不抢主干"); --jepa_couple lets JEPA grad shape the trunk (ablation)
             feat_pred = None; self._gate = gate; self._gate_logit = gl
         else:
-            xyz1_pred, feat_pred = self.heads(x, b["tok_xyz0"], b["K_intr"], b["viewmat"])
+            if self.traj_pred:
+                g = self.geom_head(x[0]).float()
+                traj_pred_xyz = self.geom_to_traj(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
+                xyz1_pred = traj_pred_xyz[-1]
+                feat_pred = self.content_head(x[0])
+            else:
+                xyz1_pred, feat_pred = self.heads(x, b["tok_xyz0"], b["K_intr"], b["viewmat"])
         with torch.no_grad():
             gridK, ghwK = (self.dino.grid(b["rgbK_np"]) if self.dino is not None
                            else self.encoder.image_grid_features(b["vlmK"]))
@@ -254,19 +296,38 @@ class GPSTokenWM(nn.Module):
             K_ = b["K_intr"].float(); vm_ = b["viewmat"].float()
             Wn = xyz1_pred.new_tensor([float(b["W"]), float(b["H"])])
             uv0 = project_to_uv(b["tok_xyz0"].float(), K_, vm_)
-            uv1p = project_to_uv(xyz1_pred.float(), K_, vm_)
-            uv1g = project_to_uv(b["xyz1_gt"].float(), K_, vm_)
-            self._fp = (uv1p - uv0) / Wn; self._fg = (uv1g - uv0) / Wn
-            per = F.smooth_l1_loss(self._fp, self._fg, beta=0.02, reduction="none").mean(-1)
-            img_l = (per * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else per.mean()
-            # + normalized DEPTH change (Δlog z): full 3D = image-flow + depth, both consistent-scale
-            # targets (vs the failed flowd which used raw-pixel flow + loss on 3D position).
             z0 = to_cam(b["tok_xyz0"].float(), vm_)[:, 2].clamp_min(1e-3)
-            ldp = torch.log(to_cam(xyz1_pred.float(), vm_)[:, 2].clamp_min(1e-3) / z0)
-            ldg = torch.log(to_cam(b["xyz1_gt"].float(), vm_)[:, 2].clamp_min(1e-3) / z0)
-            perz = F.smooth_l1_loss(ldp, ldg, beta=0.05, reduction="none")
-            depth_l = (perz * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else perz.mean()
-            l_geom = img_l + getattr(self, "w_depth", 0.5) * depth_l
+            if self.traj_pred:
+                # CURVE: average the SAME normalized-image-flow + depth loss over ALL frames t=1..Kf, GT=traj[t].
+                # _fp/_fg keep the ENDPOINT (t=Kf) flow for the dcos/magR logs (comparable to the straight base).
+                tg = b["traj_gt"].float()                                         # [Kf, M, 3]
+                img_acc = depth_acc = 0.0
+                for t in range(self.Kf):
+                    uvtp = project_to_uv(traj_pred_xyz[t], K_, vm_)
+                    uvtg = project_to_uv(tg[t], K_, vm_)
+                    fpt = (uvtp - uv0) / Wn; fgt = (uvtg - uv0) / Wn
+                    pert = F.smooth_l1_loss(fpt, fgt, beta=0.02, reduction="none").mean(-1)
+                    img_acc = img_acc + ((pert * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else pert.mean())
+                    ldpt = torch.log(to_cam(traj_pred_xyz[t], vm_)[:, 2].clamp_min(1e-3) / z0)
+                    ldgt = torch.log(to_cam(tg[t], vm_)[:, 2].clamp_min(1e-3) / z0)
+                    perzt = F.smooth_l1_loss(ldpt, ldgt, beta=0.05, reduction="none")
+                    depth_acc = depth_acc + ((perzt * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else perzt.mean())
+                    if t == self.Kf - 1:
+                        self._fp, self._fg = fpt, fgt                             # endpoint flow for logs
+                l_geom = img_acc / self.Kf + getattr(self, "w_depth", 0.5) * (depth_acc / self.Kf)
+            else:
+                uv1p = project_to_uv(xyz1_pred.float(), K_, vm_)
+                uv1g = project_to_uv(b["xyz1_gt"].float(), K_, vm_)
+                self._fp = (uv1p - uv0) / Wn; self._fg = (uv1g - uv0) / Wn
+                per = F.smooth_l1_loss(self._fp, self._fg, beta=0.02, reduction="none").mean(-1)
+                img_l = (per * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else per.mean()
+                # + normalized DEPTH change (Δlog z): full 3D = image-flow + depth, both consistent-scale
+                # targets (vs the failed flowd which used raw-pixel flow + loss on 3D position).
+                ldp = torch.log(to_cam(xyz1_pred.float(), vm_)[:, 2].clamp_min(1e-3) / z0)
+                ldg = torch.log(to_cam(b["xyz1_gt"].float(), vm_)[:, 2].clamp_min(1e-3) / z0)
+                perz = F.smooth_l1_loss(ldp, ldg, beta=0.05, reduction="none")
+                depth_l = (perz * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else perz.mean()
+                l_geom = img_l + getattr(self, "w_depth", 0.5) * depth_l
         elif getattr(self, "norm_target", False):
             # SCALE-NORMALIZED target (user's relative-distance idea, §95续16): the model predicts the
             # per-token displacement field DIVIDED by the clip's global motion scale = a unit-scale

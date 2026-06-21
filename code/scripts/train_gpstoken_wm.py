@@ -53,6 +53,7 @@ def main():
     ap.add_argument("--fuse", type=int, default=0, help="v2 fused arch: grounding=GATE modulating motion; JEPA=read-out into RAW pretrained latent (footprint-pooled, derived from motion), not parallel heads")
     ap.add_argument("--cam_cond", type=int, default=0, help="B: condition the predictor on the camera pose (global emb -> cond + per-token cam-frame pos -> hidden); makes VARYING cameras a generalization asset not poison. Zero-init => warm-startable from the fixed-cam v2")
     ap.add_argument("--jepa_couple", type=int, default=0, help="ablation: 1 = JEPA gradient flows INTO the trunk (multi-task, future-feature task helps motion?); 0 = stop-grad read-out (default, JEPA does not affect motion)")
+    ap.add_argument("--traj_pred", type=int, default=0, help="CURVE: geom head outputs PER-FRAME (Δu,Δv,Δlogz) for t=1..Kf -> full 3D trajectory; img_loss supervised per-frame (GT=traj[t]). Endpoint=last waypoint. vs the straight single-displacement baseline")
     ap.add_argument("--init_from", default="", help="warm-start: load model weights from this ckpt (strict=False; new modules e.g. cam heads keep their zero-init) -> keep the fixed-cam v2 head start for B")
     ap.add_argument("--cond_scale", type=int, default=0, help="1=condition the predictor on the (oracle) global motion scale; tests whether SUPPLYING the scale fixes magnitude (path-1 premise)")
     ap.add_argument("--w_jepa", type=float, default=0.5)
@@ -75,8 +76,11 @@ def main():
     if is_main:
         os.makedirs(args.out, exist_ok=True)
 
+    # peek one clip for Kf so the traj head is sized right
+    _probe = sorted(glob.glob(f"{args.data}/*_train.pt"))
+    _Kf = int(torch.load(_probe[0], map_location="cpu", weights_only=False)["Kf"]) if _probe else 12
     model = GPSTokenWM(geom_mode=args.geom_mode, fdim=args.fdim, feat_source=args.feat_source,
-                       dino_imgsize=args.dino_imgsize).to(dev)
+                       dino_imgsize=args.dino_imgsize, traj_pred=bool(args.traj_pred), Kf=_Kf).to(dev)
     for p in model.encoder.parameters():
         p.requires_grad_(False)
     model.w_jepa, model.w_sigreg, model.w_ground = args.w_jepa, args.w_sigreg, args.w_ground
@@ -136,6 +140,7 @@ def main():
                     "vlmK": mv_in(enc.build_inputs(instr, imgK), dev),
                     "cen": cen, "sig_n": (sig / float(max(H, W))).clamp(0, 1),
                     "tok_xyz0": means[idx], "xyz1_gt": traj[K][idx], "disp_tok": disp[idx],
+                    "traj_gt": (traj[1:K + 1][:, idx] if args.traj_pred else None),  # [Kf,M,3] frames t=1..Kf
                     "is_obj_tok": (c["is_obj"].to(dev)[idx] if "is_obj" in c else None),
                     "center": center, "radius": (means[:n_keep] - center).norm(dim=-1).amax().clamp_min(1e-6),
                     "K_intr": c["K_intr"].to(dev).float(), "viewmat": c["viewmat"].to(dev).float(),

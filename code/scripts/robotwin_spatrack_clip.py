@@ -48,6 +48,18 @@ def load_hdf5_frames(hdf5, K=12):
         return np.stack([np.array(Image.open(io.BytesIO(bytes(rgb[t]))).convert("RGB")) for t in idx]).astype(np.uint8)
 
 
+
+def load_agibot_frames(task, episode, kf, win_start, win_frac):
+    """Decode kf+1 head-camera frames from an AgiBot episode (reuses agibot_spatrack_eval) and grab its
+    language instruction (the per-task label). Returns (frames[T,H,W,3] uint8, instruction)."""
+    import sys as _s, os as _o
+    _s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
+    from agibot_spatrack_eval import agibot_head_video, task_label, decode_window
+    vid = agibot_head_video(task, episode)
+    frames, _idx = decode_window(vid, kf, win_start, win_frac)
+    return frames, task_label(task)
+
+
 def process_one(frames, instruction, vggt, model, args, out):
     vt = torch.from_numpy(frames).permute(0, 3, 1, 2).float()                     # [T,3,H0,W0]
     vt_p = preprocess_image(vt)[None]                                             # [1,T,3,h,w] (pure resize)
@@ -111,11 +123,23 @@ def main():
     ap.add_argument("--grid", type=int, default=48, help="frame-0 grid side -> grid^2 candidate tokens")
     ap.add_argument("--vis_keep", type=float, default=0.3, help="keep tracks visible in >= this frame-fraction")
     ap.add_argument("--iters_track", type=int, default=4)
+    ap.add_argument("--agibot_jobs", help="JSON list of [task,episode,out_name] -> batch AgiBot GT")
+    ap.add_argument("--agibot_task"); ap.add_argument("--agibot_episode", type=int)
+    ap.add_argument("--kf", type=int, default=12, help="AgiBot: frames-1 to decode per clip")
+    ap.add_argument("--win_start", type=float, default=0.30); ap.add_argument("--win_frac", type=float, default=0.40)
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--shard", type=int, default=0); ap.add_argument("--nshard", type=int, default=1)
     args = ap.parse_args()
 
     tasks = []                                                                    # (clip_path_or_None, out_path)
+    agibot_jobs = None
+    if args.agibot_jobs:
+        import json as _json
+        assert args.out_dir, "--agibot_jobs needs --out_dir"
+        agibot_jobs = [(j[0], int(j[1]), os.path.join(args.out_dir, j[2])) for j in _json.load(open(args.agibot_jobs))]
+    elif args.agibot_task is not None:
+        assert args.out, "--agibot_task needs --out"
+        agibot_jobs = [(args.agibot_task, int(args.agibot_episode), args.out)]
     if args.pt_glob:
         assert args.out_dir, "--pt_glob needs --out_dir"
         for cp in sorted(_glob.glob(args.pt_glob)):
@@ -130,6 +154,22 @@ def main():
     vggt = VGGT4Track.from_pretrained("Yuxihenry/SpatialTrackerV2_Front").eval().cuda()
     model = Predictor.from_pretrained("Yuxihenry/SpatialTrackerV2-Offline").eval().cuda()
     done = 0
+    if agibot_jobs is not None:
+        if args.nshard > 1: agibot_jobs = agibot_jobs[args.shard::args.nshard]
+        print(f"[spt-clip] AgiBot mode: {len(agibot_jobs)} clip(s) (shard {args.shard}/{args.nshard})", flush=True)
+        for task, ep, out in agibot_jobs:
+            if out and os.path.exists(out) and not args.overwrite:
+                print(f"[spt-clip] skip-exists {os.path.basename(out)}", flush=True); done += 1; continue
+            try:
+                frames, instruction = load_agibot_frames(task, ep, args.kf, args.win_start, args.win_frac)
+                if args.instruction: instruction = args.instruction
+                process_one(frames, instruction, vggt, model, args, out)
+                done += 1
+            except Exception as e:
+                print(f"[spt-clip] SKIP {task} ep{ep} -> {os.path.basename(out)}: {type(e).__name__}: {e}", flush=True)
+                torch.cuda.empty_cache()
+        print(f"[spt-clip] FINISHED {done}/{len(agibot_jobs)}", flush=True)
+        return
     for cp, out in tasks:
         if out and os.path.exists(out) and not args.overwrite:
             print(f"[spt-clip] skip-exists {os.path.basename(out)}", flush=True); done += 1; continue
