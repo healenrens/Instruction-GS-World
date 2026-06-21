@@ -1724,3 +1724,16 @@ rigidify(运动聚类+逐物体 trimmed-Kabsch, 背景冻结 frame0; 验证: 背
 | mag-ratio | 0.30 | **0.53** | 0.11 | 0.04 |
 
 **结论**: ① **SpaTracker = 正式 GT**: heldseed 全面胜出, 全量验证通过, GT 质量问题解决("GT 干净→模型能学好运动")。② **heldtask(新任务)两 GT 都崩**(方向~0/随机) = 零样本任务泛化是下个硬骨头, **非 GT 问题**(两个都崩)。③ 全量幅度 0.53(< 6 任务 0.90, 多样性更难)可再调, 但方向 0.82 是关键、已达标。 cf. memory [[spatracker-gt-validated]].
+
+## §104: 曲线证伪 + 真机 AgiBot 管线/门控/训练(用户 /goal 两任务并行, 3 个子 agent)
+**任务1 曲线(证伪)**: 用户问 3D 下完整曲线轨迹会否更好。`_traj_curvature.py`: GT 偏离弦 ~30%(垂距 47px/弦 155px)但 quad-frac 0.06 → 偏离=逐帧抖动非平滑弯。`--traj_pred`(逐帧 waypoint head + geom_to_traj)训 `wm_curve`: 方向更差(train 0.78 vs 直线 0.95, held 0.70 vs 0.82)。其幅度 0.04 是 `_gps_imgeval` 曲线分支 eval-bug(与训练日志 0.61 矛盾, 弃用; train-split 复核救了误报)。→ **保持直线**, 真机若要曲线需先平滑去噪。
+**任务2 真机 AgiBot(="AIGC Pro")**: `agibot_spatrack_eval.py`(AV1 解码+双 fixed_cam+门控)发现相机运动**双峰**: fixed_cam=True 仅静相机成立, 弯腰任务(洗衣机/冰箱/抽屉/扫地)动相机→重现 Pi3 误判(全帧箭头, reproj 5-8px)。门控: fixed_cam=False 读 c2w, 平移<2%深度 & mover<50% 才留。用户原则: 删弯腰 task 只用静相机。`agibot_gate/build_split/make_jobs.py` 筛 **301 clip(220train/48heldseed/33heldtask)**, `robotwin_spatrack_clip.py --agibot`。训 `wm_agibot`(2500步, 直线 w30c80):
+
+| `gt_flow_thr 0.05` | train | heldseed | heldtask |
+|---|---|---|---|
+| 图像 dir-cos | 0.69 | 0.27 | 0.42 |
+| mag-ratio | 0.54 | 0.32 | 0.24 |
+
+(对比 sim train 0.95/heldseed 0.82)。`_gps_predviz` 诊断: GT 真实相干、模型方向跑偏, train 才 0.69 = **欠拟合**。真机任务(仓库分拣多物体双臂快)远复杂于 RoboTwin 单物体抓放。
+**结论**: ① 数据层面**真机可用**(静相机门控后 GT 干净); ② **真机运动学习是下个硬骨头**(任务难度+数据规模, 非 GT 问题); ③ 候选: 扩静相机真机数据+加步数; 或从简单真机任务起; 复查快速/形变 GT 噪声。④ 工具: `--mw_cap`(mover 权重上限), `--gt_flow_thr`(公平 mover 阈值)。 cf. [[spatracker-gt-validated]], [[straight-vs-curved-trajectory]].
+**下一方向(讨论中)**: 本世界模型作为 VLA backbone — feature → 400-600M DiT 动作头, 3D-flow 时间间隔 = action chunk, 先 RoboTwin 验证(注意 normalize + 关节角)。

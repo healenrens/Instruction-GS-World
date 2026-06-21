@@ -1,4 +1,4 @@
-# GPSToken-JEPA 世界模型 · 周进展汇总（§95–§103）
+# GPSToken-JEPA 世界模型 · 周进展汇总（§95–§104）
 
 > 语言条件化的 3D 高斯世界模型：给 frame0 RGB + 稀疏 2D-Gaussian token（lift 到 3D）+ 语言指令，预测每个 token 的未来 3D 运动。骨干 = 冻结 Qwen3-VL-2B（语言）+ 冻结 DINOv2-L（视觉）+ ~1.66B 可训练 DiT 预测器。
 
@@ -194,3 +194,34 @@
 3. 幅度全量上 0.53（< 6 任务 sweep 的 0.90，多样性更难）可再调；但方向 0.82 是关键、已达标。
 
 > 复现：producer `robotwin_spatrack_clip.py --pt_glob ... --out_dir ...`；训练 `train_gpstoken_wm.py --img_loss 1 --fuse 1 --w_motion 30 --mw_cap 80`；评估 `_gps_imgeval.py --gt_flow_thr 0.05 --split heldseed|heldtask`。ckpt：`checkpoints/wm_{mv1,mv2}/wm_002000.pt`。
+
+---
+
+# ◆ 第三周（§104）：曲线证伪 + 真实世界（AgiBot）数据管线与训练
+
+> **一句话**：曲线拟合被证伪（GT 偏离是抖动非真曲线，方向反而更差）→ 保持直线目标；并首次把 SpaTracker GT 管线推到**真实世界 AgiBot**——管线就绪（需相机门控），但真机运动学习明显更难（train 0.69 / heldseed 0.27，远低于 sim 0.95/0.82），模型欠拟合复杂真机任务。两项均由并行子 agent 完成。
+
+## 1. 曲线拟合 → 不值得做（任务1，证伪）
+- 用户问：3D 环境下把直线净位移改成**完整曲线轨迹**会不会更好。
+- 先量曲率（`_traj_curvature.py`）：GT 轨迹偏离直线弦 ~30%（垂距 47px / 弦 155px），但 **quad-frac 0.06** → 偏离几乎全是**逐帧跟踪抖动**，不是可拟合的平滑弯。
+- 实测（`--traj_pred` 逐帧多-waypoint vs 直线 `wm_mv2`）：曲线方向**更差**（train 0.78 vs 0.95，held 0.70 vs 0.82）。（其幅度指标 0.04 是 `_gps_imgeval` 曲线分支 eval-bug，与训练日志 0.61 矛盾，已弃用——train-split 复核救了一次误报。）
+- **结论：保持直线两关键帧目标。** 真机若要曲线，需先平滑去噪 GT。
+
+## 2. 真实世界 AgiBot（任务2，= "AIGC Pro"）
+**2a. 管线评估**：SpaTracker GT 管线在真机视频上能跑，但 sim 的 `fixed_cam=True` 只对**静相机** episode 成立（~2/3）。弯腰任务（洗衣机/冰箱/抽屉/扫地）动头部相机 → **重现 Pi3 自运动误判**（全帧箭头、reproj 5–8px）。相机运动**双峰**、有干净分界 → 门控：`fixed_cam=False` 读 c2w，平移 <2% 深度 且 mover<50% 才留。工具 `agibot_spatrack_eval.py` / `agibot_montage.py`。
+
+**2b. 静相机子集训练+测试**（用户原则：删弯腰 task、只用固定相机）：门控筛出 **301 clip（220 train / 48 heldseed / 33 heldtask）**，`robotwin_spatrack_clip.py --agibot`，真机 GT 目视干净。训练 `wm_agibot`（2500 步，直线 w30c80 config）：
+
+| 指标（`gt_flow_thr 0.05`） | train | heldseed | heldtask | （对比 sim） |
+|---|---|---|---|---|
+| 图像方向 dir-cos | 0.69 | 0.27 | 0.42 | sim 0.95 / 0.82 |
+| 幅度 mag-ratio | 0.54 | 0.32 | 0.24 | — |
+
+**诊断**（`_gps_predviz` 绿 GT / 红 pred）：GT 是真实相干运动（非噪声），但模型方向跑偏，连 train 都只 0.69 = **欠拟合**。真机任务（仓库分拣=多物体、双臂、快）远比 RoboTwin 单物体抓放复杂。
+
+## 3. 结论 / 下一步
+1. **数据层面真机可用**（静相机门控后 GT 干净），但**真机运动学习是下个硬骨头**（任务难度 + 数据规模），非 GT 问题。
+2. 候选：扩静相机真机数据 + 加步数/容量；或从更简单真机任务起步；复查快速/形变运动的 GT 噪声。
+3. **新方向（讨论中）**：本世界模型作为 **VLA backbone** —— feature 接 400–600M DiT 动作头，3D-flow 时间间隔与 action chunk 同步，先在 RoboTwin 上验证（注意 normalize + 关节角处理）。
+
+> 复现：`agibot_spatrack_eval.py`（门控）/ `robotwin_spatrack_clip.py --agibot`（出 clip）/ `train_gpstoken_wm.py ... --data data/agibot_static` / `_gps_imgeval.py --gt_flow_thr 0.05`。ckpt `checkpoints/wm_agibot/wm_002500.pt`。
