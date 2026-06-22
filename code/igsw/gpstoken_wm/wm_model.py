@@ -1,0 +1,731 @@
+"""GPSToken-JEPA world model — PLAN v1 (agent.md §93-95, PLAN_GPSTOKEN_JEPA_zh.md).
+
+Sparse 2D-Gaussian tokens (lifted to 3D) -> OUR DiT capacity (Qwen frozen conditioning + DiTBlock stack,
+kept per user: "保留我们的大容量骨干") -> heads:
+  * geom head  : per-token 3D translation (LOAD-BEARING). E1 two variants, selectable:
+      - "xyz"   : direct 3D displacement Δxyz.
+      - "flowd" : 2D image flow (Δu,Δv) + log-depth change Δlogz, unprojected to 3D (PLAN §5: "本质是
+                  2D 预测 + 一维深度"). The two are an A/B (PLAN §5 E1).
+  * content head: future token feature (JEPA auxiliary — shapes dynamics-aware features for VLA, NOT motion).
+  * relevance  : token feature · instruction-text  (grounding; trained with counterfactual in the trainer).
+Rotation is NOT a head — it emerges from the per-token translation field (Δx=(R−I)(x−c)) and is read out
+by Kabsch at eval (PLAN §3.1, §8: immune to the 6 failed rotation architectures).
+
+Single-window (frame0 -> frameK) prediction (JEPA convention, de-risks rollout). The model exposes
+encode_cond / encode_tokens / predict / geom_to_xyz / relevance; the trainer orchestrates data + losses.
+"""
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from ..dynamics.conditioning import QwenVLEncoder
+from ..dynamics.transformer import DiTBlock, CrossAttention
+from ..dynamics.pe import FourierPE3D
+from .sigreg import SIGReg
+from .tokens import sample_grid_feat, project_to_uv, to_cam
+from .losses import geom_loss, jepa_loss, relevance_infonce, mover_magnitude
+
+
+def _footprint_sample(grid, ghw, uv, sigma_px, H, W):
+    """JEPA non-uniform adaptation: pool a FROZEN pretrained feature grid over each token's sigma
+    footprint (5-point plus-pattern at center + ±0.7σ) instead of point-sampling — the pretrained grid
+    is UNIFORM-patch, our tokens are non-uniform, so we average the patch features the token covers."""
+    offs = torch.tensor([[0., 0.], [.7, 0.], [-.7, 0.], [0., .7], [0., -.7]], device=uv.device, dtype=uv.dtype)
+    acc = 0.
+    for o in offs:
+        acc = acc + sample_grid_feat(grid, ghw, uv + o[None] * sigma_px, H, W)
+    return acc / offs.shape[0]
+
+
+class GPSTokenWM(nn.Module):
+    def __init__(self, qwen_path: str | None = None, d_model: int = 1536, n_heads: int = 16,
+                 n_query: int = 16, fdim: int = 128, geom_mode: str = "xyz", num_freqs: int = 10,
+                 feat_source: str = "qwen", dino_imgsize: int = 518, traj_pred: bool = False, Kf: int = 12):
+        super().__init__()
+        self.encoder = QwenVLEncoder(qwen_path) if qwen_path else QwenVLEncoder()
+        H = self.encoder.hidden_size
+        # direction A: token VISUAL feature source — "qwen" (VLM patches) or "dino" (frozen DINOv2 dense).
+        # Qwen always does the LANGUAGE conditioning regardless; this only swaps the per-token visual feat.
+        # dino_imgsize raises DINOv2 input res (518->770 = 37->55 patch grid) = FINER per-token features =
+        # lower position-noise floor (PLAN §7 / §95续10: the floor is what surfaces rotation).
+        self.feat_source = feat_source
+        if feat_source == "dino":
+            from .dino_features import DinoFeatures
+            self.dino = DinoFeatures(img_size=dino_imgsize)
+            feat_dim_in = self.dino.embed_dim
+        else:
+            self.dino = None
+            feat_dim_in = H
+        n_l = self.encoder.num_layers
+        d = d_model
+        self.d, self.fdim, self.geom_mode, self.n_query = d, fdim, geom_mode, n_query
+        # ---- conditioning (faithfully copied from model_full.encode: per-layer proj + query aggregator) ----
+        self.layer_proj = nn.ModuleList([nn.Linear(H, d) for _ in range(n_l)])
+        self.cond_proj = nn.Linear(H, d)
+        # (path-1 probe) scale-conditioning: inject the per-clip GLOBAL motion scale into cond so the
+        # model can output full magnitude when the otherwise-aleatoric scale is SUPPLIED. zero-init last
+        # layer => no-op at start (warm-start safe). Decision test: does supplying the scale fix magR
+        # (=> path 1 'supply the scale via goal/action' suffices) or not (=> path 2 generative needed)?
+        self.scale_head = nn.Sequential(nn.Linear(1, d), nn.SiLU(), nn.Linear(d, d))
+        nn.init.zeros_(self.scale_head[-1].weight); nn.init.zeros_(self.scale_head[-1].bias)
+        self.query = nn.Parameter(torch.randn(n_query, d) * 0.02)
+        self.layer_id_emb = nn.Parameter(torch.randn(n_l, d) * 0.02)
+        self.aggregator = CrossAttention(d, n_heads, ctx_dim=d)
+        self.agg_norm = nn.LayerNorm(d, eps=1e-6)
+        # ---- token embed: FourierPE(3D pos) ⊕ frozen feat ⊕ sigma -> d ----
+        self.pe = FourierPE3D(num_freqs=num_freqs)
+        self.feat_in = nn.Linear(feat_dim_in, fdim)            # frozen visual patch feat -> token feature ch.
+        tok_in = self.pe.out_dim + fdim + 2
+        self.tok_embed = nn.Sequential(nn.Linear(tok_in, d), nn.SiLU(), nn.Linear(d, d))
+        # ---- DiT predictor (the kept 1.66B capacity) ----
+        self.blocks = nn.ModuleList([DiTBlock(d, n_heads, ctx_dim=d) for _ in range(n_l)])
+        self.final_norm = nn.LayerNorm(d, eps=1e-6)
+        # ---- heads ----
+        # CURVE/TRAJECTORY mode (--traj_pred): instead of ONE future xyz (frame Kf), the geom head outputs
+        # PER-FRAME displacements (Kf x 3) = (Δu_t,Δv_t,Δlogz_t) for t=1..Kf, each unprojected to 3D by the
+        # SAME flowd geometry. Captures the full curve + the non-uniform speed profile. The endpoint (last
+        # waypoint, t=Kf) is directly comparable to the straight baseline. Zero-init => no-motion start.
+        self.traj_pred, self.Kf = bool(traj_pred), int(Kf)
+        out_dim = 3 * self.Kf if self.traj_pred else 3
+        self.geom_head = nn.Linear(d, out_dim)
+        nn.init.zeros_(self.geom_head.weight); nn.init.zeros_(self.geom_head.bias)   # start = no motion
+        self.content_head = nn.Linear(d, fdim)
+        # v2 fusion (--fuse): JEPA predicts into the FROZEN PRETRAINED latent (raw DINOv2, NOT our feat_in),
+        # as a world-model read-out of "how the latent at this place changes" — derived from the same future
+        # hidden x that produces motion (a consistent second view of the future, not a competing head).
+        self.jepa_head = nn.Sequential(nn.Linear(d, d), nn.SiLU(), nn.Linear(d, feat_dim_in))
+        self.fuse = False
+        # ---- B: camera-conditioning (--cam_cond). The predictor outputs world motion but its INPUT is
+        # viewpoint-dependent (frame0 RGB + which tokens get placed) with NO camera signal -> it overfits
+        # one viewpoint (agent.md §97/§98). Inject the camera pose at 2 levels so varying cameras become a
+        # generalization ASSET, not poison. BOTH zero-init => exact no-op at start => WARM-STARTABLE from the
+        # fixed-camera v2 (keep the 0.92), then learn to use the camera. cam_head: global pose -> cond;
+        # cam_tok_head: per-token camera-frame position -> hidden (aligns RGB feat with view geometry).
+        self.cam_head = nn.Sequential(nn.Linear(13, d), nn.SiLU(), nn.Linear(d, d))
+        self.cam_tok_head = nn.Sequential(nn.Linear(3, d), nn.SiLU(), nn.Linear(d, d))
+        for m in (self.cam_head, self.cam_tok_head):
+            nn.init.zeros_(m[-1].weight); nn.init.zeros_(m[-1].bias)
+        self.cam_cond = False
+        self.jepa_couple = False   # ablation: if True, JEPA grad flows INTO the trunk (multi-task) instead of stop-grad read-out
+        self.rel_proj = nn.Sequential(nn.Linear(fdim, d), nn.SiLU(), nn.Linear(d, H))
+        self.rel_temp = 0.07
+        self.sigreg = SIGReg(num_proj=512)
+        self.w_jepa, self.w_sigreg, self.w_ground = 0.5, 0.05, 1.0   # set by the trainer from args
+        self.w_mag = 0.0                                             # mover-magnitude (DEAD END, kept off)
+        self.w_motion = 0.0                                          # motion-weighted geom loss (direction-preserving mag fix)
+
+    # ---------------- conditioning ----------------
+    def encode_cond(self, vlm_inputs: dict):
+        """-> ctx_per_block [1,n_l,Q,d], ctx_mask [1,Q], cond_global [1,d], text_feats [L_t,H]."""
+        enc = self.encoder(vlm_inputs)
+        hidden_all, valid_mask, text_mask = enc if len(enc) == 3 else (enc[0], enc[1], enc[1])
+        n_l = hidden_all.shape[0]
+        ctx_full = torch.stack([self.layer_proj[j](hidden_all[j].float()) for j in range(n_l)], 0)
+        tw = text_mask.float()[:, None]
+        pooled = (hidden_all[-1].float() * tw).sum(0) / tw.sum().clamp_min(1e-6)
+        cond_global = self.cond_proj(pooled)[None]
+        text_feats = hidden_all[-1][text_mask].detach().float()
+        agg = []
+        for j in range(n_l):
+            q = (self.query + self.layer_id_emb[j])[None]
+            a = self.aggregator(q, ctx_full[j][None], valid_mask[None])[0]
+            agg.append(self.agg_norm(a))
+        ctx_per_block = torch.stack(agg, 0)[None]
+        ctx_mask = torch.ones(1, self.n_query, dtype=torch.bool, device=hidden_all.device)
+        return ctx_per_block, ctx_mask, cond_global, text_feats
+
+    # ---------------- predictor ----------------
+    def predict(self, tok_xyz0, tok_feat_fdim, tok_sigma, center, radius,
+                ctx_per_block, ctx_mask, cond_global, cam_tok=None, return_layers=False):
+        """tokens (frame0) -> per-token hidden x [1,M,d]. tok_feat_fdim [M,fdim] = self.feat_in(grid feat),
+        computed ONCE by the caller and reused for SIGReg/relevance/JEPA-target.
+        cam_tok [M,d] (--cam_cond): per-token camera-frame geometry, zero at warm-start.
+
+        return_layers (VLA action expert): also return a list of the PER-LAYER per-token features
+        [1,M,d] (the INPUT to each DiTBlock j, i.e. the residual stream entering block j) so the action
+        expert can KV-cache cross-attend to the trunk at each layer. Default False => behaviour is
+        byte-for-byte unchanged for the existing world-model trainer."""
+        norm_xyz = (tok_xyz0 - center) / radius
+        pe = self.pe(norm_xyz[None])[0]                                       # [M, pe_out]
+        # fp32 cat (pe/sigma are fp32, feat is bf16 under autocast) -> tok_embed Linear re-casts
+        x = torch.cat([pe.float(), tok_feat_fdim.float(), tok_sigma.float()], dim=-1)[None]
+        x = self.tok_embed(x)
+        if cam_tok is not None:
+            x = x + cam_tok[None]                                             # inject per-token camera geometry
+        layers = [] if return_layers else None
+        for j, blk in enumerate(self.blocks):
+            if return_layers:
+                layers.append(x)                                             # residual stream ENTERING block j
+            x = blk(x, cond_global, ctx_per_block[:, j], ctx_mask)
+        out = self.final_norm(x)                                             # [1,M,d]
+        if return_layers:
+            return out, layers
+        return out
+
+    def cam_cond_signals(self, tok_xyz0, center, radius, K_intr, viewmat):
+        """--cam_cond: encode the camera pose into (cam_global [1,d] added to cond, cam_tok [M,d] added to
+        per-token hidden). Zero-init heads => no-op at warm-start. World motion stays the target; the camera
+        lets the predictor interpret the viewpoint-dependent input -> viewpoint-INVARIANT prediction."""
+        R = viewmat[:3, :3]; t = viewmat[:3, 3]
+        campos = -(R.t() @ t)                                                # camera center in world
+        fx, fy, cx, cy = K_intr[0, 0], K_intr[1, 1], K_intr[0, 2], K_intr[1, 2]
+        Wn = (cx * 2).clamp_min(1.0); Hn = (cy * 2).clamp_min(1.0)
+        feats = torch.stack([campos[0], campos[1], campos[2],               # camera position (3)
+                             R[2, 0], R[2, 1], R[2, 2], R[1, 0], R[1, 1], R[1, 2],  # look-dir + up (6)
+                             fx / Wn, fy / Hn, cx / Wn, cy / Hn])            # fov/principal (4) = 13
+        cam_global = self.cam_head(feats)[None]                              # [1,d]
+        ones = torch.ones(tok_xyz0.shape[0], 1, device=tok_xyz0.device, dtype=tok_xyz0.dtype)
+        cam0 = (torch.cat([tok_xyz0, ones], -1) @ viewmat.T)[:, :3]          # token position in CAMERA frame
+        cam_tok = self.cam_tok_head(cam0 / radius)                          # [M,d], scene-scale normalized
+        return cam_global, cam_tok
+
+    def heads(self, x, tok_xyz0, K_intr, viewmat):
+        """x [1,M,d] -> predicted future xyz [M,3], predicted future feature [M,fdim]."""
+        h = x[0]                                                             # [M,d]
+        g = self.geom_head(h).float()                                       # [M,3] fp32 for camera math
+        xyz1 = self.geom_to_xyz(g, tok_xyz0.float(), K_intr.float(), viewmat.float())
+        feat_pred = self.content_head(h)                                    # [M,fdim]
+        return xyz1, feat_pred
+
+    def geom_to_xyz(self, g, tok_xyz0, K_intr, viewmat):
+        if self.geom_mode == "xyz":
+            return tok_xyz0 + g                                             # direct 3D displacement
+        # ---- flowd: (Δu, Δv, Δlogz) in image space -> unproject to world 3D ----
+        ones = torch.ones(tok_xyz0.shape[0], 1, device=tok_xyz0.device, dtype=tok_xyz0.dtype)
+        cam0 = (torch.cat([tok_xyz0, ones], -1) @ viewmat.T)[:, :3]
+        z0 = cam0[:, 2:3].clamp_min(1e-4)
+        fx, fy, cx, cy = K_intr[0, 0], K_intr[1, 1], K_intr[0, 2], K_intr[1, 2]
+        u0 = cam0[:, 0:1] / z0 * fx + cx
+        v0 = cam0[:, 1:2] / z0 * fy + cy
+        u1, v1 = u0 + g[:, 0:1], v0 + g[:, 1:2]
+        z1 = z0 * torch.exp(g[:, 2:3].clamp(-2.0, 2.0))
+        xc = (u1 - cx) / fx * z1
+        yc = (v1 - cy) / fy * z1
+        cam1 = torch.cat([xc, yc, z1], -1)
+        inv = torch.linalg.inv(viewmat.float()).to(cam1.dtype)
+        return (torch.cat([cam1, ones], -1) @ inv.T)[:, :3]
+
+    def geom_to_traj(self, g, tok_xyz0, K_intr, viewmat):
+        """CURVE mode. g [M, 3*Kf] = per-frame (Δu_t,Δv_t,Δlogz_t) RELATIVE to frame0 (absolute offset from
+        the frame0 image position, NOT incremental) -> full 3D trajectory [Kf, M, 3] via the flowd unproject.
+        Each frame is unprojected from frame0's (u0,v0,z0) + the predicted offset (same math as geom_to_xyz
+        flowd). Returns the per-frame world xyz for t=1..Kf."""
+        M = tok_xyz0.shape[0]
+        ones = torch.ones(M, 1, device=tok_xyz0.device, dtype=tok_xyz0.dtype)
+        cam0 = (torch.cat([tok_xyz0, ones], -1) @ viewmat.T)[:, :3]
+        z0 = cam0[:, 2:3].clamp_min(1e-4)
+        fx, fy, cx, cy = K_intr[0, 0], K_intr[1, 1], K_intr[0, 2], K_intr[1, 2]
+        u0 = cam0[:, 0:1] / z0 * fx + cx
+        v0 = cam0[:, 1:2] / z0 * fy + cy
+        gk = g.view(M, self.Kf, 3)                                          # [M,Kf,3]
+        inv = torch.linalg.inv(viewmat.float()).to(tok_xyz0.dtype)
+        out = []
+        for t in range(self.Kf):
+            du, dv, dlz = gk[:, t, 0:1], gk[:, t, 1:2], gk[:, t, 2:3]
+            u1, v1 = u0 + du, v0 + dv
+            z1 = z0 * torch.exp(dlz.clamp(-2.0, 2.0))
+            xc = (u1 - cx) / fx * z1
+            yc = (v1 - cy) / fy * z1
+            cam1 = torch.cat([xc, yc, z1], -1)
+            out.append((torch.cat([cam1, ones], -1) @ inv.T)[:, :3])
+        return torch.stack(out, 0)                                          # [Kf, M, 3]
+
+    def relevance(self, tok_feat, text_emb):
+        """tok_feat [M,fdim], text_emb [H] -> relevance logits [M]."""
+        q = F.normalize(self.rel_proj(tok_feat), dim=-1)
+        t = F.normalize(text_emb, dim=-1)[None]
+        return (q * t).sum(-1) / self.rel_temp
+
+    def forward(self, b: dict):
+        """One training step (DDP-safe single entrypoint). b carries the prepared per-clip tensors +
+        vlm_inputs. Returns (loss, logs) — loss has grad through all trainable params; logs detached.
+
+        FSDP dispatch: when self._fsdp_vla is set (the VLA trainer wraps this module in FSDP), forward()
+        routes to forward_vla_batch so the ROOT FSDP unit's pre/post-forward hooks fire (they restore the
+        flat-param's 2-D orig-param views + run the grad reduce-scatter). Calling forward_vla_batch
+        directly on the inner module would BYPASS the root hooks -> the root's nn.Linear weights stay 1-D
+        flat -> 'mat2 must be a matrix'. The world-model path (flag unset) is byte-for-byte unchanged."""
+        if getattr(self, "_fsdp_vla", False):
+            return self.forward_vla_batch(b)
+        import torch.nn.functional as F
+        ctx, ctxm, cond, text_feats = self.encode_cond(b["vlm0"])
+        if getattr(self, "cond_scale", False):                                # supply the (oracle) global scale
+            gdm = b["xyz1_gt"].float() - b["tok_xyz0"].float(); mm = b["disp_tok"] > 0.01
+            s = (gdm[mm].norm(dim=-1).mean() if mm.any() else gdm.norm(dim=-1).mean()).clamp_min(1e-3)
+            cond = cond + self.scale_head(torch.log(s).reshape(1, 1))
+        grid0, ghw0 = (self.dino.grid(b["rgb0_np"]) if self.dino is not None
+                       else self.encoder.image_grid_features(b["vlm0"]))
+        tok_feat = self.feat_in(sample_grid_feat(grid0, ghw0, b["cen"], b["H"], b["W"])).float()
+        cam_tok = None
+        if getattr(self, "cam_cond", False):                                 # B: inject camera pose
+            cg, cam_tok = self.cam_cond_signals(b["tok_xyz0"].float(), b["center"], b["radius"],
+                                                b["K_intr"].float(), b["viewmat"].float())
+            cond = cond + cg
+        x = self.predict(b["tok_xyz0"], tok_feat, b["sig_n"], b["center"], b["radius"], ctx, ctxm, cond, cam_tok=cam_tok)
+        traj_pred_xyz = None
+        if getattr(self, "fuse", False):
+            h = x[0]
+            gl = self.relevance(tok_feat, text_feats.mean(0))                     # gate logit [M]
+            gate = torch.sigmoid(gl)                                              # [M] instruction-relevance GATE
+            g = gate[:, None] * self.geom_head(h).float()                         # grounding GATES motion (not parallel head)
+            if self.traj_pred:                                                    # CURVE: per-frame trajectory
+                traj_pred_xyz = self.geom_to_traj(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
+                xyz1_pred = traj_pred_xyz[-1]                                     # endpoint = last waypoint (t=Kf)
+            else:
+                xyz1_pred = self.geom_to_xyz(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
+            jepa_pred = self.jepa_head(h if getattr(self, "jepa_couple", False) else h.detach()).float()  # READ-OUT (stop-grad, "不抢主干"); --jepa_couple lets JEPA grad shape the trunk (ablation)
+            feat_pred = None; self._gate = gate; self._gate_logit = gl
+        else:
+            if self.traj_pred:
+                g = self.geom_head(x[0]).float()
+                traj_pred_xyz = self.geom_to_traj(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
+                xyz1_pred = traj_pred_xyz[-1]
+                feat_pred = self.content_head(x[0])
+            else:
+                xyz1_pred, feat_pred = self.heads(x, b["tok_xyz0"], b["K_intr"], b["viewmat"])
+        with torch.no_grad():
+            gridK, ghwK = (self.dino.grid(b["rgbK_np"]) if self.dino is not None
+                           else self.encoder.image_grid_features(b["vlmK"]))
+            fut_uv = project_to_uv(b["xyz1_gt"], b["K_intr"], b["viewmat"])
+            if getattr(self, "fuse", False):
+                # JEPA target = RAW frozen PRETRAINED feature (NOT our feat_in), footprint-pooled at the
+                # future location (= where the token moves) -> "latent at the moved place", a pretrained
+                # latent we predict to retain future-feature prediction without competing with motion.
+                sig_px = b["sig_n"] * float(max(b["H"], b["W"]))
+                tgt = _footprint_sample(gridK, ghwK, fut_uv, sig_px, b["H"], b["W"]).float().detach()
+            else:
+                tgt = self.feat_in(sample_grid_feat(gridK, ghwK, fut_uv, b["H"], b["W"])).float().detach()
+        # direction-PRESERVING magnitude fix: up-weight high-motion tokens in the POSITION loss (vs the
+        # dead-end relative mover_magnitude which inflated wrong directions). Still smooth-L1 on xyz => no
+        # direction damage; just makes the model serve big movers (which smooth-L1's median-seeking under-serves).
+        mw = None
+        if self.w_motion > 0:
+            d = b["disp_tok"]
+            mv = d > 0.01
+            mvmed = d[mv].median() if mv.any() else d.new_tensor(0.05)
+            mw = (1.0 + self.w_motion * (d / mvmed.clamp_min(1e-3))).clamp(max=getattr(self, "mw_cap", 10.0))
+        if getattr(self, "img_loss", False):
+            # IMAGE-NORMALIZED 2D-flow target (user's idea §95续18): supervise per-token motion as the
+            # NORMALIZED 2D IMAGE displacement (Δu/W, Δv/H) — how far it moves in the image as a fraction
+            # of image size. Tied to the GPSToken 2D representation, and a consistently-scaled target
+            # (image fractions, not wildly-varying meters) -> directly attacks magnitude under-prediction.
+            # Small 3D anchor (0.1*geom) keeps depth sane.
+            K_ = b["K_intr"].float(); vm_ = b["viewmat"].float()
+            Wn = xyz1_pred.new_tensor([float(b["W"]), float(b["H"])])
+            uv0 = project_to_uv(b["tok_xyz0"].float(), K_, vm_)
+            z0 = to_cam(b["tok_xyz0"].float(), vm_)[:, 2].clamp_min(1e-3)
+            if self.traj_pred:
+                # CURVE: average the SAME normalized-image-flow + depth loss over ALL frames t=1..Kf, GT=traj[t].
+                # _fp/_fg keep the ENDPOINT (t=Kf) flow for the dcos/magR logs (comparable to the straight base).
+                tg = b["traj_gt"].float()                                         # [Kf, M, 3]
+                img_acc = depth_acc = 0.0
+                for t in range(self.Kf):
+                    uvtp = project_to_uv(traj_pred_xyz[t], K_, vm_)
+                    uvtg = project_to_uv(tg[t], K_, vm_)
+                    fpt = (uvtp - uv0) / Wn; fgt = (uvtg - uv0) / Wn
+                    pert = F.smooth_l1_loss(fpt, fgt, beta=0.02, reduction="none").mean(-1)
+                    img_acc = img_acc + ((pert * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else pert.mean())
+                    ldpt = torch.log(to_cam(traj_pred_xyz[t], vm_)[:, 2].clamp_min(1e-3) / z0)
+                    ldgt = torch.log(to_cam(tg[t], vm_)[:, 2].clamp_min(1e-3) / z0)
+                    perzt = F.smooth_l1_loss(ldpt, ldgt, beta=0.05, reduction="none")
+                    depth_acc = depth_acc + ((perzt * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else perzt.mean())
+                    if t == self.Kf - 1:
+                        self._fp, self._fg = fpt, fgt                             # endpoint flow for logs
+                l_geom = img_acc / self.Kf + getattr(self, "w_depth", 0.5) * (depth_acc / self.Kf)
+            else:
+                uv1p = project_to_uv(xyz1_pred.float(), K_, vm_)
+                uv1g = project_to_uv(b["xyz1_gt"].float(), K_, vm_)
+                self._fp = (uv1p - uv0) / Wn; self._fg = (uv1g - uv0) / Wn
+                per = F.smooth_l1_loss(self._fp, self._fg, beta=0.02, reduction="none").mean(-1)
+                img_l = (per * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else per.mean()
+                # + normalized DEPTH change (Δlog z): full 3D = image-flow + depth, both consistent-scale
+                # targets (vs the failed flowd which used raw-pixel flow + loss on 3D position).
+                ldp = torch.log(to_cam(xyz1_pred.float(), vm_)[:, 2].clamp_min(1e-3) / z0)
+                ldg = torch.log(to_cam(b["xyz1_gt"].float(), vm_)[:, 2].clamp_min(1e-3) / z0)
+                perz = F.smooth_l1_loss(ldp, ldg, beta=0.05, reduction="none")
+                depth_l = (perz * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else perz.mean()
+                l_geom = img_l + getattr(self, "w_depth", 0.5) * depth_l
+        elif getattr(self, "norm_target", False):
+            # SCALE-NORMALIZED target (user's relative-distance idea, §95续16): the model predicts the
+            # per-token displacement field DIVIDED by the clip's global motion scale = a unit-scale
+            # RELATIVE field. The aleatoric absolute scale is FACTORED OUT of the regression target
+            # (recovered separately at inference). Only the TARGET is normalized (normalizing pred too
+            # would just be per-clip loss reweighting = the dead-end §95 path).
+            pd = xyz1_pred.float() - b["tok_xyz0"].float(); gd = b["xyz1_gt"].float() - b["tok_xyz0"].float()
+            m = b["disp_tok"] > 0.01
+            if m.sum() >= 5:
+                # Scale-EQUALIZE the target to a fixed reference magnitude sref (~the absolute regime),
+                # NOT to unit: target = gd * (sref / s_gt). This factors out the per-clip aleatoric scale
+                # (the user's relative-field idea) while keeping the target in the SAME gradient regime as
+                # the stable absolute baseline (bounded rescale ~0.33-1.25x with the 8cm floor) -> avoids
+                # the 10x-hot-gradient + per-clip-amplification instability that collapsed direction.
+                sref = 0.1
+                s_gt = gd[m].norm(dim=-1).mean().detach().clamp_min(0.08)
+                per = F.smooth_l1_loss(pd, gd * (sref / s_gt), beta=0.02, reduction="none").mean(-1)
+                l_geom = (per * mw).sum() / mw.sum().clamp_min(1e-6) if mw is not None else per.mean()
+            else:
+                l_geom = geom_loss(xyz1_pred.float(), b["xyz1_gt"].float(), weight=mw)
+        else:
+            l_geom = geom_loss(xyz1_pred.float(), b["xyz1_gt"].float(), weight=mw)
+        l_mag = mover_magnitude(xyz1_pred.float(), b["tok_xyz0"].float(), b["xyz1_gt"].float(), b["disp_tok"])
+        if getattr(self, "fuse", False):
+            jp = F.normalize(jepa_pred, dim=-1); jt = F.normalize(tgt, dim=-1)
+            l_jepa = (1.0 - (jp * jt).sum(-1)).mean()                        # cosine into RAW pretrained latent
+            l_sig = self.sigreg(jepa_pred)
+            mvr = (b["disp_tok"] > 0.01).float()                            # grounding GATE supervised to movers
+            l_inst = F.binary_cross_entropy_with_logits(self._gate_logit.float(), mvr)
+            relsel = ((self._gate > 0.5).float() == mvr).float().mean()
+        else:
+            l_jepa = jepa_loss(F.layer_norm(feat_pred.float(), (self.fdim,)),
+                               F.layer_norm(tgt, (self.fdim,)).detach())
+            l_sig = self.sigreg(tok_feat)
+            l_inst = tok_feat.new_zeros(())
+            relsel = torch.zeros((), device=tok_feat.device)
+            if b.get("is_obj_tok") is not None and self.w_ground > 0:
+                rel = self.relevance(tok_feat, text_feats.mean(0))
+                pos = b["is_obj_tok"].bool()
+                l_inst = relevance_infonce(rel, pos)
+                if pos.any():
+                    relsel = pos[rel.argmax()].float()
+        loss = (l_geom + self.w_mag * l_mag + self.w_jepa * l_jepa
+                + self.w_sigreg * l_sig + self.w_ground * l_inst)
+        if getattr(self, "_ddp_touch", False):  # zero-weight touch so EVERY trainable param participates ->
+            loss = loss + 0.0 * sum(p.float().sum()  # DDP runs with find_unused_parameters=False (the correct path)
+                                    for p in self.parameters() if p.requires_grad)
+        with torch.no_grad():
+            err_pred = (xyz1_pred - b["xyz1_gt"]).norm(dim=-1).mean()
+            err_static = (b["tok_xyz0"] - b["xyz1_gt"]).norm(dim=-1).mean()
+            mv = b["disp_tok"] > 0.01
+            dcos = (F.cosine_similarity((xyz1_pred - b["tok_xyz0"])[mv], (b["xyz1_gt"] - b["tok_xyz0"])[mv],
+                    dim=-1).mean() if mv.any() else torch.zeros((), device=tok_feat.device))
+            img_magr = torch.zeros((), device=tok_feat.device)
+            if getattr(self, "img_loss", False) and mv.any():               # report IMAGE-space dcos + flow magR
+                dcos = F.cosine_similarity(self._fp[mv], self._fg[mv], dim=-1).mean()
+                img_magr = self._fp[mv].norm(dim=-1).median() / self._fg[mv].norm(dim=-1).median().clamp_min(1e-6)
+        logs = {"loss": loss.detach(), "geom": l_geom.detach(),
+                "mag": (img_magr if getattr(self, "img_loss", False) else l_mag).detach(), "jepa": l_jepa.detach(),
+                "sig": l_sig.detach(), "inst": l_inst.detach() if torch.is_tensor(l_inst) else l_inst,
+                "skill": (err_static - err_pred).detach(), "errp": err_pred.detach(),
+                "dcos": dcos.detach(), "relsel": relsel.detach(), "fstd": tok_feat.float().std().detach()}
+        return loss, logs
+
+    # ---------------- VLA: action expert (π0-style flow-matching) ----------------
+    def attach_action_expert(self, action_dim=14, action_steps=50, d_act=704, n_heads_act=11,
+                             mlp_ratio=4.0, norm_stats_path=None, n_state_tokens=1):
+        """Add the flow-matching action expert that shares this trunk. n_layers = the trunk's block count
+        so each expert layer KV-cache cross-attends to the matching trunk layer + matching VLM ctx layer.
+        trunk_dim / vlm_dim are BOTH self.d (the trunk hidden = the per-layer VLM ctx projection dim).
+        The expert also cross-attends to a PROPRIOCEPTION state (current qpos = anchor) via n_state_tokens
+        condition tokens (state cross-attn), with the flow-matching loss only on the 50 action tokens."""
+        from .action_expert import ActionExpert, ActionNormalizer
+        n_l = len(self.blocks)
+        self.action_expert = ActionExpert(
+            n_layers=n_l, action_dim=action_dim, action_steps=action_steps, d=d_act,
+            n_heads=n_heads_act, trunk_dim=self.d, vlm_dim=self.d, mlp_ratio=mlp_ratio,
+            n_state_tokens=n_state_tokens)
+        if norm_stats_path is not None:
+            self.act_norm = ActionNormalizer.from_stats_file(norm_stats_path, dim=action_dim)
+        else:
+            self.act_norm = ActionNormalizer(torch.zeros(action_dim), torch.ones(action_dim), dim=action_dim)
+        self.w_flow_vla, self.w_act_vla = 1.0, 1.0
+        return self.action_expert
+
+    def _trunk_features(self, b):
+        """Run conditioning + trunk ONCE, returning (xyz1_pred, feat_pred-or-None, l_geom-context tensors,
+        trunk_layers list[n_l] [1,M,d], vlm_ctx list[n_l] [1,Q,d], ctx_mask). Mirrors forward()'s trunk
+        path but exposes the per-layer features for the action expert. JEPA is OFF (VLA spec)."""
+        ctx, ctxm, cond, text_feats = self.encode_cond(b["vlm0"])
+        grid0, ghw0 = (self.dino.grid(b["rgb0_np"]) if self.dino is not None
+                       else self.encoder.image_grid_features(b["vlm0"]))
+        tok_feat = self.feat_in(sample_grid_feat(grid0, ghw0, b["cen"], b["H"], b["W"])).float()
+        cam_tok = None
+        if getattr(self, "cam_cond", False):
+            cg, cam_tok = self.cam_cond_signals(b["tok_xyz0"].float(), b["center"], b["radius"],
+                                                b["K_intr"].float(), b["viewmat"].float())
+            cond = cond + cg
+        x, layers = self.predict(b["tok_xyz0"], tok_feat, b["sig_n"], b["center"], b["radius"],
+                                 ctx, ctxm, cond, cam_tok=cam_tok, return_layers=True)
+        # per-layer VLM ctx = ctx[:, j] for j=0..n_l-1 (the same aggregated context each DiTBlock sees)
+        vlm_ctx = [ctx[:, j] for j in range(ctx.shape[1])]
+        return x, tok_feat, layers, vlm_ctx, ctxm
+
+    # ---------------- BATCHED VLA (real batching: B clips/forward, padded to L tokens) ----------------
+    def _grid_from_hidden(self, hidden_last, vlm_inputs):
+        """Extract the last-layer image-token grid [gh,gw,H] from a forward's last hidden state. This is
+        EXACTLY what encoder.image_grid_features computes, but reusing encode_cond's forward (hidden_all[-1]
+        == hs[num_layers]) instead of running a SECOND full Qwen forward. Returns (grid, (gh,gw)) or (None,None)."""
+        if "image_grid_thw" not in vlm_inputs or "pixel_values" not in vlm_inputs:
+            return (None, None)
+        ids = vlm_inputs["input_ids"][0]
+        image_pos = (ids == self.encoder.image_token_id)
+        if not bool(image_pos.any()):
+            return (None, None)
+        img_tokens = hidden_last[image_pos].float()                      # [n_img, H] contiguous, row-major
+        t, h, w = [int(x) for x in vlm_inputs["image_grid_thw"][0].tolist()]
+        gh, gw = h // self.encoder.merge, w // self.encoder.merge
+        if t * gh * gw != img_tokens.shape[0]:
+            return (None, None)
+        return (img_tokens.reshape(t, gh, gw, -1)[0].contiguous(), (gh, gw))
+
+    def _encode_cond_one(self, vlm_inputs):
+        """ONE frozen Qwen forward -> BOTH (a) the per-block aggregated conditioning AND (b) the last-layer
+        image grid. Replaces encode_cond + a separate image_grid_features (which would be a 2nd forward).
+        Returns ctx_per_block [1,n_l,Q,d], ctx_mask [1,Q], cond_global [1,d], (grid[gh,gw,H], (gh,gw))."""
+        enc = self.encoder(vlm_inputs)
+        hidden_all, valid_mask, text_mask = enc if len(enc) == 3 else (enc[0], enc[1], enc[1])
+        n_l = hidden_all.shape[0]
+        ctx_full = torch.stack([self.layer_proj[j](hidden_all[j].float()) for j in range(n_l)], 0)
+        tw = text_mask.float()[:, None]
+        pooled = (hidden_all[-1].float() * tw).sum(0) / tw.sum().clamp_min(1e-6)
+        cond_global = self.cond_proj(pooled)[None]
+        agg = []
+        for j in range(n_l):
+            q = (self.query + self.layer_id_emb[j])[None]
+            a = self.aggregator(q, ctx_full[j][None], valid_mask[None])[0]
+            agg.append(self.agg_norm(a))
+        ctx_per_block = torch.stack(agg, 0)[None]                        # [1,n_l,Q,d]
+        ctx_mask = torch.ones(1, self.n_query, dtype=torch.bool, device=hidden_all.device)
+        grid = self._grid_from_hidden(hidden_all[-1], vlm_inputs)
+        return ctx_per_block, ctx_mask, cond_global, grid
+
+    def encode_cond_batch_seq(self, vlm_list):
+        """Reference: per-clip loop (B sequential forwards). Kept for the batched==per-clip verification."""
+        ctxs, conds, grids = [], [], []
+        for vlm in vlm_list:
+            ctx, ctxm, cond, grid = self._encode_cond_one(vlm)
+            ctxs.append(ctx); conds.append(cond); grids.append(grid)
+        ctx = torch.cat(ctxs, 0); cond = torch.cat(conds, 0)
+        ctx_mask = torch.ones(ctx.shape[0], self.n_query, dtype=torch.bool, device=ctx.device)
+        return ctx, ctx_mask, cond, grids
+
+    def _grid_from_row(self, hidden_last_row, ids_row, thw_row):
+        """Grid from ONE row of a batched forward's last hidden state (padding excluded via image_token_id)."""
+        image_pos = (ids_row == self.encoder.image_token_id)
+        if not bool(image_pos.any()):
+            return (None, None)
+        img_tokens = hidden_last_row[image_pos].float()
+        t, h, w = [int(x) for x in thw_row.tolist()]
+        gh, gw = h // self.encoder.merge, w // self.encoder.merge
+        if t * gh * gw != img_tokens.shape[0]:
+            return (None, None)
+        return (img_tokens.reshape(t, gh, gw, -1)[0].contiguous(), (gh, gw))
+
+    def encode_cond_batch(self, vlm_list):
+        """ONE BATCHED frozen forward -> per-block aggregated context + per-clip image grid (replaces the
+        B sequential forwards; ~8x fewer launches). Returns ctx [B,n_l,Q,d], ctx_mask [B,Q], cond [B,d],
+        grids list[B] of (grid[gh,gw,H], (gh,gw))."""
+        hidden_all, valid, text_mask, input_ids, thw = self.encoder.forward_batch(vlm_list)   # [n_l,B,Lmax,H]
+        n_l, B = hidden_all.shape[0], hidden_all.shape[1]
+        ctx_full = torch.stack([self.layer_proj[j](hidden_all[j].float()) for j in range(n_l)], 0)  # [n_l,B,Lmax,d]
+        tw = text_mask.float()[..., None]                                # [B,Lmax,1]
+        pooled = (hidden_all[-1].float() * tw).sum(1) / tw.sum(1).clamp_min(1e-6)    # [B,H]
+        cond_global = self.cond_proj(pooled)                             # [B,d]
+        agg = []
+        for j in range(n_l):
+            q = self.query[None].expand(B, -1, -1) + self.layer_id_emb[j][None, None]    # [B,Q,d]
+            a = self.aggregator(q, ctx_full[j], valid)                   # [B,Q,d]; padded keys masked
+            agg.append(self.agg_norm(a))
+        ctx = torch.stack(agg, 1)                                        # [B,n_l,Q,d]
+        ctx_mask = torch.ones(B, self.n_query, dtype=torch.bool, device=hidden_all.device)
+        grids = [self._grid_from_row(hidden_all[-1, i], input_ids[i], thw[i]) for i in range(B)]
+        return ctx, ctx_mask, cond_global, grids
+
+    def predict_batch(self, tok_xyz0, tok_feat_fdim, tok_sigma, center, radius,
+                      ctx_per_block, ctx_mask, cond_global, tok_mask, cam_tok=None):
+        """Batched trunk. Shapes carry a leading B and a padded token axis L:
+          tok_xyz0 [B,L,3], tok_feat_fdim [B,L,fdim], tok_sigma [B,L,2], center [B,1,3], radius [B,1],
+          ctx_per_block [B,n_l,Q,d], ctx_mask [B,Q], cond_global [B,d], tok_mask [B,L] (True=real token).
+        Returns out [B,L,d] (final-norm) and layers list[n_l] of [B,L,d] (residual stream entering block j)."""
+        norm_xyz = (tok_xyz0 - center) / radius[..., None]               # [B,L,3]
+        pe = self.pe(norm_xyz)                                            # [B,L,pe_out]
+        x = torch.cat([pe.float(), tok_feat_fdim.float(), tok_sigma.float()], dim=-1)
+        x = self.tok_embed(x)                                            # [B,L,d]
+        if cam_tok is not None:
+            x = x + cam_tok
+        layers = []
+        for j, blk in enumerate(self.blocks):
+            layers.append(x)                                             # residual stream ENTERING block j
+            x = blk(x, cond_global, ctx_per_block[:, j], ctx_mask, self_mask=tok_mask)
+        return self.final_norm(x), layers
+
+    def _trunk_features_batch(self, b):
+        """Batched mirror of _trunk_features. b carries padded/stacked tensors (see train_vla.build_batch_padded):
+          vlm_list (len B), tok_xyz0 [B,L,3], cen [B,L,2], sig_n [B,L,2], center [B,1,3], radius [B,1],
+          tok_mask [B,L], grid0 list[B] (gh,gw,H) + ghw list, H_list/W_list.
+        Returns x [B,L,d], tok_feat [B,L,fdim], layers list[n_l], vlm_ctx list[n_l] [B,Q,d], ctxm [B,Q]."""
+        ctx, ctxm, cond, grids = self.encode_cond_batch(b["vlm_list"])
+        B, L = b["tok_xyz0"].shape[0], b["tok_xyz0"].shape[1]
+        # per-token frozen visual feature: sample each clip's own grid. The grid now comes from
+        # encode_cond_batch's SAME forward (no separate image_grid_features 2nd forward).
+        feats = []
+        for i in range(B):
+            grid0, ghw0 = grids[i]
+            fi = self.feat_in(sample_grid_feat(grid0, ghw0, b["cen"][i], b["H_list"][i], b["W_list"][i]))  # [L,fdim]
+            feats.append(fi)
+        tok_feat = torch.stack(feats, 0).float()                         # [B,L,fdim]
+        cam_tok = None
+        if getattr(self, "cam_cond", False):
+            cts = []
+            for i in range(B):
+                cg, ct = self.cam_cond_signals(b["tok_xyz0"][i].float(), b["center"][i], b["radius"][i, 0],
+                                               b["K_intr"][i].float(), b["viewmat"][i].float())
+                cond[i:i + 1] = cond[i:i + 1] + cg
+                cts.append(ct)
+            cam_tok = torch.stack(cts, 0)
+        x, layers = self.predict_batch(b["tok_xyz0"], tok_feat, b["sig_n"], b["center"], b["radius"],
+                                       ctx, ctxm, cond, b["tok_mask"], cam_tok=cam_tok)
+        vlm_ctx = [ctx[:, j] for j in range(ctx.shape[1])]
+        return x, tok_feat, layers, vlm_ctx, ctxm
+
+    def _flow_geom_loss_batch(self, b, xyz1_pred, tok_mask):
+        """Batched 3D-flow (img_loss) loss: per-clip projection (K/viewmat differ) but masked-meaned over
+        the batch. Returns (l_geom, fp, fg, mv) where fp/fg are padded [B,L,2] image-flow for dcos logs."""
+        B, L = tok_mask.shape
+        fp = xyz1_pred.new_zeros(B, L, 2); fg = xyz1_pred.new_zeros(B, L, 2)
+        l_img_sum = xyz1_pred.new_zeros(()); l_dep_sum = xyz1_pred.new_zeros(()); nval = 0.0
+        for i in range(B):
+            m = tok_mask[i]                                              # [L]
+            K_ = b["K_intr"][i].float(); vm_ = b["viewmat"][i].float()
+            Wn = xyz1_pred.new_tensor([float(b["W_list"][i]), float(b["H_list"][i])])
+            x0i = b["tok_xyz0"][i].float(); xpi = xyz1_pred[i].float(); xgi = b["xyz1_gt"][i].float()
+            uv0 = project_to_uv(x0i, K_, vm_); z0 = to_cam(x0i, vm_)[:, 2].clamp_min(1e-3)
+            uv1p = project_to_uv(xpi, K_, vm_); uv1g = project_to_uv(xgi, K_, vm_)
+            fpi = (uv1p - uv0) / Wn; fgi = (uv1g - uv0) / Wn
+            fp[i] = fpi; fg[i] = fgi
+            per = F.smooth_l1_loss(fpi, fgi, beta=0.02, reduction="none").mean(-1)        # [L]
+            ldp = torch.log(to_cam(xpi, vm_)[:, 2].clamp_min(1e-3) / z0)
+            ldg = torch.log(to_cam(xgi, vm_)[:, 2].clamp_min(1e-3) / z0)
+            perz = F.smooth_l1_loss(ldp, ldg, beta=0.05, reduction="none")               # [L]
+            mf = m.float(); denom = mf.sum().clamp_min(1.0)
+            l_img_sum = l_img_sum + (per * mf).sum() / denom
+            l_dep_sum = l_dep_sum + (perz * mf).sum() / denom
+            nval += 1.0
+        l_geom = (l_img_sum + getattr(self, "w_depth", 0.5) * l_dep_sum) / max(nval, 1.0)
+        mv = (b["disp_tok"] > 0.01) & tok_mask
+        return l_geom, fp, fg, mv
+
+    def forward_vla_batch(self, b: dict):
+        """REAL-BATCHED JOINT VLA step. b carries B clips padded to L tokens (build_batch_padded).
+        Identical objective to forward_vla, computed over the whole batch in one trunk + one expert pass."""
+        x, tok_feat, layers, vlm_ctx, ctxm = self._trunk_features_batch(b)
+        tok_mask = b["tok_mask"]
+        # ----- 3D-flow head (geom_mode=xyz; img_loss path) -----
+        g = self.geom_head(x).float()                                    # [B,L,3]
+        xyz1_pred = b["tok_xyz0"].float() + g if self.geom_mode == "xyz" else None
+        if xyz1_pred is None:                                            # flowd: per-clip geom_to_xyz
+            xyz1_pred = torch.stack([self.geom_to_xyz(g[i], b["tok_xyz0"][i].float(),
+                                     b["K_intr"][i].float(), b["viewmat"][i].float()) for i in range(g.shape[0])], 0)
+        if getattr(self, "img_loss", False):
+            l_geom, fp, fg, mv = self._flow_geom_loss_batch(b, xyz1_pred, tok_mask)
+        else:
+            # masked smooth-L1 on raw 3D position
+            per = F.smooth_l1_loss(xyz1_pred.float(), b["xyz1_gt"].float(), beta=0.01, reduction="none").mean(-1)
+            mf = tok_mask.float(); l_geom = (per * mf).sum() / mf.sum().clamp_min(1.0)
+            fp = fg = None; mv = (b["disp_tok"] > 0.01) & tok_mask
+        # ----- action expert (flow-matching) with PROPRIOCEPTION state cross-attn -----
+        x1 = self.act_norm.normalize(b["dq"].float())                    # [B,A,14] normalized target
+        state_kv = self.action_expert.embed_state(b["anchor"].float())   # [B,Ns,d]
+        l_flow, flogs = self.action_expert.flow_loss(x1, layers, vlm_ctx, state_kv,
+                                                     trunk_mask=tok_mask, vlm_mask=ctxm)
+        loss = self.w_flow_vla * l_geom + self.w_act_vla * l_flow
+        if getattr(self, "_ddp_touch", False):   # zero-weight touch so EVERY trainable param participates ->
+            loss = loss + 0.0 * sum(p.float().sum()  # DDP find_unused_parameters=False stays correct (unused
+                                    for p in self.parameters() if p.requires_grad)  # heads: content/jepa/rel/cam)
+        with torch.no_grad():
+            err_pred = ((xyz1_pred - b["xyz1_gt"]).norm(dim=-1) * tok_mask.float()).sum() / tok_mask.float().sum().clamp_min(1.0)
+            if getattr(self, "img_loss", False) and mv.any():
+                dcos = F.cosine_similarity(fp[mv], fg[mv], dim=-1).mean()
+            elif mv.any():
+                dpred = (xyz1_pred - b["tok_xyz0"]); dgt = (b["xyz1_gt"] - b["tok_xyz0"])
+                dcos = F.cosine_similarity(dpred[mv], dgt[mv], dim=-1).mean()
+            else:
+                dcos = torch.zeros((), device=x.device)
+        logs = {"loss": loss.detach(), "geom": l_geom.detach(), "flow": l_flow.detach(),
+                "v_norm": flogs["v_norm"], "errp": err_pred.detach(), "dcos": dcos.detach()}
+        return loss, logs
+
+    @torch.no_grad()
+    def predict_action_batch(self, b: dict, n_steps=10):
+        """Batched inference: trunk + expert ODE -> raw Δqpos [B,A,14] (denormalized)."""
+        x, tok_feat, layers, vlm_ctx, ctxm = self._trunk_features_batch(b)
+        state_kv = self.action_expert.embed_state(b["anchor"].float())
+        z = self.action_expert.sample(layers, vlm_ctx, state_kv, trunk_mask=b["tok_mask"], vlm_mask=ctxm,
+                                      n_steps=n_steps, device=x.device, dtype=torch.float32)
+        return self.act_norm.denormalize(z)                             # [B,A,14] raw
+
+    def forward_vla(self, b: dict):
+        """JOINT VLA training step: shared trunk -> (3D-flow head, img_loss) + (action expert, flow-matching).
+        Both losses backprop the trunk. NO JEPA. b carries the world-model clip tensors PLUS:
+            dq [A,14] raw Δqpos action chunk (the action target).
+        gt_rgb[0]-only is the caller's responsibility (it builds vlm0 from frame0 only)."""
+        x, tok_feat, layers, vlm_ctx, ctxm = self._trunk_features(b)
+        # ----- 3D-flow head (unchanged math; img_loss path) -----
+        if self.traj_pred:
+            g = self.geom_head(x[0]).float()
+            traj_pred_xyz = self.geom_to_traj(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
+            xyz1_pred = traj_pred_xyz[-1]
+        else:
+            xyz1_pred, _ = self.heads(x, b["tok_xyz0"], b["K_intr"], b["viewmat"])
+            traj_pred_xyz = None
+        mw = None
+        if getattr(self, "img_loss", False):
+            K_ = b["K_intr"].float(); vm_ = b["viewmat"].float()
+            Wn = xyz1_pred.new_tensor([float(b["W"]), float(b["H"])])
+            uv0 = project_to_uv(b["tok_xyz0"].float(), K_, vm_)
+            z0 = to_cam(b["tok_xyz0"].float(), vm_)[:, 2].clamp_min(1e-3)
+            if self.traj_pred:
+                tg = b["traj_gt"].float()
+                img_acc = depth_acc = 0.0
+                for t in range(self.Kf):
+                    uvtp = project_to_uv(traj_pred_xyz[t], K_, vm_)
+                    uvtg = project_to_uv(tg[t], K_, vm_)
+                    fpt = (uvtp - uv0) / Wn; fgt = (uvtg - uv0) / Wn
+                    img_acc = img_acc + F.smooth_l1_loss(fpt, fgt, beta=0.02, reduction="none").mean(-1).mean()
+                    ldpt = torch.log(to_cam(traj_pred_xyz[t], vm_)[:, 2].clamp_min(1e-3) / z0)
+                    ldgt = torch.log(to_cam(tg[t], vm_)[:, 2].clamp_min(1e-3) / z0)
+                    depth_acc = depth_acc + F.smooth_l1_loss(ldpt, ldgt, beta=0.05, reduction="none").mean()
+                    if t == self.Kf - 1:
+                        self._fp, self._fg = fpt, fgt
+                l_geom = img_acc / self.Kf + getattr(self, "w_depth", 0.5) * (depth_acc / self.Kf)
+            else:
+                uv1p = project_to_uv(xyz1_pred.float(), K_, vm_)
+                uv1g = project_to_uv(b["xyz1_gt"].float(), K_, vm_)
+                self._fp = (uv1p - uv0) / Wn; self._fg = (uv1g - uv0) / Wn
+                img_l = F.smooth_l1_loss(self._fp, self._fg, beta=0.02, reduction="none").mean(-1).mean()
+                ldp = torch.log(to_cam(xyz1_pred.float(), vm_)[:, 2].clamp_min(1e-3) / z0)
+                ldg = torch.log(to_cam(b["xyz1_gt"].float(), vm_)[:, 2].clamp_min(1e-3) / z0)
+                depth_l = F.smooth_l1_loss(ldp, ldg, beta=0.05, reduction="none").mean()
+                l_geom = img_l + getattr(self, "w_depth", 0.5) * depth_l
+        else:
+            l_geom = geom_loss(xyz1_pred.float(), b["xyz1_gt"].float())
+        # ----- action expert (flow-matching) with PROPRIOCEPTION state cross-attn -----
+        x1 = self.act_norm.normalize(b["dq"].float())[None]                  # [1,A,14] normalized target
+        state_kv = self.action_expert.embed_state(b["anchor"].float()[None])  # [1,Ns,d]
+        l_flow, flogs = self.action_expert.flow_loss(x1, layers, vlm_ctx, state_kv, trunk_mask=None, vlm_mask=ctxm)
+        # ----- joint loss (both backprop the trunk) -----
+        loss = self.w_flow_vla * l_geom + self.w_act_vla * l_flow
+        with torch.no_grad():
+            err_pred = (xyz1_pred - b["xyz1_gt"]).norm(dim=-1).mean()
+            mv = b["disp_tok"] > 0.01
+            if getattr(self, "img_loss", False) and mv.any():
+                dcos = F.cosine_similarity(self._fp[mv], self._fg[mv], dim=-1).mean()
+            else:
+                dcos = (F.cosine_similarity((xyz1_pred - b["tok_xyz0"])[mv], (b["xyz1_gt"] - b["tok_xyz0"])[mv],
+                        dim=-1).mean() if mv.any() else torch.zeros((), device=x.device))
+        logs = {"loss": loss.detach(), "geom": l_geom.detach(), "flow": l_flow.detach(),
+                "v_norm": flogs["v_norm"], "errp": err_pred.detach(), "dcos": dcos.detach()}
+        return loss, logs
+
+    @torch.no_grad()
+    def predict_action(self, b: dict, n_steps=10):
+        """Inference: run trunk + expert ODE -> raw Δqpos[A,14] (denormalized)."""
+        x, tok_feat, layers, vlm_ctx, ctxm = self._trunk_features(b)
+        state_kv = self.action_expert.embed_state(b["anchor"].float()[None])  # [1,Ns,d]
+        z = self.action_expert.sample(layers, vlm_ctx, state_kv, trunk_mask=None, vlm_mask=ctxm,
+                                      n_steps=n_steps, device=x.device, dtype=torch.float32)
+        return self.act_norm.denormalize(z[0])                              # [A,14] raw
+
+    def num_trainable(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)

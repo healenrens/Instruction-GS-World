@@ -1307,3 +1307,433 @@ v13b（v12 基座 + book96 WIN=96 数据，2500 步 0 跳过）三评：
 **用户新指示(待设计)**:**关键点(控制点)的选择本身也需要专门设计的方式去学习**——当前是 `torch.randperm` 纯随机抽 2048 个,既不按物体结构、也不按运动学关节/旋转轴。合理方向:可学习/结构感知的控制点选择(关节点、旋转轴邻域、运动显著点),让稀疏控制集天然承载铰接旋转,而非靠 26 万随机点里的运气。记为旋转问题的**第三维**(前两维:架构耦合、数据质量)。
 
 **结论:旋转 = 架构 + 数据 + 关键点选择 三重卡点。** 先换干净 sim 旋转数据排除"数据"维,才能干净判断架构/关键点维。
+
+# ============================================================
+# 新方向: GPSToken 信息自适应 2D 高斯 token (分支 gpstoken-2dgs)
+# ============================================================
+
+## §93 GPSToken 方向: 把"关键点选择"具体化 (2026-06-12 起)
+
+**缘起**:§92 把旋转拆成三维(架构耦合 / 数据质量[已归档:噪声真实数据难 scale] / **关键点选择**)。用户引入 GPSToken(arXiv 2509.01109,github.com/xtudbxk/GPSToken)作为"关键点选择需专门设计"的具体载体。存档点 `s92-panorama-archive`;新分支 `gpstoken-2dgs` 从 db83073 切出。
+
+**GPSToken 是什么**:按**纹理/信息丰富度(梯度熵)**非均匀切分图像 → 每 token = 2D 高斯 `g=(μx,μy,ρ,σx,σy)` + 纹理特征 `f`。三段:① 熵驱动初始化(Algorithm 1,**训练-free**)→ ② transformer 精修(RoIAlign 区域特征作条件)出 Δg+f → ③ splatting 渲染 `R(x,y,k)=Σ gᵢ(x,y)·fᵢ[k]` + 解码器重建。128 token → PSNR 24/rec-FID 0.65,256→PSNR 28.8。跨域泛化强(COCO/FFHQ/医学/遥感都好)→ 机器人帧大概率可迁移。形状-纹理解耦 → 两阶段生成。
+
+**Algorithm 1(已从附录 p.13 提取,faithful)**:Sobel 梯度幅度 → 512-bin 直方图熵 H → 复杂度 `m=h·w·H^λ`(λ=2.5)→ 递归二分**最复杂**区域(矩形分长边;正方形比较"宽分/高分"取 min 复杂度更小的)直到 l 个区域 → `g_init={σx=w/6,σy=h/6,ρ=0,μ=区域中心}`。s=5(支撑),s_min=4。
+
+**映射到我们的世界模型**:
+- 现状:dense 3DGS(26万)→ **随机 2048 控制点** = 关键点选择全凭运气(§9.3)。
+- GPSToken:把 ~128-256 token 放到**信息丰富区**(物体边缘/机械臂/纹理)= "专门设计的关键点选择"。优点:① token 少(易学、易配准);② 每 token 带**纹理特征**(非裸 3D 点);③ 可微可渲染(重建监督)。
+- 用户构想:单视角提 2D 高斯 → **升 3D** 作运动 token,避免 26万 dense 的密集分布。
+
+**待解核心(用户点出)**:多帧间 token 如何**配准**。初判方案:帧0 熵划分定 token 位置 → 升 3D → dynamics 预测每 token 3D 运动 → **配准 = 运动预测本身**(token 持续,不逐帧重划分);GT 仍取自现有 traj(在 128 个聪明位置采样,而非 2048 随机)。配准的难点退化为"token 特征跨帧一致性",由运动模型承担。
+
+**进展(滚动)**:
+- T0:读通 paper(正文+附录),提取 Algorithm 1;建分支+本章;实现训练-free 熵划分 `gpstoken_init.py`。
+- **T1 决定性首测(纯纹理熵,L=256)**:token-on-mover 集中度 vs 随机 = sim 字母汤 **1.48×** / 真实货架 pear **1.08×(≈随机)** / 灶台 **2.33×**。视觉核验三帧:**有纹理对比的场景**(物体在素净桌/台面上,sim/灶台)token 漂亮地聚到物体/机械臂;**均匀杂乱场景**(真实超市货架,满屏纹理)token 均匀铺开 → 退化到随机。**结论:纯纹理熵是好的关键点选择器,但仅当 mover 与背景有纹理对比;真实视频满屏纹理时失效。"纹理丰富 ≠ 在动"。**
+- **T2 运动加权修复(complexity ×(1+β·saliency),β=30,saliency=软 mover 图)**:三场景全部 → **~8× 集中度**,关键是**救活了杂乱货架(1.08→8.14×,47% token 落 mover)**。视觉确认 pear token 聚到手臂/梨区域。**结论:GPSToken 的空间自适应切分机制做关键点选择很强,但世界模型必须用运动/任务显著性驱动,而非纯纹理。训练期 saliency 可用 GT 运动;推理期必须来自现有 language-relevance 头(被点名物体)或学习的运动显著性,非 GT** —— 这把 GPSToken 和我们已有的 relevance 头天然接上了。
+- **设计工作流 `wkvmiok08` 综合(6 agent)**:
+  - **仓库侦察**:GPSToken 已克隆 `third_party/GPSToken`(Apache-2.0)。熵划分 `datasets/adaptivegps.py::adaptive_initialize` = 我们 `gpstoken_init.py` 的参考(**交叉验证一致**)。精修网 `models/gpstoken.py::encode`(30 块 RoIAlign+自注意)、CUDA splat 渲染器 `gscuda/`(仅 GPU,import 即 JIT 编译)、解码器 `vqvae.py::DecoderNP`。预训练权重 HF `xtudbxk/GPSToken` s64/m128/l256(各 ~491MB)。**首阶段什么都不用拉**——我们的纯 numpy 熵划分够用。
+  - **★ 配准问题被构造性消解(关键结论)**:不要逐帧重新检测 token。**帧0 划分一次 → 每 token 绑定到最近的稠密高斯 index(`ctrl_idx[m]=argmin_g‖center_m−uv[g]‖`)→ SC-GS rollout 已携带该 index 跨帧前进**。稠密高斯 + traj 本就是项目的跨帧原语,`traj[:,ctrl_idx]` 就是同一物理点的轨迹。用户担心的"2D token 跨帧配准"只在逐帧重检测时存在 → 我们不那么做 → **问题消失,零成本零新参数**。
+  - **★ 训练/推理 saliency gap 的桥已存在**:训练用 GT mover 图;**推理用冻结 Qwen 的 relevance grid(指令→图像 patch 注意力,无 GT,train/test 同一冻结网络)**——正是我们 §54 relevance 头学的信号。3 段课程:oracle GT → rel_grid → 早期混合退火。
+  - **推荐路径 = Design 3(最小改动)**:把随机 `sample_controls` 换成熵划分(+saliency)→ 最近稠密 ctrl_idx,**逐控制点平移场 100% 不动**(DiT/LBS/损失字节不变),只改"选哪些点"+"多少个"(2048→256)。**结构上不可能重蹈 6 次失败**(无池化=不杀方向、无低秩替换、无在环投影=不爆炸)。kill 判据 = langswap 方向(<0 即死,同 v8-ent −0.18 / bases-pure −0.14 签名)。**别声称旋转赢**:§92 旋转 GT 目标本身是噪声,先验证 libero_goal_lerobot 干净 GT 再谈。
+- **v15 四评(收官,旧线)**:held90 词汇 EPE 8.7cm/Acc3DR 0.48、heldreal 10.6cm、heldseed 10.2cm、langswap sel 1.00 **零回退**;heldgoal 5°5cm=0(GT-rot 24.6°=噪声目标,如 §92 预言,**不可判读**)。v16 orchestrator 已死(不自动起),4 卡空闲。
+- **代码集成完成**:`igsw/gaussians/gpstoken.py`(单一真源:grad_mag/complexity/gpstoken_init/mover_saliency/gpstoken_ctrl_idx)+ train_sim `--use_gpstoken/--gps_motion_beta` + line325 分支(下游 ctrl_idx 全复用)。CPU 烟测过:effM=256 无碰撞,beta=30 集中度 sim 8.52× / real 9.02×。
+- **M0 A/B 启动中**(`orchestrate_gps_m0.sh`,4 卡,600 步×2):ARM-B GPSToken(M=256,beta=30,GT saliency)vs ARM-A 随机(M=256 匹配预算),warm-start v12mix,唯一变量=控制点选择。判据:train_corr/dcos/ratio + dir-cos 不回退。
+- **M0 结果(完成)**:ARM-B 0 skip / ARM-A **315/600 skip(non-finite grad)**——低 M 下随机散点的 rotation_loss 邻域 Kabsch 退化爆炸,GPSToken 结构化选点全稳。dcos:ARM-B 0.55(守卫安全,1/15<0)> ARM-A 0.34;ratio 反过来 ARM-A 0.75>0.65。**但对比被 315-skip 污染(ARM-A 欠训),且两臂 dcos(0.55/0.34)都 < 生产 M2048 的 0.8**。**用户判定:这仍是稠密表征上的半吊子改动,弃。** → 触发下面的彻底转向。
+
+## §94 彻底转向:v-JEPA 式「稀疏高斯 + 潜空间」世界模型(用户拍板的新方向)
+
+**用户的核心纠正(2 步)**:① M0 的"换控制点下标"还是**稠密表征**,预测一定不好;要的是**用稀疏 2D 高斯当表征本身,替换 26 万稠密,升 3D 再预测**。② 这些特征都在 **latent-space,整个类似 v-JEPA**;甚至**不需要解码器/不需要 tokenizer**。我查了 v-JEPA 资料后,架构如下:
+
+**冻结的部分(免训)**:
+1. **编码器 = 冻结 2D ViT(建议 DINOv2,高分稠密特征;Qwen 留作语言条件)**:一帧 → 稠密**均匀**特征图 `F[gh,gw,C]`。ViT 永远均匀切 patch,**我们一字不改**。
+2. **放置(training-free)**:熵+saliency 划分 → ~256 稀疏位置(聚焦该动的东西,忽略背景)。**这是 GPSToken 唯一要的东西,不是它的 tokenizer。**
+3. **深度模型(冻结)**:单目深度(Depth-Anything-V2 / UniDepth / Metric3D)或已有 Pi3/sim 深度 → 每点深度,**给压缩球加第 3 维**。
+
+**唯一可训练 = predictor**:指令条件,输入 frame0 的稀疏 3D token,预测每 token 的 **3D 运动 + 未来潜特征**,rollout。
+
+**三个被追问清楚的关键概念**:
+- **"非均匀不在编码器里"**:编码器永远吐均匀稠密 F;非均匀只活在**读出**——每个 token 用**高斯加权池化 / RoIAlign** 在 F 上按自己的足迹(中心 μ、范围 σ)聚合成一个特征 `feat_i=Σ G_i·F/Σ G_i`。大背景 token 池一大片、小物体 token 池一小块——**非均匀性从权重 G_i 进来**。这是"均匀编码器↔非均匀 token"的桥(GPSToken 也用 RoIAlign 取区域特征)。
+- **Lagrangian 原理**:把每个高斯当**被标记的物理粒子**。v-JEPA 是 **Eulerian**(钉死均匀网格,预测固定格子里下一帧是什么,对应=同格子号,网格白送);我们是 **Lagrangian**(跟着粒子跑,**轨迹=跨帧身份**)。非均匀 → 没网格白送的对应 → 必须显式跟踪;而**我们的交付物本就是"每高斯往哪动"= 粒子运动**,本来就该 Lagrangian。
+- **怎么训(免解码器,治塌缩)**:v-JEPA 那套——`target = EMA(encoder)(真实未来帧)` 在 token 的**被轨迹追踪到的未来足迹**处池化,**stop-grad**;`loss = L1(pred潜特征, sg(target))`。**EMA+stop-grad 防表征塌缩**(可加 VICReg 方差/协方差兜底)。轨迹来自伪GT(StV2/sim),它**同时**当①位置监督②"去哪采 target"的对应。
+
+**关键岔路已定**:Eulerian(v-JEPA-2,无需追踪但拿不到显式逐高斯运动)vs **Lagrangian(选它:显式运动=交付物,对应由我们的伪GT轨迹提供)**。
+**潜在优势(治 §92)**:JEPA 潜空间 L1 对轨迹噪声更宽容(位置差几像素 → 潜特征只差一点),很可能比现在的 3D 位置 L1 更抗真实视频伪GT噪声。
+**参考**:v-JEPA 2 (arXiv 2506.09985, 动作条件潜空间世界模型,62h 机器人数据零样本规划)、v-JEPA (2404.08471, EMA+stop-grad)、Volumetric-JEPA。
+**下一步**:读团队的 GPSToken-based 3D-WM 仓库 `SII-LeiL/instruction-3d-wm`(用户说这是基于 GPSToken 的新想法)再定怎么建。
+
+## §95 参考项目对照 + v1 计划沉淀(锁档)→ **`PLAN_GPSTOKEN_JEPA_zh.md`**
+
+**读了 `SII-LeiL/instruction-3d-wm`(克隆到 `~/instruction-3d-wm`)**:一个已 work 的「3D Gaussian-token JEPA 世界模型」(RoboTwin sim)。三轴本质 = 稀疏 3D 高斯 token(显式几何+特征)+ 冻结感知 + 小 predictor;潜空间 JEPA(外观)+ 显式 3D 几何(运动,载重)+ SIGReg(防塌缩,无 EMA);动作驱动、指令选相关。**它独立设计出了我们讨论的几乎一切**(relevance 加权熵划分 = 我们 §93、持久 token/anchor 传播 = Lagrangian、冻结特征+蒸馏)。
+**两条最值钱的实证(直接定我们的目标设计)**:① **纯潜空间 JEPA 没用(+0.002),显式 3D 几何监督才载重(+0.09m)**;② **EMA 会时间塌缩 → 改用 SIGReg**(纠正我先前 EMA 建议)。它当前缺口 = 旋转/SE(3)(G1 未做,只平移)、对应靠 sim instance-id(野外作弊)、sim-only——**正好是我们的互补牌**(旋转避坑知识、真实视频管线、§93 partition、反事实 grounding)。
+
+**与用户讨论后锁定的 v1(详见 `PLAN_GPSTOKEN_JEPA_zh.md`)**:
+1. **Scope**:双模式为目标,先做世界模型(意图模式:指令→运动),具体 action 留 VLA;WM 里的"驱动"= 抽象意图特征。
+2. **架构**:**保留我们 Qwen 冻结 + 1.66B DiT 容量**(弃参考的 9.4M 小头),只把表征换成**稀疏 2D 高斯 token + 深度→3D + 冻结 SigLIP/DINO 特征**。
+3. **数据**:我们的方式,sim 干净 + real 噪声**双线同训**。
+4. **学习**:**几何为载重(逐 token 平移)+ JEPA 为辅(塑造 dynamics-aware 特征,为 VLA,不扛运动)+ SIGReg + grounding(relevance+反事实)**。
+5. **★ 旋转通过平移学,不专门学**:逐 token 平移场数学上能表达刚体旋转 `Δx=(R−I)(x−c)`;旋转**涌现 + Kabsch readout 当评估**,不加 SE(3) 头 → 免疫 6 次失败;夹爪精细旋转难的问题被绕开(从不显式预测夹爪旋转)。这条是用户独立提出、与我们 §89 定律一致。
+6. **JEPA 的职责 = 特征不是运动**:为下游 VLA 备 dynamics-aware 特征(底座=冻结 SigLIP,JEPA 轻量塑造)。
+
+**要"分别试"的实验(用户指示)**:**E1 几何预测空间——2D光流+深度变化 vs 直接3D位移,分别实现对照**(定几何头形态,v1 地基,先做);E2 token 数扫(256/512/1024);E3 JEPA 值不值/α;E4 干净 sim 上涌现旋转 5°5cm(§92 干净检验)。
+**Staging**:S0 表征落地 → S1 几何头(E1 纯几何先通)→ S2 +JEPA+grounding+双线 → S3 旋转 readout 验收 → S4 接 VLA。
+
+## §95 续: v1 实现完成 + E1 训练/测试 + 幅度修复/E2(2026-06-14)
+**实现**:新包 `igsw/gpstoken_wm/`(sigreg / tokens 提取+升3D+冻结Qwen特征 / wm_model 1.66B DiT 容量预测器 + E1 双几何头 + forward(batch) / losses)+ DDP 训练器 `train_gpstoken_wm.py` + 评估器 `eval_gpstoken_wm.py`。单步:帧0 熵+saliency 放 token → 最近稠密升 3D → 冻结 Qwen patch 特征 → DiT 预测逐 token 未来 xyz(几何,载重)+ 未来特征(JEPA 辅)。损失 = geom + w_mag·mover_mag + w_jepa·JEPA + w_sigreg·SIGReg + w_ground·(InfoNCE)。旋转不训,Kabsch readout 评估。
+**E1 裁决(heldseed sim-clean,各 2500 步)**:
+| | EPE3D | dcos | mag-ratio | 5°5cm | rot-err/GT-rot |
+|---|---|---|---|---|---|
+| **xyz(直接3D)** | **7.2cm** | **+0.74** | 0.32 | **13%** | 11.5°/10.4° |
+| flowd(2D流+深度) | 10.9cm | +0.10 | 0.20 | 8% | 12.4°/10.4° |
+→ **直接 3D 位移胜**(2D流+深度的相机反投影病态、杀方向)。**几何头定 xyz。**
+**两个关键结论**:① **稀疏表征 work**:EPE 7.2cm/dcos 0.74,持平甚至优于旧稠密(~10cm),但 token 少 500×、0 跳无塌缩——转向正确。② **5°5cm 0→13%**(项目数月首次非零),**但诚实**:rot-err 11.5°≈GT-rot 10.4°,旋转没真学会,那 13% 是低旋转实体靠好平移过阈值;真旋转检验(E4)需干净大旋转数据(heldseed 仅 10° 旋转)。
+**短板**:mag-ratio 0.32 欠预测(老幅度塌缩);旋转仍近似。
+**续(满 4 卡 DDP)**:加 `mover_magnitude` 损失(--w_mag 0.5);**E2 token 数扫 + 幅度修复**:xyz L512(GPU0,1)vs L1024(GPU2,3),1250 步 DDP。`orchestrate_gpswm_e2.sh`。DDP 基建已 smoke 通过(world=2,forward(batch) 同步,1.4× 吞吐)。
+**踩坑记**:`pkill -f "[o]rchestrate..."` 的 bracket pattern 会匹配 ssh 自身命令串 → 自杀(那次 DDP 重启没生效、旧 2 卡 run 继续)。主线程应**直接 ssh 查实况**不只信 watcher(用户指示)。
+
+**E2 结果(heldseed,xyz,1250 DDP 步 +w_mag0.5)**:L512mag EPE15.6/dcos**−0.39**/magR0.70;L1024mag EPE8.7/dcos+0.38/magR0.46。**两个发现**:① **token 数:L1024 > L512**(EPE 8.7<15.6,dcos +0.38>−0.39)——多 token 有用,验证"256 太稀"。② **w_mag 0.5 反噬**:magR 改善(0.32→0.46-0.70)但**杀方向**(dcos 0.74→负/低)——同 step 下 E1(无mag)skill 已正、E2(有mag)还负,**不是欠训,是 mag 损失太重**(相对幅度项不约束方向→往错方向放大,呼应 §89)。**DDP step 注意**:1250 DDP步(2×batch)= 1250 优化步 ≠ E1 的 2500 单卡步,比较 E1 时有 step 混淆;E2 内部(L512 vs L1024 同 1250 步)干净。
+**续 = 干净幅度测试**(`orchestrate_gpswm_mag.sh`):xyz L1024 2000 DDP 步,**w_mag=0 vs 0.1**(GPU0,1 vs 2,3),隔离"轻幅度推动能否修 magR 而不伤方向"。
+
+## §95 续2: 幅度问题定谳 + DDP 教训 + v1 配置锁定
+**坑1 — DDP 训得更差**:所有 DDP run 的 heldseed dcos 都 ≤0.42(单卡 E1 是 0.74);怀疑 lr 没按 batch 缩放。**→ 干净实验一律单卡。**
+**坑2 — mover_magnitude 数值不稳**:相对项 `/gt_disp` 在微位移 mover 上爆炸 → 非有限梯度(magsweep sw005 发散 433 次、loss 4.9)。**已稳定化**(只算 >3cm mover、除数 floor 3cm、ratio cap 4)→ 非有限 0。
+**坑3 — EPE 在低运动 heldseed 上误导**:GT-rot 仅 10°,欠预测反而 EPE 低。**诚实轴 = dcos(方向)+ mag-ratio(幅度)。**
+**干净 2×2 定谳(单卡,稳定 loss,non-finite 0)**:
+| | EPE | dcos | magR | 5°5cm |
+|---|---|---|---|---|
+| L512 no-mag | 8.6 | +0.51 | 0.18 | 13% |
+| L512 mag0.1 | 15.1 | −0.09 | 0.71 | 0% |
+| **L1024 no-mag** | **5.8** | **+0.45** | 0.24 | 10% |
+| L1024 mag0.1 | 10.6 | −0.11 | 0.32 | 0% |
+**① mover_magnitude 损失 = 死路**(no-mag 方向正,mag 方向全负,任何 token 数、即便轻+稳定)——相对幅度项不约束方向 → 往错方向放大,正是 §89 失败模式。**弃用。** ② **token 数 L1024 ≥ L512**(EPE 5.8<8.6,方向/旋转相当)。③ **幅度欠预测(magR ~0.2)仍是真短板,但不可经此损失修**——留作后续(可能靠数据/训练量,m0 的 1.04 是 DDP 假象)。④ **n=8 heldseed 评估噪声大**(c512 重跑 E1 配置得 dcos 0.51 vs E1 的 0.74)——需更大评估集。
+**v1 配置锁定 = xyz + L1024 + 无 mag 损失 + 单卡**(EPE 5.8cm/dcos ~0.5/magR 0.24/5°5cm 10%)。`checkpoints/gpswm_c1024/wm_002500.pt`。
+**下一步(真正的奖品)= E4 干净旋转检验**:heldseed 仅 10° 旋转测不出旋转真本事;需从 `data/libero_goal_lerobot`(解析-GT 抽屉/旋钮强旋转)建 clip(§65 IPEC mp4+jsonl loader 仍欠)。这是判定"涌现旋转 13% 是真学会还是低旋转撞运气"的唯一干净台子。
+
+## §95 续3: ★ v1 跨 split 验收 → 旋转-靠-平移 不成立(核心负结论)
+v1(c1024)跨 4 split:
+| split (GT-rot) | EPE | dcos | magR | 5°5cm | rot-err vs GT-rot |
+|---|---|---|---|---|---|
+| heldseed(10°) | 5.8 | +0.45 | 0.24 | 10% | 11.9≈10.9 |
+| **heldgoal(24°真)** | 10.5 | +0.25 | 0.29 | **0%** | **25.4≈24.6** |
+| held90(5°) | 7.4 | +0.76 | 0.28 | 10% | 7.0≈5.3 |
+| heldreal(16°真) | 3.3 | +0.10 | 0.14 | 14% | 9.6≈15.8 |
+**★ 核心结论:旋转-靠-平移 不成立。** 每个 split 都 **rot-err ≈ GT-rot** → 模型基本**不预测旋转**(预测恒等会得同样分)。之前 5°5cm 10-13% 是**低旋转撞运气**(GT-rot 仅 5-10° 时,不转也能过 5° 阈值);**一旦旋转真强(heldgoal 24°)→ 5°5cm=0%、rot-err 25°**。即不必建 E4 干净数据,**heldgoal 已强烈指示:逐 token 平移场学不出真旋转,即便稀疏放置良好**。(clean libero_goal 仍能更干净确认,但信号已明。)
+**其余诚实读数**:方向 sim 好(held90 0.76、heldseed 0.45)、真实视频弱(heldreal 0.10);幅度处处欠预测(0.14-0.29);grounding 50-100%(n 小噪)。
+**v1 整体定性**:**稀疏 token JEPA 转向给了更小更干净的表征、sim 上平移预测不错**(EPE 5.8、方向正),**但没解决旋转**(项目核心前沿仍开放),且幅度欠预测、真实视频方向弱。**这是个诚实的、部分负面的里程碑——新架构优雅但没破旋转。**
+**战略岔路(待用户定)**:① 干净确认旋转负结论(E4,大概率只确认);② 重想旋转机制(逐 token 平移既然学不出旋转,可能需新机制——但 6 个专用旋转头也都失败过);③ 转攻其他短板(幅度、真实视频),更可解;④ 接受 v1 作平移世界模型,推进 VLA(双模式)。
+
+## §95 续4: 幅度问题二次定谳(方向保持式也败)+ 评估噪声警示
+试了**第二种幅度修法**——motion-weighted geom loss(在 position smooth-L1 里上调高运动 token 权重,w_motion {0,1,3,5}),意在"保方向"地修幅度。**也败**:heldseed 下 **w_motion=0(不加权)方向 0.67、幅度 0.53 双优**;任何加权(1/3/5)方向塌向 0/负。**两种幅度修法(相对幅度项 + 运动加权)都伤方向 → 幅度欠预测不可经损失工程廉价修复**(根因:smooth-L1 中位求解 + 数据;约束幅度就动方向)。
+**★ 评估噪声警示**:同一配置(xyz L1024 no-mag)mag-ratio 在不同 run/eval 间 0.24↔0.53、dcos 0.45↔0.67 —— **n=8 held split 噪声极大,单 split 比较不可靠**。这削弱了之前所有 config 微调对比的精度(但旋转负结论稳健:rot-err≈GT-rot 在所有 split 一致,heldgoal 强旋转 0%)。
+**实验性微调到此收益递减**:旋转(负)、幅度(不可廉价修)两大问题都不靠更多 sweep 解决,且评估噪声限制精度。**v1 探索告一段落**:稀疏 token JEPA = 可用的 sim 平移世界模型;旋转/真实视频/幅度是需**新思路**(非更多 sweep)的开放问题。下一步应是**巩固里程碑 + 战略选向**,而非继续噪声受限的微调。
+
+## §95 续5: ★ 两个负面结论被用户质疑后更正(都是我下早了)
+用户质疑"DDP 更差不合理"+"真实视频先看样本质量"。逐个核实,**两条都更正**:
+**① "DDP 更差" = 撤回(误判)**。重看 no-mag run 的 dcos:单卡 0.45-0.74、DDP m0=0.42——**落在单卡区间内,不可区分**。dcos 负的 DDP run **全带 mag 损失**(是 mag 杀方向,非 DDP)。EPE 混淆:m0(DDP)mag-ratio **1.04(满幅度,最好)**,低运动 heldseed 满幅度=高 EPE 被误读"更差"。**无证据 DDP 更差。**
+**② "真实视频弱=数据问题" = 更正**。`_gps_real_gtqual.py` 量化 heldreal 伪 GT:**方向一致性 0.86、刚性残差 0cm、位移 17.8cm**(sim 1.00/0/27)+ 目检物体连贯平移。**平移 GT 干净可学**——§92 的"真实噪声"是**外观(糊)+ 旋转(分割错)**,非平移。**故 heldreal dcos 0.10 是模型/输入问题,非数据天花板。** 疑似 **sim/real 3D 尺度-域差**(heldreal mag-ratio **0.14** 严重欠缩放;几何头预测绝对 3D 位移,真实是单目 up-to-scale)。**可解的域适配问题,非死路。**
+**共同根因 = n=8 噪声 + EPE 误导**让我过度下负面结论。**教训:小评估集+混淆指标上别急下结论。**
+**③ 真实视频 in-sample 诊断**:r_train(真实,n=66)dcos **+0.39** ≈ c_train(sim,n=20)**+0.35** —— **真实不比 sim 难拟合**;heldreal 0.10 主要是 n=6 噪声 + 泛化 gap,非真实视频特殊弱。
+**★ 稳健重新定性(用大 n in-sample,n_ent 100-214)**:
+- **旋转 = 唯一稳健的负结论**:sim(n_ent100)5°5cm 2%、rot-err 14.8 > GT-rot 12.4;real(n_ent214)13%、rot-err 13.8 > GT-rot 10.5。**rot-err ≥ GT-rot → 模型不学旋转**(预测恒等一样好);活过了大样本。**旋转-靠-平移确认死路。**
+- 模型是**中等平移预测器**:dcos ~0.35-0.39(sim≈real)、mag-ratio ~0.2(欠预测)、跨域一致。held 各 split 的 0.10-0.76 散布**主要是小 n 噪声**。
+**净结论**:v1 = 可用但中等的 sim+real 平移世界模型;**唯一硬负 = 旋转(稳健)**;DDP/真实视频/幅度的"负"都是噪声伪影。**评估方法论是真正的卡点**(n=4-8 不可信);改进方向:更大 held 集 + 提升中等的 dcos(更长训练/更好特征)+ 旋转需全新机制(非平移、非更多 sweep)。
+
+## §95 续6: ★ 真实视频"干净"是我过度更正(用户"给我看看"再次抓到)— 撤回
+用户质疑后渲染了 4 个真实 train clip(`viz_traindata_verify.py rtrain`),**object-only 全是模糊点云团**(黄瓜/梨/杨桃/黄瓜),看不清物体、运动难辨。**§95续5 的"平移 GT 干净"是错的**:coherence 0.86 / 刚性残差 0 是 **clip builder 刚性化的循环产物**(builder 把 StV2 track 拟合成刚体 SE(3) 套到物体上 → 残差当然 0),**不是数据真干净的证据**。**真实视频确实是糊/弱信号**(§92 当初对,我不该用刚性指标翻案)。层次:运动幅度对夹爪有 EEF 标定 ~1cm(§m4,大致准)但**物体外观/3D 糊、采的特征弱** → 真实视频弱**部分确实是数据问题**。**教训:看图,别信(循环)指标。**
+**① 评估修复已做**:eval glob 改子串匹配,`--split held` 聚合全部 held(**n=32 clip / n_ent=120**)。**稳健 v1 数(c1024)= dcos +0.41、mag-ratio 0.27、EPE 6.8cm、grounding 62%、5°5cm 9%(rot-err 10.1≈GT-rot 9.3 → 旋转不学,稳健)**。per-split 的 0.10-0.76 散布在 n=32 上收敛到 0.41——噪声诊断确认。**这是可信的 v1 基线。**
+**v1 诚实定性(可信)**:中等(dcos 0.41)、欠预测幅度(0.27)、不学旋转(稳健)、grounding 中等(62%)。要做好需更长训练/scaling/更好特征;旋转需新机制。
+
+## §95 续7: ② 欠训练测试 → 模型 ~1500 步就收敛(非欠训)+ 方差再警示 + v1 最终定性
+长跑(xyz L1024 no-mag,6000 步,逐 1500 存档)**@1500 步 eval(n=32)= dcos 0.65 / mag-ratio 0.43**——**比 c1024@2500 的 0.41/0.27 还高!** 说明:① **模型 ~1500 步就收敛,不是欠训**(更多步/算力救不了中等表现);② **run-to-run 方差大**(同配置 0.41↔0.65)——0.41 是个低抽样,**模型真实水平 ~0.5-0.65**,我之前死盯 0.41 又被噪声带偏。**坑:中间 eval(GPU1 跑 placement 占 CPU)把训练从 1.21→0.51 it/s 拖慢**——杀掉长跑(答案已明)。
+**★ v1 最终诚实定性(尽量去噪后)**:稀疏 token JEPA = **中等的 sim+real 平移世界模型**——dcos **~0.5-0.65**(方差大)、mag-ratio ~0.3-0.43(欠预测)、EPE ~7cm、grounding ~62%、~1500 步收敛。**唯一硬负 = 旋转(稳健,rot-err≈GT-rot,n_ent 100-214)**。真实视频数据糊(弱信号)但 in-sample≈sim。**结论:架构 work 但中等,且收敛快——提升需更好特征/数据/架构(非更多步);旋转需全新机制。这些都是战略选择,非更多 sweep。**
+
+## §95 续8: ★ 方向 A 成功 —— DINOv2 特征明显提升(第一个正向结果!)
+执行了用户认可的方向 A:把 token 视觉特征源从 **Qwen patch → 冻结 DINOv2-L 稠密特征**(Qwen 仍做语言条件)。新增 `dino_features.py` + model `feat_source={qwen,dino}` 可插拔。A/B(xyz L1024 no-mag,1800 步,n=32 held):
+| 特征 | EPE | **dcos** | magR | grounding | 5°5cm |
+|---|---|---|---|---|---|
+| Qwen 基线 | 10.4 | +0.54 | 0.48 | 59% | 1% |
+| **DINOv2** | **6.9** | **+0.73** | **0.56** | **66%** | 5% |
+**DINOv2 在每个指标都更好**(dcos +0.54→+0.73、EPE 10.4→6.9、magR 0.48→0.56、grounding 59→66%)——跨指标一致提升,**超出噪声、且方向合理**(DINOv2 稠密空间特征更强)。**验证 PLAN §7 / 参考项目"换更好特征"的判断。** **旋转仍不解**(两者 rot-err≈GT-rot;DINOv2 不修旋转,那是另一个问题)。
+**新最佳 v1 = xyz + L1024 + no-mag + DINOv2 特征**(dcos ~0.73、EPE 6.9、magR 0.56、grounding 66%)。`checkpoints/gpswm_fdino/wm_001800.pt`。**这是把 v1 从"中等"推向"不错"的真实杠杆。** 后续可:确认(重复/更长 DINOv2 训练)、再叠加(SigLIP 语言对齐 grounding、更大 held 集),或推进 VLA。旋转仍需全新机制。
+
+## §95 续9: DINOv2 第二个数据点 → 修正结论(EPE/grounding 是真赢,dcos/magR 在噪声内)
+独立重训 `gpswm_dino2`(同配置,新 run)取**第二个 DINOv2 数据点**,与续8的单次 A/B 并列(都 n=32 held):
+| 指标 | Qwen @1780 | DINOv2#1 @1800 | DINOv2#2 @1500 | 稳健? |
+|---|---|---|---|---|
+| EPE3D | 10.4 | 6.9 | **6.4** | ✅ 是(−38%) |
+| grounding | 59% | 66% | **69%** | ✅ 是(+8~10pt) |
+| dcos | +0.54 | +0.73 | +0.58 | ❌ 噪声内 |
+| magR | 0.48 | 0.56 | 0.39 | ❌ 噪声内 |
+| 5°5cm | 1% | 5% | 7% | ↗ 小幅,n_ent=120 噪声 |
+**修正续8的"每个指标都更好":两点之间 dcos 0.73→0.58、magR 0.56→0.39 摆动很大(正是续7已记的 dcos 高方差),Qwen dcos 0.54 就在这个带里——dcos/magR 的优势两点站不住。** 真正稳健的 DINOv2 收益是 **EPE3D(~6.5 vs 10.4cm,−38%)+ grounding(~67% vs 59%)**;欠预测(magR<1)依旧。诚实结论:**换强视觉特征(DINOv2)确定能降位置误差、提语言定位,但不修方向一致性、不修幅度、不修旋转。** **@3000 结果:EPE 7.1 / dcos +0.46 / grounding 69% / 5°5cm 6% —— vs @1500(6.4/+0.58/69%/7%)更长训练没帮助(EPE/dcos 反而略退,grounding 稳在 69%),坐实"~1500 步已收敛"。** 故 A 系列实验 1500~1800 步即可。
+
+## §95 续10: ★★ 旋转墙的机制诊断 —— 信号被平移淹没(S/N 问题,不是机制问题)
+不接 VLA 前,先用**纯 GT 几何诊断**(`_gps_rotdiag.py`,无模型,CPU)回答"旋转为何学不出"。对 32 个 held clip 的 120 个 mover entity,把 GT token 运动分解为 平移(质心位移)+ 旋转(绕质心 Kabsch)+ 非刚性残差:
+| 量 | 中位数 |
+|---|---|
+| GT 旋转角 | 9.3°(p75 18.5°;>10°占 46%,>20°占 22%) |
+| 物体半径 | 7.4cm |
+| **总运动** | **12.7cm** |
+| 其中 平移 | 12.4cm |
+| 其中 **旋转位移 rotdisp** | **0.76cm** |
+| 非刚性残差 | ~0.00cm(GT 本就刚性) |
+| **旋转占运动比 (rotdisp/total)** | **7%**(p75 27%) |
+
+**结论:旋转占运动的中位数只有 7%,平移占 ~98%。旋转位移中位数 0.76cm,而模型自身位置误差(EPE)~6.5cm —— 旋转信号比预测噪声还小近一个量级,被彻底淹没。** 连高旋转子集(GT>15°,n=37)的 rotdisp 也只有 2.9cm(占比 26%),仍在 6.5cm 噪声地板之下。
+
+**这机制性地解释了整条分支最稳的 hard negative(rot-err≈GT-rot,模型预测~不旋转):不是"平移隐含旋转"这个机制错了,而是数据里旋转信号本身就在噪声地板以下,无从学起。** 并且**与 DINOv2 结果自洽**:DINOv2 把 EPE 10.4→6.5cm(降噪声地板),5°5cm 就从 1%→5~7% 微升——正是 S/N 图景的预言(地板逼近信号,旋转开始冒头)。
+
+**对战略岔路的硬含义:**
+- **B(专门旋转机制)在当前数据上是伪命题**——再换机制也救不了 7%、低于噪声地板的信号。要破旋转只有两条:**(1) 继续降位置噪声地板(=方向 A 的特征/精度杠杆,已被 DINOv2 证明有效且确实让旋转微升);(2) 换旋转富集的数据**(拧旋钮/开铰链门/拧螺丝这类 旋转≫平移 的样本,让 rotdisp 高于地板)。
+- 所以 **A 不只是"吃确定收益",它同时是目前唯一被验证能让旋转往上走的路**(经由降噪声地板)。`_gps_rotdiag.py` 已同步服务器。
+
+## §95 续11: 用户拍板"AB 并行" → 两条线同时落地(A=高分辨率 DINOv2 / B=旋转富集数据)
+用户 `/goal 我同意你的看法,AB并行的去做吧`。落地为两条不抢资源的线(A 吃 GPU / B 吃 CPU-sim):
+- **A(降噪声地板)**:SigLIP 服务器离线缓存没有(`HF_HUB_OFFLINE=1` 不可下),改用**可用的最强杠杆 = 高分辨率 DINOv2**:`--dino_imgsize 518→770`(37×37→55×55 patch 网格,更细的 per-token 特征 → 更低 EPE)。wire 进 model/trainer/eval。run `gpswm_dhr`(GPU0,1800 步,1.25it/s)。
+- **B(旋转富集数据)**:`maniskill_gt.py` 加 `_script_rotate`(抓取→微抬→原地转手腕,被抓 cube 绕~自身质心转=旋转主导)+ `--policy rotate`;`gen_sim_dataset.py` 支持 `env@rotate` task spec。生成 `data/rot_v1`(40 train + 14 held,GPU1/2/3 三 shard 并行)。
+  - **`_gps_rotdiag` 验证数据已脱胎换骨**:GT 旋转角 9.3°→**124.6°**(>10° 占 97%,vs 旧 46%);旋转占运动比 7%→**37~40%**。**但 rotdisp 仍只 1.73cm**(cube 小 + 单视角高斯只覆盖可见面 → 绕质心半径小)。所以 5°5cm 这个二值指标对小物体仍苛刻(要 sub-cm 精度);**诚实的判据是 rot-err vs GT-rot**(模型预测旋转角是否远低于 124° GT,即从"预测~0 旋转"动起来没有)。
+  - **核心经验**:旋转位移 = 半径 × 角度,小物体 + 单视角壳 → 即便 124° 旋转,位移也才 ~1.7cm。要让旋转位移真正高过地板,需 **更大物体 / 多视角融合高斯(fuse_stride,补全背面→更大半径)**。已记,待 B-train 结果定夺是否升级数据。
+  - 训练 `gpswm_rot`(GPU1,DINOv2,rot_v1,1500 步)进行中 → 测 held rot-err。
+
+## §95 续12: ★★★ AB 结果 + 全分支统一诊断 —— 模型"方向对,幅度/角度系统性欠预测"(优化/损失问题)
+**A(高分辨率 DINOv2)= 打平,不是赢。** `dhr@1800`(n=32 held)EPE **8.3**(基线 6.5,**反而更差**)/ dcos +0.71(基线 0.58,更好)/ magR 0.66(更好)/ grounding 72%(略好,@900 时一度 84%)。**"更细特征→更低 EPE 地板"不成立(EPE 升了)**;细特征改善了方向/幅度/定位,却恶化了位置误差。**高分辨率这个杠杆是死路**;DINOv2-vs-Qwen 的赢仍在,但加分辨率不加分。
+
+**B(旋转富集数据)= 部分正向 + 干净归因。** 新写 `_gps_rotread.py`(cube/hand 专属旋转读出 —— 旧 eval 的 median 被 8 个手臂 link 稀释,测不到 cube)。对 GT-rot>60° 的真转实体(cube/hand,n=34 held / 95 train):
+| 模型 | GT 旋转 | **预测旋转** | pred>30° |
+|---|---|---|---|
+| rot 训练 @750 (held) | 129° | **27°** | 41% |
+| rot 训练 @750 (**train**) | 129° | **32°** | 55% |
+| 旧 DINOv2(从没见过旋转,对照) | 129° | 15° | 9% |
+
+**两个发现:(1) 旋转训练确实让 per-token 平移场表达出更多旋转(15°→27~32°,>30° 实体占比 9%→45~55%)—— 架构并非根本不能表达旋转,纠正了 §95 之前"平移学旋转完全不行"的绝对说法。(2) 但严重欠转(27~32° vs 129°,~4-5× 不足),且 *在训练集上也欠转*(train 32°≈held 27°)→ 不是泛化 gap,是 *表达/优化* 极限。**
+
+**归因(干净):rotational displacement(1.7cm)是叠在主导平移(10.7cm)之上的小残差;smooth-L1 位置损失被平移主导,旋转残差被欠优化 —— 连训练集都拟合不上。**
+
+**★ 全分支统一诊断:模型"方向对(dcos~0.7),幅度系统性欠预测"。** 跨所有实验一致:平移 magR~0.5、旋转 ~0.25×、连平移距离也欠(pred 7.8 vs GT 11.5cm)。而且 *在训练集上就欠*(旋转 32° vs 129°)→ **不只是 aleatoric 不确定性,更是位置回归损失被"最大、最易预测的粗平移方向"主导,把精细残差(精确幅度、旋转)欠优化。** 这统一了:幅度欠预测(§89/§95 续,loss-fix 都失败)+ 旋转欠预测 = 同一个病。**模型是个"粗略均值运动"预测器,精细残差欠拟合。**
+
+**含义(下一步的真岔路,不是特征、不是单纯旋转数据):**
+- 病根在 **学习目标/损失**,要让精细残差(幅度、旋转)在损失里有分量:**(a) 纯旋转/运动归一化数据(旋转成为唯一/主导信号)**;**(b) 分解损失、显式上权旋转/幅度残差**;**(c) 更深 —— 生成式预测器(flow/diffusion over futures)不回归均值。**
+- A=死路(高分辨率);B=证明架构能表达旋转但被损失主导欠拟合。`_gps_rotread.py` 已同步。@1500 确认中(train@750 已显示是欠拟合非欠训)。
+
+## §95 续13: ★★★★ 重大反转 + 三重验证 —— 旋转-via-平移【能学会】(@750 是欠训,不是极限)
+用户 `/goal A吧` → 跑(a)纯旋转判决实验。本想造纯旋转数据隔离"损失主导 vs hedging",但发现 **cube 太小(单视角壳半径~1cm),即便 fuse + 满程 spin,旋转位移~1.9cm 仍盖不过 orbit 平移~3.5cm —— 数据层面无法让旋转主导位移(几何硬限)**。改用更干净的判决:**直接看 rot@1500(不是 @750)**:
+| 模型 | GT 旋转 | **预测旋转** | pred>60° |
+|---|---|---|---|
+| 旧 DINOv2(对照) | 129° | 15° | — |
+| rot @750 | 129° | 27° | 41% |
+| **rot @1500 (held)** | 129° | **99°** | **74%** |
+| **rot @1500 (train)** | 129° | **100°** | 81% |
+
+**进度 15°→27°→99°:@750 根本是【欠训】(旋转是小残差,收敛远慢于平移),不是表达极限。续12 的"表达/优化极限"结论【作废】。** rot@1500 预测出 99°(GT 129° 的 77%)。
+
+**三重验证(用户要求的眼见为实,`_gps_rotviz.py`):**
+1. **幅度**:pred 99° vs GT 129°(held≈train,非记忆)。
+2. **轴对齐**:预测旋转轴与 GT 轴夹角【中位 14°】—— 是绕**正确的轴**转,不是 Kabsch 噪声(噪声会给随机轴)。
+3. **可视化**:cube token 俯视 quiver,GT(绿)是干净旋转场,**PRED(红)是绕同一中心/轴的真旋转场**(更噪、幅度~80%,但确凿是旋转,非零非随机)。PNG `outputs/rotviz/`。
+
+**★ 结论(反转 §95 续2/核心):用 per-token 平移学旋转【确实可行】。** 之前"不行"是两件事叠加:(1) 原始 sim 数据旋转几乎为零(9°);(2) 旋转收敛比平移慢得多(小残差),~750-1800 步看着像"学不出",到 1500 步真相大白。**这验证了用户最初的核心设计赌注(无旋转头,靠平移学旋转)。** rel-rot-err 仍 ~56°(轴有抖动+幅度欠 23%+逐 token 噪声)→ 不完美但决定性地"会转"。
+- 仍欠 23%(99 vs 129):是优化/收敛,不是表达极限 —— **overfit 单 clip 铁证:`gpswm_rotof@400` 预测 125° = GT 125°,rel-rot-err 仅 13°(近乎完美)。架构能【完整】表达旋转,数据集上的 99° 纯属没训够/多 clip 平均。** 续12"表达极限"彻底作废。
+- magR 在 rot 数据上也 ~0.68(pred 7.8 vs 11.5)→ "欠预测"部分也可能是欠训,待验(`gpswm_rot3k` 跑 3000 步,看 99→129 是否闭合 + 平移 magR 是否随步数上爬)。
+
+## §95 续14: 用户拍板"上更大数据规模" → Workflow 设计 vetted spec → 生成 mix_rot_v2 + 统一训练
+用户 `我觉得没问题 以及我们是不是应该在更大的数据规模性去训练?`。ultracode 开,用 **Workflow(whdi98cwb,4 agent:3 提案+综合/对抗审查)** 设计了规模化 spec(full 见 task 输出)。Workflow 抓出真问题:`--seeds/start_frac/fuse` 是**全局**flag(须拆 3 次 gen 调用)、trainer **无 --resume**(curriculum 不可行→flat 训练)、旋转会被平移淹没(→旋转设最大桶 + **磁盘 oversample**:复制 rotate `_train.pt` 使有效占比~55%)、PSNR 过滤可能掉旋转 clip(→生成后数 count)、seed 泄漏(→disjoint seed_base)。
+- **数据 `data/mix_rot_v2`(~410 clip,3 次 gen 调用 4-shard)**:① **PickCube@rotate ×170**(per-seed 变角 40-150° 双向、纯 spin 窗 start_frac 0.72、fuse_stride 3 补全 cube→半径更大)= 最大桶;② PickCube+PushCube auto ×110(变 mid-episode 窗 window_sec 4 + random_start)= 平移骨架;③ StackCube auto ×40 **整体 heldtask**(跨任务平移泛化);④ StackCube@rotate ×45 **整体 heldtask**(跨任务**旋转**泛化=最强测试,seed_base 7000 与训练 rotate 5000 disjoint);⑤ 真实 held clip symlink(仅 eval,sim-only 训练)。变角已 smoke 验证(57/68/73/88/120°)。
+- **训练 `gpswm_unified_dino`**:locked-v1 DINOv2(img 518 不用 770、xyz、L1024、w_mag 0)、**单卡 3000 步**、save_every 750、rotate clip 磁盘翻倍。+ 消融:`rotonly`(只 rotate,测稀释是否伤旋转)、`const-spin`(固定角,测"多样性 vs 仅更多 clip")。
+- **eval(主指标 = `_gps_rotread` rot-err vs GT-rot,不是 EPE)**:heldseed rotate(同分布旋转泛化)、heldtask StackCube@rotate(跨物体旋转泛化)、dcos/magR(平移没被旋转数据搞坏的回归守门)、grounding、5°5cm(报但不当成败标准,小 cube 几何苛刻)。链式 gen 编排 `_gen_mixrot_v2_chain.sh` 后台跑(~2h)。
+
+## §95 续15: ★ 规模化结果 = 旋转回退(纯spin提纯害事) + 可视化坐实"大运动欠预测更狠"
+**修了 1 个 bug**:`_gen_mixrot_v2_chain.sh` 里 `--held_task StackCube-v1` 对 task `"StackCube-v1@rotate"` 不匹配(build_jobs 比的是完整 task 串)→ stackcuberot 泄漏进 train。手动 rename 全部 → heldtask。最终干净:train 328(rotate 145+auto 183)/ heldseed 62 / heldtask 85。
+**三臂 @3000 eval(`_gps_rotread` thresh60,cube/hand)**:
+| 臂 | in-dist 旋转 | 没见过物体(stackcuberot) | 干净平移 dcos(n=8) |
+|---|---|---|---|
+| uni_nat 44%rot | 24° | 51° | -0.08 |
+| uni_os 61%rot | 0° | 0° | +0.69 |
+| rotonly2 100%rot | 0° | 0° | — |
+**★ 关键负向:`rotonly2`(纯新数据)旋转 0° —— 而旧 `rot_v1`(整段episode、固定124°、无fuse)纯旋转到了 99°。同样"只训旋转",新数据 0°、旧数据 99°。** 不是步数(3000>旧1500)。
+**⚠️ 病因更正(我先前"纯spin切掉平移"的说法 WRONG):`window_sec 0` 时 `start_frac 0.72` 是 no-op(build_clip 整段窗忽略 start_frac),两套数据都是整段episode、都有 ~9.5cm 抬起平移。`_gps_rotdiag` 实测:rot_v1 GT旋转中位 124.5°,mix_rot_v2 GT旋转中位仅 26°(p75 90°)—— 唯一真区别 = 我"改进"的【变角】(40-150°)+ fuse。** **真病因 = 变角让旋转变得不可学:旋转量不由 frame0 决定(模型看不到将要转多少)。固定124°→模型直接【记住这个常数】→99°;变角→记不住单一值、又无法从输入感知角度→小的变角旋转残差被平均成 ~0。** **所以 99° 那个"突破"本质是【背下了一个常数】,不是感知/预测旋转。这和用户发现的幅度欠预测【是同一堵 aleatoric 墙】:运动的"量"(平移多远、旋转多少)不在 frame0 里,确定性回归只能背常数或缩向 0/均值。** const-spin 消融(deferred)正是验证此点的实验。 uni_nat 的 51°(没见过物体)有信号但 in-dist 仅24°、不稳;平移 dcos 是 n=8 噪声不可信。**纠正我一度的过度解读"多样性正则化、自然混合赢"——完整数据是三臂旋转都弱。**
+**★★ 可视化(`_gps_tokenviz.py`,表征级:带深度2D高斯token椭圆按深度着色,frame0→GT未来→PRED未来)坐实欠幅度,且大运动更狠**:旋转clip mag-ratio 0.69(GT14→PRED10cm,dir-cos0.89);平移搬运clip **0.30**(GT29→PRED**9**cm,dir-cos0.73)。**运动越大缩越狠(0.69→0.30),~9cm像个"安全保守值"。** = aleatoric hedging 签名(单帧+指令不定→确定性回归往均值缩)。**与旋转欠转同病。** 加幅度损失顶不动(§95试过伤方向)→ **真正的解大概率=生成式预测器(预测未来分布并采样,而非回归均值)**,回到 JEPA/世界模型本意。
+**新增脚本(均已同步)**:`_gps_rotread.py`(cube专属旋转读出,避开手臂link稀释)、`_gps_rotviz.py`(GT绿vs预测红旋转quiver)、`_gps_tokenviz.py`(表征级时序可视化+mag-ratio标注)。**预测是显式3D per-token坐标(可直接投回2D画),JEPA只是旁路特征损失。** **下一步候选(基于更正后的理解):(a') const-vs-varied 隔离验证 —— 新数据【固定角】whole-episode 应恢复 ~99°(=背常数),【变角】→0°,坐实"变角=aleatoric不可学";(b) 生成式/条件预测器 —— aleatoric 是根(变角旋转 + 幅度欠预测同源),确定性回归治不了,需预测未来【分布】并采样,回到 JEPA/世界模型本意。** 注意:(a') 即便成功也只是"背常数",非真感知,所以 (b) 才是治本。待用户定。
+
+## §95 续16: ★ 用户洞察"预测相对(归一化)距离而非绝对" → 诊断对、但归一化目标证伪 → 病灶=尺度本身aleatoric
+用户问:是不是该预测"整图magnitude归一后的相对距离",而非绝对距离?
+- **诊断(`_gps_scaletest.py`:对每个held clip找单一标量α最优放缩预测场到GT,看EPE/dcos)= 洞察成立**:平移上 **~30-45%的EPE就是那个失控的全局尺度**(n=32,2模型:dino欠预测0.39× / uni_os过预测1.51×,**一欠一过差4倍但dcos都~0.57**,各用一个标量rescale EPE都掉30-45%)→ **全局尺度是个几乎不受约束的aleatoric自由度**。旋转上α<1只降10%(场本身画歪,非尺度)。
+- **实现(`--norm_target`,model+trainer已wire):目标改成 位移/全局尺度。4个版本踩坑**:① unit-target → 不稳(目标~unit比绝对大10×,梯度过热);② 除以s_pred.detach() → 方向崩(held dcos -0.10);③ floor s_gt 0.08 → 训练dcos仍狂摆(+0.93↔-0.35),因1clip/step+1/s_gt放大小运动clip;④ 等比缩放到参考尺度 sref=0.1(target=gd·sref/s_gt)→ 终于稳(dcos正)。**另修ssh自杀bug**:`pkill -f train_gpstoken_wm`匹配到自己ssh命令的argv→把训练杀在s540(用setsid+`</dev/null`detached + bracket pgrep解决)。
+- **结果(ref-scale稳定版):dcos 0.50@750→0.17@1500,NOT better than 绝对基线0.58;给oracle尺度后场EPE 15.4 vs 基线11.1(反略差)。归一化目标证伪。**
+- **★ 干净结论:欠预测几乎全在"输出的全局尺度",不在"场"。** 绝对基线的场本来就学到位了(oracle rescale掉40% EPE);归一化没让场变好,只是把尺度从输出里挪走,**没解决"尺度从哪来"**。给两模型都喂oracle尺度→场质量相当→**归一化无推理时优势**(推理时尺度照样未知)。**尺度从frame0 irreducibly aleatoric,改目标治不了。**
+- **路径彻底收敛(且只此两条):尺度必须 (1) 被供给=goal/action条件化(VLA方向,把"搬多远/转多少"作输入→尺度变deterministic→直接预测全幅度);或 (2) 被采样=生成式预测器。归一化(单纯改目标)被排除——它不供给也不采样,只搬家。** 这与"变角旋转不可学""幅度欠预测"统一:都是运动的"量"不在输入里。新增 `_gps_scaletest.py`。norm_target 代码保留(默认off)。
+
+## §95 续17: 路径-1 探针(供给尺度)也未轻易奏效 → 幅度问题抗简单修复,真解需架构投入
+为给 (1)/(2) 决策提供数据,试了"软条件化供给 oracle 全局尺度"(`--cond_scale`:GT mover 尺度→log→zero-init MLP→加到 global cond)。结果(mix_v15 held,oracle尺度供给):
+- @600 magR 0.20、@1200 **magR 0.27**(均 worse than 基线 0.5);dcos 0.58→0.33(略伤方向);EPE/grounding 持平略降。**软条件化(加到 global cond)的尺度没被有效用上 —— 模型学不会用全局 cond 去缩放 per-token 输出幅度。**
+- **★ 三个简单修复全失败**:① 幅度损失(w_mag/w_motion)伤方向;② 归一化目标(续16)只搬家无增益(dcos 0.50→0.17);③ 软尺度条件化(本节,**即便 oracle 尺度**)magR 0.27 没修上。**幅度/尺度问题抗简单修复。**
+- **含义**:即便供给 oracle 尺度,软条件化也不 work → (1) 需要**显式的尺度施加机制**(如预测 unit-field 再乘以供给的尺度),不是 add-to-cond 软条件;且 per-token 相对幅度本身也有残差(scaletest magR-after-rescale~0.48 非1)。真解 (1 显式 action/goal 条件化 + 显式尺度 / 2 生成式)是**实打实的架构投入**,非快修。cond_scale 代码保留(默认off)。**已停止自主探针,等用户定 (1)/(2)。**
+
+## §95 续18: ★★★ 用户洞察成功 —— 在【归一化 2D 图像空间】监督,大幅治好幅度欠预测
+用户精确指出:预测的运动应在 2D 图像里、用图像长宽归一化(Δu/W, Δv/H)= 它在图像里移动了多少。先查证:`flowd` 不是这个(像素 flow,损失在 unproject 后的 3D 上,dcos 0.10 惨败)。**这个想法从没试过。**
+- **实现 `--img_loss`**(model+trainer wire):损失 = `smooth_l1((uv1p-uv0)/[W,H], (uv1g-uv0)/[W,H])`(project_to_uv 可微)+ 0.1·geom 锚住深度。日志 mag=图像流 magR、dcos=图像方向。新增 `_gps_imgeval.py`(held 图像空间读出)。干净平移 `trans_v1`(183 train,无旋转无真实)。
+- **结果 @1500 held(图像空间),img_loss vs 3D 基线(同一图像 eval)**:
+  | | image dcos | **image magR** | GT→PRED |
+  |---|---|---|---|
+  | **img_loss** | **+0.81** | **0.73** | 32.5%→19.7% |
+  | 3D 基线 | +0.15 | 0.11 | 32.5%→3.6% |
+- **★ 用户直觉对了**:按图像 W,H 归一化 = 用固定已知常数归一化,目标是图像分数(~0.3)尺度一致 → 不像 3D 米动态范围巨大 → 不再赌小缩水;且视觉接地。**方向 +0.81 优秀,幅度 0.73 远好于 3D 一贯的 ~0.5,更碾压 3D 投到图像的 0.11。** 与续16(按 motion-scale 归一化失败,只搬家)的关键区别:**归一化的【分母】是图像尺寸(固定常数)而非 per-clip 运动量(数据相关→不稳)。**
+- **保留**:@750 还欠训(magR 0.22),@1500 才 0.73;train magR 1.21 vs held 0.73 = 过拟合(仅 183 clip)→ 差到 1.0 的部分主要是数据少。纯 2D,深度还用 0.1 锚没正经学。
+- **下一步(待用户定)**:① 扩干净平移数据 + 训久,把 held magR 0.73→逼近 1(过拟合 gap 可补);② 把深度从锚换成正经归一化深度预测,拿回完整 3D。`gpswm_img` 保留。
+
+## §96: ★★ 架构 v2(用户拍板)—— DDP 多卡 + 融合(grounding=门、JEPA 从运动派生进预训练 latent)
+用户三条质疑全采纳:(1)**"DDP 更差"无依据**(我早撤回过,是 n=8 噪声+mag损失混淆)→ **以后所有训练 torchrun 多卡**(更大有效 batch = 更稳,正治幅度不稳)。(2)**多头会让方向漂移**(geom 和 JEPA 共享主干互拽,且 JEPA 作为 head 近乎没用 +0.002)。(3)**DINOv2 冻结但对齐太薄**(只一个 Linear,被 4 目标共享)。
+**纠正对 JEPA 的理解(用户)**:JEPA 不该是 head,而是 **world-model 附加部分** —— DiT 预测的"未来"一支预测绝对位移、一支在 latent space 预测该处 latent 如何变;**JEPA 目标要用预训练模型(非我们 feat_in),且适配非均匀 patch**(DINOv2 是均匀切分预训练)。融合方向(用户认可我的设计):**grounding 当门调制运动(非并行 head)、JEPA 从运动派生(动完那个位置的特征)**。
+**实现 `--fuse`(wm_model.py)**:① grounding = `sigmoid(relevance(tok_feat,text))` 的**门**,`motion = gate × geom_head(x)`;监督用 BCE-with-logits(门 vs mover掩码,autocast 安全),**去掉并行 InfoNCE**。② JEPA = `jepa_head(x)→raw 冻结 DINOv2 latent(1024,非 feat_in)`,目标在**未来位置 footprint 池化**(`_footprint_sample` 5点±0.7σ,适配非均匀 token);cosine 损失 + SIGReg(jepa_pred)。③ 两支都从同一个未来 hidden x 读出 = 一致的两个视图,不抢主干。④ DDP `find_unused_parameters=True`(fuse 下 content_head 闲置)。
+**smoke 验证(25步单卡)通过**:loss 有限下降,geom(运动)学、**jepa 0.97→0.65**(预测预训练未来 latent)、**inst 0.9→0.1**(门学会预测 mover,relSel 1)。
+**①数据扩了**:`trans_v2` = trans_v1 + 新生成 PickCube/Push/Pull auto = **556 train + 98 heldseed + 40 heldtask**(原 183,补过拟合 gap)。**②深度**已并入(img_loss + Δlogz)。
+**当前**:`gpswm_fuse` = v2 全家桶(DDP 4卡 + fuse + img_loss + depth)在 trans_v2 上跑(1500 步)。待评:held 图像 magR(过拟合 gap 是否随数据+DDP 缩小)+ 门/JEPA 质量。DINOv2 加厚 adapter 留作下一步(本轮先验证融合+DDP+数据)。
+
+## §97: ★★★ 重大纠错(取证)—— "0.81 方向突破"是过拟合假象;数据扩充被相机随机化污染
+**起因**:复评 img_loss 锚点,同 ckpt+同数据+同代码,held image dcos 复现为 **0.19 而非记录的 0.81**。逐项排除(确认是原始 ckpt 未被覆盖、数据未变、用 bce4629 旧代码跑也是 0.19、metric 本就 movers-only)→ 锚点不可复现。
+
+**真相(全部可复现, 新增 _gps_imgeval 的 3D dcos 读数)**:
+| ckpt(data,步) | split | 3D dcos | image dcos | image magR | depth-sign |
+|---|---|---|---|---|---|
+| gpswm_img (trans_v1,1500) | **TRAIN** | **+0.41** | **+0.71** | 0.87 | — |
+| gpswm_img (trans_v1,1500) | held | +0.10 | +0.19 | 0.83 | 92% |
+| imgbase (trans_v2,4500) | held | **−0.16** | −0.39 | 1.05 | — |
+| fuse1g (trans_v2,4500) | held | −0.06 | −0.29 | 0.89 | — |
+
+**结论 1 — "0.81"=过拟合**:它其实是 TRAIN image dcos(此处 0.71)。held 只有 0.19。**方向是可学的(train 0.41/0.71 证明非纯 aleatoric),但在 183 clip + 1.66B 上严重过拟合、不泛化**。→ 之前"方向已好(dcos~0.7)、只剩幅度"的叙事**反了**:幅度确实治好(magR~1.0, depth-sign 92-97%, 都真), **方向才是未解的核心问题**。
+
+**结论 2 — 数据扩充(trans_v2new)有缺陷**:更多数据本应改善泛化,却把 held dcos 推成**负的**。取证:**干净 trans_v1-only 模型在 trans_v2new held 上 image dcos = −0.53(反相关)但 3D dcos = −0.01(随机)**。根因 = **相机**:trans_v1 相机**跨 clip 固定(campos std=[0,0,0])**,trans_v2new **每 clip 随机相机(campos std=[0.40,0,0.18])**。模型学的是 trans_v1 定相机的"世界运动→图像方向"映射;trans_v2new 变相机下同一运动投影不同(常翻转)→ 反预测 → 混训毒化先验。(trans_v2new 还把 Push 换 Pull, 次要。)
+
+**净状态**:✅幅度(img_loss)✅深度符号(92-97%) | ❌方向泛化(过拟合 183 clip)❌数据扩充(相机随机化污染, 不可用)。
+**待用户定的岔路**:(A) 重生成**定相机**干净扩充数据(对齐 trans_v1)→ 受控解决方向泛化;(B) 给模型**相机条件化**→ 让变相机变成泛化助力(贴近真实视频, 但更重)。推荐先 A 隔离方向问题。
+
+## §98: ★★★ 稳定可用的 v2(成功)—— 干净数据 + 稳定化,held 方向 0.92、无过拟合 gap
+§97 看清问题(方向过拟合 + 数据相机污染)后,两步到位:
+**① 干净数据 trans_v3**(440 train,全固定相机 [0.3,0,0.6],去掉相机在对侧的 PullCube)。
+**② 稳定化重训 `gpswm_v3fuseS`**(v2 全家桶: 门+JEPA-from-motion+深度; DDP-4卡): 关键三味药 —— `w_motion 2.0`(mover 加权 3-10×, **堵幅度中位数坍缩** = 上轮 magR 0.13 的病根)+ `accum 2`(有效 batch 8, 压 batch-2 震荡)+ `lr 2e-4 cosine→2e-5`(新加调度器, 收尾稳)。1500 步。
+
+**稳定性轨迹(held 3D dcos / magR)**: @250 .15/.72 → @500 .19/.42 → @750 .34/.73 → **@1000 .89/.83 → @1250 .92/.82 → @1500 .92/.87**。单调爬升后**平台稳住**(非震荡非坍缩)。
+
+**@1500 严格验证(都复现)**:
+| split | 3D dcos | 3D magR | img dcos | img magR |
+|---|---|---|---|---|
+| **heldseed**(异种子,同任务) | **+0.92** | 0.87 | **+0.95** | 0.93 |
+| **heldtask**(未训练任务 StackCube!) | **+0.91** | 0.66 | +0.87 | 0.61 |
+| train | +0.90 | 0.90 | +0.92 | 0.96 |
+
+**净结论**:① **held ≈ train(0.92 vs 0.90)→ 过拟合 gap 没了**(trans_v1 时是 0.10/0.41)。② **方向 0.9+ 泛化到完全没训过的 StackCube 任务**(magR 0.66 偏欠, 方向强迁移)。③ 幅度同任务 ~0.9(≈1)。④ 确定性复现(不是 §97 那个不可复现的 0.81)。⑤ 门(relSel=1, inst→0.10)+JEPA(0.99→0.53)+深度 都在学。
+**成功要素**:干净相机一致数据 + w_motion 抗坍缩 + 大 batch/lr 衰减抗震荡 + v2-fuse(比 img-only 更抗坍缩)。**待办**:视觉验证(用户金标准)+ 跑 img-only 对照确认 v2 增益 + DDP 已顺带验证多卡正常。
+
+## §99: B —— 相机条件化(让变相机成泛化助力)+ v2 增益确认(对照组)
+**v2 增益确认(img-only 对照, 同稳定化/数据, 去掉 fuse)**: v2-fuse > img-only, 泛化上尤甚 ——
+| | img-only | v2-fuse | Δ |
+|---|---|---|---|
+| heldseed 3D dcos | 0.84 | **0.92** | +0.08 |
+| heldtask 3D dcos | 0.75 | **0.91** | **+0.16** |
+| heldtask magR | 0.42 | **0.66** | **+0.24** |
+→ JEPA/门不是搭便车, 在更难的 held-task 上增益最大。用户的 v2 设计经得起对照。
+
+**B 设计(用户 /goal "Do it" 批准)**: 预测器输出 world 运动(本与相机无关)但输入(RGB外观+token放置)视角相关、且**没收到相机信号**→ 死记一个视角(§97 PullCube中毒根因)。注入相机两级, 都 zero-init→从 v2 0.92 **热启动 no-op**:
+- `cam_head`: 全局位姿(campos+look/up+fov 13维)→ + cond_global(每个 DiT block 看见视角)
+- `cam_tok_head`: 每 token 的**相机系坐标** → + 逐 token hidden(把视角相关 RGB 特征对齐到几何)
+实现: wm_model `cam_cond_signals`; trainer `--cam_cond`+`--init_from`(热启动); 生成器 `--rand_cam`(半球采样相机)+ heldcam(方位角 140-210°=新视角); eval/viz cam-aware。
+
+**实验(跑中, gpswm_B_*)**: 生成 camcond_v1(变相机, PickCube+PushCube, 250seed×2), 然后从 v3fuseS 热启动训 **B(cam_cond)** + **对照(no cam_cond)** 各 DDP-2卡, 评 heldcam(新视角)/heldseed。判据: B 在 heldcam 上泛化(~0.8) 而 fixed-cam v2 / no-cam 在新视角上崩 → 证明 cam_cond 把变相机变资产。结果待 logs/B_orchestrate.log。
+
+### §99 续: B 结果 + 重新定义测试(外推 vs 内插)
+**B 跑完(camcond_v1, heldcam=方位角140-210连续弧=外推):**
+| 模型 | heldcam(novel) 3D dcos | heldseed 3D dcos |
+|---|---|---|
+| v3fuseS(定相机,没见变相机) | 0.40 | 0.79 |
+| B_nocam(训变相机,无cam_cond) | **0.61** | 0.92 |
+| B_camcond(训变相机,有cam_cond) | 0.56 | 0.91 |
+**发现**:① cam_cond **无增益**(0.56≈0.61, 相机头确实激活但帮不上)。机制:模型本就拿到 **world 系 token 3D 坐标(相机无关)**→ 显式喂位姿冗余; novel-view 瓶颈是**新视角 RGB 外观漂移**(magR 0.9 对、dcos 0.6 差=知道动多少不知往哪), 位姿条件化治不了外观。② 但"在变相机上训练"本身有用(0.40→0.61), 且 **seen-view/内插 0.92(=变相机非毒药)**。③ §97 的"中毒"是 PullCube **极端对侧视角+定/变混训**, 不是视角变化本身。
+
+**测试重定义(关键)**:heldcam 用连续弧=**外推**(模型从没见过那侧), 比目标更狠。"变相机当资产"的公平测试是**内插**(训练覆盖视角分布, 测分布内的留出相机)。heldseed 0.92 已是内插证据。→ **Bv2**(跑中): 把弧折回训练(全方位角覆盖)+ 随机留出15%相机(全球面内插), 重训 cam_cond+nocam, 评 heldcam2。预期内插 ~0.85-0.9 = 变相机泛化成立。外推(0.6)是另一个更难的视觉前沿。
+
+### §99 续2: ★★ Bv2 成功 —— 变相机是泛化资产(目标达成)
+**Bv2(全方位角训练 + 随机15%相机内插留出, camcond_v2: 238 train/50 heldcam2):**
+| 模型 | heldcam2(新相机,内插) 3D dcos | magR | img dcos |
+|---|---|---|---|
+| v3fuseS(定相机,没见变相机) | 0.72 | 0.80 | 0.81 |
+| Bv2_nocam(无cam_cond) | 0.85 | 0.82 | 0.86 |
+| **Bv2_camcond** | **0.87** | **0.88** | **0.87** |
+
+**结论(目标达成)**:① **变相机=泛化资产**:在全视角分布上训练 → 泛化到留出的新相机 **0.87**(>0.8)。② **cam_cond 有小而稳的增益**(0.87 vs 0.85 dcos, 0.88 vs 0.82 magR)——在公平(内插)测试上确实帮上,主要帮幅度;不是巨杠杆但非无用。③ 视觉验证:3 个不同新视角,GT(绿)/PRED(红)箭头重合(dir-cos 0.95/0.88/0.87)。
+**诚实范围**:这是**内插**(留出相机来自训练分布=真实"变相机"场景)。**外推**到完全没见过的视角区域(连续弧)仍难(~0.6, 瓶颈是新视角 RGB 外观理解, 视觉前沿, 非位姿)。
+**净**:A(定相机方向泛化 0.92)+ B(变相机内插泛化 0.87)双双达成。框架现在能在变相机数据上训练并泛化到新相机。cam_cond 小幅有用、保留。
+
+## §100: 视频学习路 (用户重定向: 从video学GT才是真实路, sim位姿不可比)
+用户纠正: 「从video拿训练数据 vs 模拟器直接拿位姿 = 两个世界, 不能直接比较; 现实没位姿, 从video学非常重要」。遂**弃用 sim oracle 当验证器**(停了装 planner 的 agent), 全力做**位姿无关的 video GT**。验证靠**重投影**(预测/GT 未来 → 实际未来帧), 现实可用, 不需位姿。
+
+**基础设施(那次5.5T清理删了的)经代理重下**: Pi3(3.83G) + CoTracker(102M) + SAM2(1.7G, 留给P2)。Pi3 在 RoboTwin video 上验证 OK(深度 0.6-2.1m 合理)。
+
+**新脚本 `robotwin_video_gt.py`(Path 1, 位姿无关逐点GT)**: RoboTwin head_camera RGB → Pi3 逐帧深度 + CoTracker 稠密网格跟踪 → 逐点 3D 轨迹, 无 sim 位姿/无掩码。产同样 clip dict(means/uv/traj/K_intr/viewmat/gt_rgb), trainer 直接吃。关键: img_loss 目标是**图像归一化流+Δlogz, 尺度不变** → Pi3 仿射尺度不确定性不进损失。
+
+**★ 诊断到 video-GT 的核心病根**: RoboTwin 相机**真值完全静止(0.000m)**, 但 **Pi3 估成动了(0.30平移+9.8°)** —— Pi3(SfM, 假设静态场景)把**运动物体误判成相机自运动** → 全局 gauge 里到处是伪运动(median flow 59px)。**修复(静相机)**: 用**逐帧 local 点图 + 固定相机帧(viewmat=I)**, 不信 Pi3 的位姿 → 逐点运动=真物体运动。修后 median flow 59→11.6px, top movers 相干地落在被抓起的瓶子+夹爪上(视觉验证), 背景基本干净。
+**残留**: CoTracker 在无纹理白桌上漂移~11px(背景非全静); 27% 轨迹丢失(vis 0.73, 绿瓶运动欠捕捉)。缓解: 按 vis/conf 滤; saliency 本就选高位移 token(真 movers), 把漂移背景下权。
+**下一步**: 滤漂移 → 批量生成 video GT → 训(img_loss) → 重投影验证(预测未来 vs 实际帧)。
+
+### §100 续: video-learning 首个端到端结果 (Path 1, 6 干净任务 150 clip)
+干净任务 vis_frac **0.94-0.97**(vs pick_dual_bottles 0.73, 用户对了: 丢失是任务相关). vis_keep 0.6 滤后每 clip ~900-960 干净 token.
+**训练(img_loss, DDP4卡, 稳定化, 1000步)+ 重投影评估**:
+- 初评(disp>0.01 绝对阈, 误): train dcos 0.13/held 0.04-0.44 震荡 —— **阈值 gauge 错位**(Pi3 尺度 != sim 米, 0.01 选中噪声).
+- 修正(--mov_pct 0.2, top20% 相对 movers): **train 0.41, held 0.41@750 / 0.30@1000, magR 0.85-1.06**.
+**净结论**: ✅ **从 video 学是 work 的**(无位姿, GT 纯来自像素, 泛化 held≈train~0.41, 幅度~1.0). ⚠️ 但**封顶 ~0.4**(vs sim 0.9), 因 held≈train → 瓶颈是 **Path-1 逐点 GT 噪声**(CoTracker 漂移 + Pi3 深度), 非数据量 → 加数据没用, **要更干净的 GT**.
+**杠杆 = Path 2(逐物体刚性拟合 / 合成位姿)**: 对跟踪点做 Kabsch → 平均掉逐点噪声 → 更干净 GT → 抬高上限. = 用户"合成位姿"那条路.
+
+### §100 续2: Path 2 (rigid/合成位姿 GT) vs Path 1 —— 干净 GT 没大幅抬顶
+rigidify(运动聚类+逐物体 trimmed-Kabsch, 背景冻结 frame0; 验证: 背景 65% 静、movers 保形). 同配置重训+评(mov_pct 0.2):
+| | train dcos | held dcos | magR |
+|---|---|---|---|
+| Path-1 raw | 0.41 | 0.41@750/0.30@1000 | 0.85-1.06 |
+| Path-2 rigid | **0.49** | 0.49@250/0.45@1000 | 0.52-0.93(欠) |
+**净结论**: 刚性 GT 方向**略好**(0.41→0.49)但**幅度变差**(欠预测), **非大幅抬顶**. 关键诊断: ~0.45 的封顶**既不是逐点噪声**(刚性没修好)**也不是过拟合**(held≈train) → 更可能是 **① 数据量**(120 clip; sim 当年 183→440 才把 held 0.10→0.92)+ **② video regime 本就更难** + **③ 小数据训练震荡**.
+**净: video-learning 可行已坐实**(无位姿, ~0.45 dcos, 泛化 held≈train, 幅度~0.6-1.0). 两条路(raw/合成位姿)~相当, 刚性略偏方向。**下一杠杆(按 sim 经验): 扩干净 video 数据**(更多任务/episode), 非 raw-vs-rigid。
+
+## §101: 数据问题(用户重定向: 加宽FOV相机多样化 + demo_random 测泛化)
+用户判断"问题在数据" → RoboTwin 支持不同 FOV 相机, 加宽视角增多样性 + 用 demo_random(随机背景/杂乱) 测"学到的是真特征还是过拟合 clean".
+- **加了 fov67(67°)/fov73(73°)** 相机到 `_camera_config.yml`(fovy); 验证 fov67 gen OK(fx 363 vs D435 570, 更宽). 建了 demo_clean_fov67/73 + demo_random_fov67/73 配置.
+- **planner 环境**(agent 装): 侧 venv `/mnt/pfs/xuhaoming/xr-2/robotwin_gen_venv`(mplib 0.2.1 sapien_utils + sapien 3.0.0b1 + numpy<2), collect_data 可跑. 训练 venv 没动.
+- **任务可靠性问题**: beat_block_hammer 规划可靠(快出 26 eps); **handover_block/move_can_pot 卡在 planner start-state-collision 循环**(mplib_RRT 无 curobo, 双臂/某些场景解不出) → 弃用. 
+- **数据查看(用户要的)**: FOV 相机✓宽视角; clean(白桌)→random(杂乱彩色背景)**域差大**=好的泛化测试; **但 beat_block 物体运动小**(GT flow 中位 1-3px, 块几乎不动、臂从画外进) → 信号弱. **张力: 可靠规划的任务(beat_block)恰好低运动; 高运动任务(handover/move)卡 planner.**
+- **跑中**: beat_block 扩到 ~40 clean + 16 random → video-GT → 训 clean → 双测(clean-held + demo_random) gpswm_rtfov.
+
+## §102: 多任务数据 + JEPA 消融(用户 /goal)
+**数据**: 现有 demo_clean 有 **50 任务×50ep=2500**(无需规划器, video_gt 直接读)。生成 rtvid_multi = 40 训练任务 + 10 留出任务 → **200 train / 40 heldseed / 40 heldtask**。代码已推 origin/gpstoken-2dgs(§97-101 + jepa_couple flag)。
+**"够量多任务后 video 学习 work 吗"**: motion-only/JEPA-det 在 heldseed ~0.41-0.45 / heldtask ~0.15-0.24 / **train 仅 ~0.40-0.46**。→ **瓶颈是 video GT 噪声**(连 train 都喂不准), 非数据量(120→200 都 ~0.45)、非过拟合(train≈held)。更多数据救不了, 杠杆在 GT 质量。
+**JEPA 消融(3 方同配置 rtvid_multi)**:
+| | heldseed | heldtask | train |
+|---|---|---|---|
+| motion-only(w_jepa0) | 0.41 | 0.15 | 0.40 |
+| JEPA-detached(当前) | 0.45 | 0.24 | 0.46 |
+| JEPA-coupled(--jepa_couple) | **−0.34** | **−0.30** | **−0.10** |
+**结论**: ① 当前 detached JEPA 对动作预测**≈中性**(与 motion-only 噪声内持平; 按设计 stop-grad 不碰主干)。② **耦合 JEPA(梯度回传主干)→ 动作预测崩(负 dcos)**: "预测未来 latent"与"预测运动"目标冲突, 会带跑主干表征。③ **用户"JEPA 不抢主干(stop-grad)"设计被证实正确** —— JEPA 价值不在帮运动(帮不了), 在于不伤运动地保留未来特征预测能力。
+
+## §103: GT 切换 Pi3+CoTracker → SpaTrackerV2(用户拍板"换了重训", 全量验证)
+**动机**: §102 定位 video 路 ~0.45 天花板 = GT 噪声。用户判断 SpaTracker 对比图更好 → 换 tracker 重做 GT。
+**诊断(为何 Pi3 差)**: 同一 handover clip, Pi3 "100% token 在动"但 2D 流仅 1.5px(没跟住物体, "运动"=深度噪声); SpaTracker 仅 18 mover 但 2D 流 208px(干净抓住真实运动)。
+**Producer `robotwin_spatrack_clip.py`**: SpaTrackerV2 联合 2D+3D 跟踪。`fixed_cam=True`(RoboTwin 静相机→c2w=I 全帧, `robotwin_spt_probe.py` 验证 track3d=相机系)→ 纯物体运动。`traj=unproject(track2d, track3d深度), viewmat=I` → project_to_uv 精确重现 track2d(重投影 0.000px)。格式兼容训练器; batch/shard/resumable。
+**指标坑**: SpaTracker mover 稀疏(2–18/clip); 旧 `--mov_pct` top-% 混静止稀释 v2(0.45)。新增 `--gt_flow_thr`(按 GT 图像流幅度选 mover, 跨 GT 公平)→ 真实 0.83。
+**幅度修复**: 新增 `--mw_cap`(mover 上权重上限, 原硬编码 10)。6 任务 sweep: **w_motion30/mw_cap80** 幅度 0.68→0.90, 方向守 0.93(w8/w15 噪声更差)。
+**全量对照(rtvid_multi 40任务/200train, 同 config, 唯一变量 GT; ckpt `checkpoints/wm_{mv1,mv2}/wm_002000.pt`, eval `--gt_flow_thr 0.05`)**:
+
+| | heldseed Pi3 | heldseed **SpaTracker** | heldtask Pi3 | heldtask SpaTracker |
+|---|---|---|---|---|
+| 图像 dir-cos | 0.51 | **0.82** | −0.07 | 0.24 |
+| 3D dir-cos | 0.75 | **0.85** | 0.39 | 0.19 |
+| mag-ratio | 0.30 | **0.53** | 0.11 | 0.04 |
+
+**结论**: ① **SpaTracker = 正式 GT**: heldseed 全面胜出, 全量验证通过, GT 质量问题解决("GT 干净→模型能学好运动")。② **heldtask(新任务)两 GT 都崩**(方向~0/随机) = 零样本任务泛化是下个硬骨头, **非 GT 问题**(两个都崩)。③ 全量幅度 0.53(< 6 任务 0.90, 多样性更难)可再调, 但方向 0.82 是关键、已达标。 cf. memory [[spatracker-gt-validated]].
+
+## §104: 曲线证伪 + 真机 AgiBot 管线/门控/训练(用户 /goal 两任务并行, 3 个子 agent)
+**任务1 曲线(证伪)**: 用户问 3D 下完整曲线轨迹会否更好。`_traj_curvature.py`: GT 偏离弦 ~30%(垂距 47px/弦 155px)但 quad-frac 0.06 → 偏离=逐帧抖动非平滑弯。`--traj_pred`(逐帧 waypoint head + geom_to_traj)训 `wm_curve`: 方向更差(train 0.78 vs 直线 0.95, held 0.70 vs 0.82)。其幅度 0.04 是 `_gps_imgeval` 曲线分支 eval-bug(与训练日志 0.61 矛盾, 弃用; train-split 复核救了误报)。→ **保持直线**, 真机若要曲线需先平滑去噪。
+**任务2 真机 AgiBot(="AIGC Pro")**: `agibot_spatrack_eval.py`(AV1 解码+双 fixed_cam+门控)发现相机运动**双峰**: fixed_cam=True 仅静相机成立, 弯腰任务(洗衣机/冰箱/抽屉/扫地)动相机→重现 Pi3 误判(全帧箭头, reproj 5-8px)。门控: fixed_cam=False 读 c2w, 平移<2%深度 & mover<50% 才留。用户原则: 删弯腰 task 只用静相机。`agibot_gate/build_split/make_jobs.py` 筛 **301 clip(220train/48heldseed/33heldtask)**, `robotwin_spatrack_clip.py --agibot`。训 `wm_agibot`(2500步, 直线 w30c80):
+
+| `gt_flow_thr 0.05` | train | heldseed | heldtask |
+|---|---|---|---|
+| 图像 dir-cos | 0.69 | 0.27 | 0.42 |
+| mag-ratio | 0.54 | 0.32 | 0.24 |
+
+(对比 sim train 0.95/heldseed 0.82)。`_gps_predviz` 诊断: GT 真实相干、模型方向跑偏, train 才 0.69 = **欠拟合**。真机任务(仓库分拣多物体双臂快)远复杂于 RoboTwin 单物体抓放。
+**结论**: ① 数据层面**真机可用**(静相机门控后 GT 干净); ② **真机运动学习是下个硬骨头**(任务难度+数据规模, 非 GT 问题); ③ 候选: 扩静相机真机数据+加步数; 或从简单真机任务起; 复查快速/形变 GT 噪声。④ 工具: `--mw_cap`(mover 权重上限), `--gt_flow_thr`(公平 mover 阈值)。 cf. [[spatracker-gt-validated]], [[straight-vs-curved-trajectory]].
+**下一方向(讨论中)**: 本世界模型作为 VLA backbone — feature → 400-600M DiT 动作头, 3D-flow 时间间隔 = action chunk, 先 RoboTwin 验证(注意 normalize + 关节角)。

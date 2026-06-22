@@ -129,6 +129,47 @@ class QwenVLEncoder(nn.Module):
         return hidden_all.detach(), valid, text_mask
 
     @torch.no_grad()
+    def forward_batch(self, vlm_list):
+        """BATCHED image+text encode: collate B per-clip processor outputs into ONE padded forward (vs B
+        sequential forwards). RIGHT-pad input_ids (valid tokens at the front), concat pixel_values, stack
+        image_grid_thw. The model's get_rope_index derives M-RoPE position ids from input_ids + grid_thw +
+        attention_mask, so each clip's valid-token hidden states match the single-clip forward (verified).
+        Returns hidden_all [n_l,B,Lmax,H], valid [B,Lmax], text_mask [B,Lmax], input_ids [B,Lmax], thw [B,3]."""
+        p = next(self.model.parameters())
+        dev, dtype = p.device, p.dtype
+        ids_list = [v["input_ids"][0] for v in vlm_list]
+        B = len(vlm_list)
+        Lmax = max(int(x.shape[0]) for x in ids_list)
+        pad_id = self.processor.tokenizer.pad_token_id
+        pad_id = int(pad_id) if pad_id is not None else 0
+        input_ids = torch.full((B, Lmax), pad_id, dtype=ids_list[0].dtype, device=dev)
+        attn = torch.zeros((B, Lmax), dtype=torch.long, device=dev)
+        # Qwen3-VL needs mm_token_type_ids (marks image vs text tokens) for batched M-RoPE; pad with 0 (text).
+        has_mm = "mm_token_type_ids" in vlm_list[0]
+        mm = torch.zeros((B, Lmax), dtype=(vlm_list[0]["mm_token_type_ids"].dtype if has_mm else torch.long),
+                         device=dev) if has_mm else None
+        for i, v in enumerate(vlm_list):
+            ids = v["input_ids"][0]; Li = int(ids.shape[0])
+            input_ids[i, :Li] = ids.to(dev)                          # RIGHT padding
+            attn[i, :Li] = 1
+            if has_mm:
+                mm[i, :Li] = v["mm_token_type_ids"][0].to(dev)
+        pixel_values = torch.cat([v["pixel_values"].to(dev, dtype) for v in vlm_list], 0)
+        image_grid_thw = torch.cat([v["image_grid_thw"].to(dev) for v in vlm_list], 0)   # [B,3]
+        kw = dict(input_ids=input_ids, attention_mask=attn, pixel_values=pixel_values,
+                  image_grid_thw=image_grid_thw, output_hidden_states=True, use_cache=False)
+        if has_mm:
+            kw["mm_token_type_ids"] = mm
+        out = self.model(**kw)
+        hs = out.hidden_states
+        hidden_all = torch.stack(hs[1:1 + self.num_layers], dim=0)    # [n_l, B, Lmax, H]
+        valid = attn.bool()
+        text_mask = valid.clone()
+        for sp in self._special:
+            text_mask &= (input_ids != sp)
+        return hidden_all.detach(), valid, text_mask, input_ids, image_grid_thw
+
+    @torch.no_grad()
     def image_grid_features(self, inputs: dict):
         """Per-control SPATIAL grounding (research_E / agent.md §37): expose the frozen-Qwen
         IMAGE patch tokens of the LAST layer in SPATIAL GRID form so the dynamics can sample a

@@ -33,12 +33,19 @@ class SelfAttention(nn.Module):
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
 
-    def forward(self, x):  # x [B,N,D]
+    def forward(self, x, key_padding_mask=None):  # x [B,N,D]; key_padding_mask [B,N] True=keep
         B, N, D = x.shape
         h = self.n_heads
         qkv = self.qkv(x).reshape(B, N, 3, h, D // h).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]                  # [B,h,N,d]
-        o = F.scaled_dot_product_attention(q, k, v)       # flash when available
+        attn_mask = None
+        if key_padding_mask is not None:
+            # [B,N] keep-mask -> additive [B,1,1,N] over the KEY axis (padded keys masked for every query).
+            # Padded QUERY rows still produce (garbage) outputs but the caller never reads them (masked in
+            # the loss + re-masked before the next block), so we don't need to mask queries.
+            attn_mask = torch.zeros(B, 1, 1, N, device=x.device, dtype=q.dtype)
+            attn_mask = attn_mask.masked_fill(~key_padding_mask[:, None, None, :], float("-inf"))
+        o = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)   # flash when available
         o = o.transpose(1, 2).reshape(B, N, D)
         return self.proj(o)
 
@@ -89,7 +96,8 @@ class DiTBlock(nn.Module):
         nn.init.zeros_(self.ada[-1].weight)
         nn.init.zeros_(self.ada[-1].bias)
 
-    def forward(self, x, c, lang, lang_mask=None):
+    def forward(self, x, c, lang, lang_mask=None, self_mask=None):
+        # self_mask [B,N] True=keep -> masks padded TOKENS out of the token self-attention (batched trunk).
         (sa_sh, sa_sc, sa_g, ca_sh, ca_sc, ca_g, mlp_sh, mlp_sc, mlp_g) = self.ada(c).chunk(9, dim=-1)
         # Bound the AdaLN modulation. The `ada` weights grow unboundedly during training (measured
         # ~3x by s6000), amplifying activations/gradients across 28 layers until LayerNorm's BACKWARD
@@ -99,7 +107,7 @@ class DiTBlock(nn.Module):
         sa_g, mlp_g = torch.tanh(sa_g), torch.tanh(mlp_g)
         # gate is [B,d] (global -> broadcast over N) or [B,N,d] (per-control -> align with x).
         gate = (lambda g: g if g.dim() == x.dim() else g.unsqueeze(1))
-        x = x + gate(sa_g) * self.attn(modulate(self.norm1(x), sa_sh, sa_sc))
+        x = x + gate(sa_g) * self.attn(modulate(self.norm1(x), sa_sh, sa_sc), key_padding_mask=self_mask)
         # Cross-attention to language is ALWAYS-ON (standard residual, NOT AdaLN-Zero-gated).
         # The previous ca_g≈0 gating kept language switched off so it could never carry gradient
         # (the model was provably instruction-insensitive: contrastive loss pinned at the margin).

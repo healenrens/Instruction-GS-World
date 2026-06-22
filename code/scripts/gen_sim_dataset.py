@@ -52,6 +52,23 @@ def build_jobs(tasks, n_seeds, held_task, held_seed_frac, seed_base):
     return jobs
 
 
+def sample_camera(env, seed, held_lo, held_hi):
+    """B: deterministic per-clip camera on a hemisphere around the workspace center [-0.1,0,0.1], all looking
+    at it. Returns (eye, target, az_deg, is_heldcam). is_heldcam = azimuth in the held band = a NOVEL viewpoint
+    the model never trains on (tests view generalization)."""
+    import hashlib
+    h = int(hashlib.md5(f"{env}:{seed}:cam".encode()).hexdigest()[:8], 16)
+    rng = np.random.default_rng(h)
+    target = np.array([-0.1, 0.0, 0.1])
+    az = rng.uniform(0.0, 360.0)                                       # full azimuth (deg)
+    el = rng.uniform(28.0, 62.0)                                       # elevation band (deg)
+    r = rng.uniform(0.55, 0.78)
+    a, e = np.radians(az), np.radians(el)
+    eye = target + r * np.array([np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)])
+    is_held = held_lo <= az <= held_hi
+    return eye.tolist(), target.tolist(), float(az), bool(is_held)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="data/maniskill")
@@ -62,6 +79,10 @@ def main():
     ap.add_argument("--held_seed_frac", type=float, default=0.15, help="fraction of each non-held task's seeds held out")
     ap.add_argument("--K", type=int, default=16)
     ap.add_argument("--cam", type=int, default=512)
+    ap.add_argument("--rand_cam", type=int, default=0,
+                    help="B: per-clip RANDOM camera on a hemisphere around the workspace (deterministic per env+seed). 0=canonical fixed camera")
+    ap.add_argument("--held_cam_lo", type=float, default=140.0, help="azimuth band [lo,hi] deg HELD OUT as novel views (heldcam split) when --rand_cam")
+    ap.add_argument("--held_cam_hi", type=float, default=210.0)
     ap.add_argument("--depth_max", type=float, default=2.0)
     ap.add_argument("--window_sec", type=float, default=0.0,
                     help=">0: each clip spans this many SECONDS of motion from a (random) start; 0=whole episode (legacy)")
@@ -69,6 +90,8 @@ def main():
                     help="sim control Hz (PickCube/PushCube=20) to map window_sec -> sim steps")
     ap.add_argument("--random_start", type=int, default=0,
                     help="1: random clip start within the episode (deterministic per env+seed); needs episodes longer than the window")
+    ap.add_argument("--start_frac", type=float, default=0.0,
+                    help="when random_start=0: anchor the window at this frac of the valid range (e.g. 0.72 = onto the spin phase, AFTER the lift = PURE rotation, no translation)")
     ap.add_argument("--fuse_stride", type=int, default=0,
                     help=">0: WHOLE-VIDEO temporal fusion of the canonical G0 (every Nth frame registered into canonical via known poses) -> complete, low-uncertainty geometry; 0=single-frame G0 (legacy)")
     ap.add_argument("--min_val_psnr", type=float, default=16.0, help="drop clips whose mean(t>=1) full PSNR is below this")
@@ -91,21 +114,29 @@ def main():
 
     n_ok = n_drop = n_skip = n_fail = 0
     t0 = time.time()
-    for ji, (env, seed, split) in enumerate(mine):
-        short = env.replace("-v1", "").lower()
+    for ji, (env_spec, seed, split) in enumerate(mine):
+        env, _, policy = env_spec.partition("@")          # "PickCube-v1@rotate" -> env + rotate policy
+        policy = policy or "auto"
+        cam_eye, cam_tgt, cam_az = (0.3, 0.0, 0.6), (-0.1, 0.0, 0.1), -1.0
+        if args.rand_cam:
+            cam_eye, cam_tgt, cam_az, is_held = sample_camera(env, seed, args.held_cam_lo, args.held_cam_hi)
+            if is_held:
+                split = "heldcam"                         # novel viewpoint -> view-generalization test (B)
+        short = env.replace("-v1", "").lower() + ("rot" if policy == "rotate" else "")
         out = os.path.join(args.out, f"{short}_s{seed:04d}_{split}.pt")
         if os.path.isfile(out) and not args.overwrite:
             n_skip += 1
             continue
         try:
-            rec, instruction, success = generate_episode(env, seed, args.cam, args.cam)
+            rec, instruction, success = generate_episode(env, seed, args.cam, args.cam, policy=policy,
+                                                         cam_eye=cam_eye, cam_target=cam_tgt)
             if not success:
                 print(f"[gen {args.shard}] {env} s{seed}: NO motion -> drop", flush=True)
                 n_drop += 1
                 continue
             sseed = int(hashlib.md5(f"{env}:{seed}:start".encode()).hexdigest()[:8], 16)
             rng = np.random.default_rng(sseed) if args.random_start else None
-            clip = build_clip(rec, args.K, dev, depth_max=args.depth_max,
+            clip = build_clip(rec, args.K, dev, depth_max=args.depth_max, start_frac=args.start_frac,
                               window_steps=window_steps, rng=rng, fuse_stride=args.fuse_stride)
             full, dyn, mover_names = validate(clip, dev, out_dir=None)
             mean_full = float(np.mean(full[1:]))
@@ -131,6 +162,7 @@ def main():
                 "traj": clip["traj"].cpu(), "K_intr": clip["K_intr"].cpu(),
                 "viewmat": clip["viewmat"].cpu(), "H": clip["H"], "W": clip["W"], "Kf": clip["Kf"],
                 "instruction": instruction, "env": env, "seed": seed, "split": split,
+                "cam_eye": list(cam_eye), "cam_az": cam_az,
                 "val_psnr": full, "movefrac": movefrac,
                 "window_sec": args.window_sec, "start_idx": clip.get("start"),
                 "n_sim": clip.get("n_sim"), "win_steps": clip.get("win"),

@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from igsw.data.sim_clips import SimClipDataset, sim_collate  # noqa: E402
 from igsw.gaussians import GaussianSet, render_gaussianset, psnr  # noqa: E402
+from igsw.gaussians.gpstoken import gpstoken_ctrl_idx, mover_saliency  # noqa: E402  (§93 keypoint selection)
 from igsw.dynamics.model import DynamicsConfig  # noqa: E402
 from igsw.model_full import InstructGSWorldModel  # noqa: E402
 from igsw.training import photometric_loss, delta_reg, velocity_smoothness  # noqa: E402
@@ -177,6 +178,12 @@ def main():
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--prefetch", type=int, default=2)
     ap.add_argument("--mover_thresh", type=float, default=0.01)
+    # §93 GPSToken keypoint selection: replace RANDOM sample_controls with entropy-partition (+motion
+    # saliency) control placement -> nearest-dense ctrl_idx. Per-control translation field UNTOUCHED.
+    ap.add_argument("--use_gpstoken", type=int, default=0,
+                    help="§93: pick controls by GPSToken entropy-partition (vs mover-biased random).")
+    ap.add_argument("--gps_motion_beta", type=float, default=0.0,
+                    help="§93: motion-saliency boost (0=pure texture entropy; >0=GT-mover-weighted, e.g. 30).")
     ap.add_argument("--log_every", type=int, default=20)
     ap.add_argument("--ckpt_every", type=int, default=500)
     ap.add_argument("--resume", default="")
@@ -322,7 +329,15 @@ def main():
                 # §54: exclude the hole-FILL Gaussians (the last n_fill — last-frame mask ids whose uv reads
                 # the occluder's patch) from control sampling. Fill is contiguous at the END of g0.
                 n_keep = N - int(clip.get("n_fill", 0))
-                ctrl_idx = sample_controls(g0.means[:n_keep], disp_all[:n_keep], args.M, gen, args.mover_thresh)
+                if args.use_gpstoken:
+                    # §93: entropy-partition (+GT-mover saliency) control placement -> nearest-dense idx.
+                    rgb0 = (gt_rgb[0].clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()   # [H,W,3]
+                    sal = (mover_saliency(uv, disp_all, n_keep, H, W, args.mover_thresh)
+                           if args.gps_motion_beta > 0 else None)
+                    ctrl_idx = gpstoken_ctrl_idx(rgb0, uv, n_keep, args.M, dev,
+                                                 sal=sal, beta=args.gps_motion_beta)
+                else:
+                    ctrl_idx = sample_controls(g0.means[:n_keep], disp_all[:n_keep], args.M, gen, args.mover_thresh)
                 M = ctrl_idx.numel()
                 control_uv = uv[ctrl_idx]                           # [M,2]
                 gt_pos = traj_full[:, ctrl_idx, :]                  # [K+1,M,3]

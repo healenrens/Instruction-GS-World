@@ -360,21 +360,67 @@ def _script_push(env, rec):
             rec.step(_ee_action(env, tp, CLOSE, gain=5.0))
 
 
-def generate_episode(env_id: str, seed: int, cam_w: int, cam_h: int, max_retries: int = 8):
+def _quat_angle(qa, qb):
+    """Angle (rad) of the relative rotation between two wxyz quaternions."""
+    qa = np.asarray(qa) / (np.linalg.norm(qa) + 1e-9)
+    qb = np.asarray(qb) / (np.linalg.norm(qb) + 1e-9)
+    return float(2.0 * np.arccos(min(1.0, abs(float(np.dot(qa, qb))))))
+
+
+def _script_rotate(env, rec, spin_steps: int = 64, drz: float = 0.9, rng=None):
+    """Track B (rotation-rich data): grasp the cube CENTRALLY, lift, then SPIN the wrist in place.
+    The rigidly-grasped cube rotates about ~its own centroid. When `rng` is given, the spin DIRECTION
+    (cw/ccw) and MAGNITUDE are RANDOMIZED per episode => VARIED rotation (angle ~40-150deg, both
+    signs) instead of a constant ~120deg. This kills the constant-rotation confound (the model must
+    express the rotation through the per-token field, not memorize one fixed angle)."""
+    if rng is not None:
+        spin_steps = int(rng.integers(30, 73))
+        drz = float(rng.choice([-1.0, 1.0]) * rng.uniform(0.7, 1.0))
+    u = env.unwrapped
+    OPEN, CLOSE = 1.0, -1.0
+    target = u.cube if hasattr(u, "cube") else u.cubeA
+
+    def cube_p():
+        return target.pose.p[0].cpu().numpy()
+
+    for _ in range(14):                                              # hover above the cube (open)
+        rec.step(_ee_action(env, cube_p() + np.array([0, 0, 0.06]), OPEN))
+    for _ in range(10):                                              # descend onto it
+        rec.step(_ee_action(env, cube_p() + np.array([0, 0, 0.005]), OPEN, gain=6.0))
+    for _ in range(6):                                               # grasp
+        rec.step(_ee_action(env, cube_p() + np.array([0, 0, 0.005]), CLOSE, gain=4.0))
+    for _ in range(8):                                               # minimal lift to just clear the table
+        rec.step(_ee_action(env, cube_p() + np.array([0, 0, 0.05]), CLOSE, gain=6.0))
+    hold = cube_p()                                                  # hold this position while spinning
+    for _ in range(spin_steps):                                      # spin the wrist (yaw) -> cube rotates
+        rec.step(_ee_action(env, hold, CLOSE, gain=5.0, target_q_delta=[0.0, 0.0, drz]))
+
+
+def generate_episode(env_id: str, seed: int, cam_w: int, cam_h: int, max_retries: int = 8,
+                     policy: str = "auto", cam_eye=(0.3, 0.0, 0.6), cam_target=(-0.1, 0.0, 0.1)):
     """Drive the manipulation with a deterministic SCRIPTED end-effector policy (pd_ee_delta_pose;
     avoids mplib which segfaults in this headless container) while capturing obs every step.
-    Returns (recorder, instruction, success). Success here means 'the object moved a lot'."""
+    Returns (recorder, instruction, success). Success here means 'the object moved a lot'.
+    cam_eye/cam_target set the base_camera pose (defaults = canonical trans_v1 camera)."""
     import gymnasium as gym
     import mani_skill.envs  # noqa: F401 (registers envs)
+    from mani_skill.utils.sapien_utils import look_at
 
+    # FORCE one explicit camera on EVERY env (defaults = canonical trans_v1 camera). Different ManiSkill
+    # envs ship different default base_camera poses (e.g. PullCube-v1 sits on the OPPOSITE side,
+    # campos [-0.5,0,0.25] vs canonical [0.3,0,0.6]) -> same world motion projects to a FLIPPED image flow
+    # -> poisons image-space training (agent.md §97). For B (--cam_cond) cam_eye is varied per clip.
+    cam_pose = look_at(list(cam_eye), list(cam_target))
     base = gym.make(
         env_id, obs_mode="rgb+depth+segmentation", control_mode="pd_ee_delta_pose",
         render_mode="rgb_array", sim_backend="cpu", num_envs=1,
-        sensor_configs=dict(width=cam_w, height=cam_h),
+        sensor_configs=dict(width=cam_w, height=cam_h, pose=cam_pose),
     )
     doc = (type(base.unwrapped).__doc__ or "").strip().split("\n")
     doc = " ".join(l.strip() for l in doc if l.strip() and not l.strip().startswith("**"))[:200]
     instruction = INSTRUCTIONS.get(env_id, doc or env_id)
+    if policy in ("rotate", "rotateconst"):
+        instruction = "Pick up the red cube and rotate it in place."
     rec = _ObsRecorder(base)
 
     s = seed
@@ -384,19 +430,23 @@ def generate_episode(env_id: str, seed: int, cam_w: int, cam_h: int, max_retries
         try:
             obj = _manip_object(u)
             cube0 = obj.pose.p[0].cpu().numpy().copy()
+            cube0_q = obj.pose.q[0].cpu().numpy().copy()
         except AttributeError:
-            obj, cube0 = None, None
-        if env_id in ("PushCube-v1", "PullCube-v1"):
+            obj, cube0, cube0_q = None, None, None
+        if policy in ("rotate", "rotateconst"):
+            _script_rotate(base, rec, rng=(None if policy == "rotateconst" else np.random.default_rng(s)))
+        elif env_id in ("PushCube-v1", "PullCube-v1"):
             _script_push(base, rec)
         else:
             _script_pick(base, rec)
-        # 'meaningful motion' check: the manipulated object moved appreciably
-        moved = 0.0
+        # 'meaningful motion' check: translation for carry/push; ROTATION angle for the rotate policy.
+        moved, rot = 0.0, 0.0
         if obj is not None and cube0 is not None:
             moved = float(np.linalg.norm(obj.pose.p[0].cpu().numpy() - cube0))
-        ok = moved > 0.04 and len(rec.frames) > 4
-        print(f"  episode seed={s}: cube moved {moved:.3f} m over {len(rec.frames)} frames "
-              f"({'OK' if ok else 'retry'})", flush=True)
+            rot = _quat_angle(cube0_q, obj.pose.q[0].cpu().numpy())
+        ok = (rot > 0.5 if policy in ("rotate", "rotateconst") else moved > 0.04) and len(rec.frames) > 4
+        print(f"  episode seed={s}: cube moved {moved:.3f} m / rot {np.degrees(rot):.0f}deg over "
+              f"{len(rec.frames)} frames ({'OK' if ok else 'retry'})", flush=True)
         if ok:
             return rec, instruction, True
         s += 1
@@ -643,6 +693,8 @@ def validate(clip: dict, device: str, out_dir: str | None = None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--env", default="PickCube-v1")
+    ap.add_argument("--policy", default="auto", choices=["auto", "rotate"],
+                    help="rotate = grasp-then-spin-in-place (Track B rotation-rich data)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--K", type=int, default=16)
     ap.add_argument("--cam", type=int, default=512, help="square camera resolution")
@@ -656,7 +708,7 @@ def main():
     dev = args.device if torch.cuda.is_available() else "cpu"
     print(f"[maniskill_gt] env={args.env} seed={args.seed} K={args.K} cam={args.cam} dev={dev}", flush=True)
 
-    rec, instruction, success = generate_episode(args.env, args.seed, args.cam, args.cam)
+    rec, instruction, success = generate_episode(args.env, args.seed, args.cam, args.cam, policy=args.policy)
     print(f"[maniskill_gt] instruction: {instruction!r}", flush=True)
     clip = build_clip(rec, args.K, dev, depth_max=args.depth_max, start_frac=args.start_frac)
     print(f"[maniskill_gt] dense gaussians N={len(clip['g0'])}  Kf={clip['Kf']}  "
