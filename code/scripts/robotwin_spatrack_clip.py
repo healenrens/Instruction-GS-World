@@ -98,6 +98,12 @@ def process_one(frames, instruction, vggt, model, args, out):
     gt_rgb = torch.from_numpy(np.stack([
         np.asarray(Image.fromarray(frames[i]).resize((W, H))) for i in range(T)]).astype(np.uint8))
 
+    disp = np.linalg.norm(traj[Kf] - traj[0], axis=1)
+    n_mov = int((disp > 0.01).sum())
+    if getattr(args, "min_movers", 0) and n_mov < args.min_movers:        # drop near-static windows (no visual flow)
+        print(f"[spt-clip] DROP-static {os.path.basename(out)} movers={n_mov} < {args.min_movers}", flush=True)
+        del out_t, track3d, track2d, vis; torch.cuda.empty_cache()
+        return
     traj_t = torch.from_numpy(traj)
     clip = {
         "means": traj_t[0].clone(), "uv": torch.from_numpy(uv).float(), "traj": traj_t.float(),
@@ -108,9 +114,8 @@ def process_one(frames, instruction, vggt, model, args, out):
     }
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     torch.save(clip, out)
-    disp = np.linalg.norm(traj[Kf] - traj[0], axis=1)
     print(f"[spt-clip] {os.path.basename(out)} N={N} Kf={Kf} {W}x{H} f={fx:.0f} "
-          f"med_disp={np.median(disp):.3f} max={disp.max():.3f} movers(>.01)={(disp>0.01).sum()} "
+          f"med_disp={np.median(disp):.3f} max={disp.max():.3f} movers(>.01)={n_mov} "
           f"vis_frac={visf.mean():.2f} z[{z.min():.2f},{z.max():.2f}]", flush=True)
     del out_t, track3d, track2d, vis; torch.cuda.empty_cache()
 
@@ -122,6 +127,7 @@ def main():
     ap.add_argument("--instruction", default="")
     ap.add_argument("--grid", type=int, default=48, help="frame-0 grid side -> grid^2 candidate tokens")
     ap.add_argument("--vis_keep", type=float, default=0.3, help="keep tracks visible in >= this frame-fraction")
+    ap.add_argument("--min_movers", type=int, default=0, help="drop (don't write) clips with fewer than this many movers(>.01) -> skip near-static windows")
     ap.add_argument("--iters_track", type=int, default=4)
     ap.add_argument("--agibot_jobs", help="JSON list of [task,episode,out_name] -> batch AgiBot GT")
     ap.add_argument("--agibot_task"); ap.add_argument("--agibot_episode", type=int)

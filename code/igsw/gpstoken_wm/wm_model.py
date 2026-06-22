@@ -138,10 +138,15 @@ class GPSTokenWM(nn.Module):
 
     # ---------------- predictor ----------------
     def predict(self, tok_xyz0, tok_feat_fdim, tok_sigma, center, radius,
-                ctx_per_block, ctx_mask, cond_global, cam_tok=None):
+                ctx_per_block, ctx_mask, cond_global, cam_tok=None, return_layers=False):
         """tokens (frame0) -> per-token hidden x [1,M,d]. tok_feat_fdim [M,fdim] = self.feat_in(grid feat),
         computed ONCE by the caller and reused for SIGReg/relevance/JEPA-target.
-        cam_tok [M,d] (--cam_cond): per-token camera-frame geometry, zero at warm-start."""
+        cam_tok [M,d] (--cam_cond): per-token camera-frame geometry, zero at warm-start.
+
+        return_layers (VLA action expert): also return a list of the PER-LAYER per-token features
+        [1,M,d] (the INPUT to each DiTBlock j, i.e. the residual stream entering block j) so the action
+        expert can KV-cache cross-attend to the trunk at each layer. Default False => behaviour is
+        byte-for-byte unchanged for the existing world-model trainer."""
         norm_xyz = (tok_xyz0 - center) / radius
         pe = self.pe(norm_xyz[None])[0]                                       # [M, pe_out]
         # fp32 cat (pe/sigma are fp32, feat is bf16 under autocast) -> tok_embed Linear re-casts
@@ -149,9 +154,15 @@ class GPSTokenWM(nn.Module):
         x = self.tok_embed(x)
         if cam_tok is not None:
             x = x + cam_tok[None]                                             # inject per-token camera geometry
+        layers = [] if return_layers else None
         for j, blk in enumerate(self.blocks):
+            if return_layers:
+                layers.append(x)                                             # residual stream ENTERING block j
             x = blk(x, cond_global, ctx_per_block[:, j], ctx_mask)
-        return self.final_norm(x)                                            # [1,M,d]
+        out = self.final_norm(x)                                             # [1,M,d]
+        if return_layers:
+            return out, layers
+        return out
 
     def cam_cond_signals(self, tok_xyz0, center, radius, K_intr, viewmat):
         """--cam_cond: encode the camera pose into (cam_global [1,d] added to cond, cam_tok [M,d] added to
@@ -229,7 +240,15 @@ class GPSTokenWM(nn.Module):
 
     def forward(self, b: dict):
         """One training step (DDP-safe single entrypoint). b carries the prepared per-clip tensors +
-        vlm_inputs. Returns (loss, logs) — loss has grad through all trainable params; logs detached."""
+        vlm_inputs. Returns (loss, logs) — loss has grad through all trainable params; logs detached.
+
+        FSDP dispatch: when self._fsdp_vla is set (the VLA trainer wraps this module in FSDP), forward()
+        routes to forward_vla_batch so the ROOT FSDP unit's pre/post-forward hooks fire (they restore the
+        flat-param's 2-D orig-param views + run the grad reduce-scatter). Calling forward_vla_batch
+        directly on the inner module would BYPASS the root hooks -> the root's nn.Linear weights stay 1-D
+        flat -> 'mat2 must be a matrix'. The world-model path (flag unset) is byte-for-byte unchanged."""
+        if getattr(self, "_fsdp_vla", False):
+            return self.forward_vla_batch(b)
         import torch.nn.functional as F
         ctx, ctxm, cond, text_feats = self.encode_cond(b["vlm0"])
         if getattr(self, "cond_scale", False):                                # supply the (oracle) global scale
@@ -391,6 +410,322 @@ class GPSTokenWM(nn.Module):
                 "skill": (err_static - err_pred).detach(), "errp": err_pred.detach(),
                 "dcos": dcos.detach(), "relsel": relsel.detach(), "fstd": tok_feat.float().std().detach()}
         return loss, logs
+
+    # ---------------- VLA: action expert (π0-style flow-matching) ----------------
+    def attach_action_expert(self, action_dim=14, action_steps=50, d_act=704, n_heads_act=11,
+                             mlp_ratio=4.0, norm_stats_path=None, n_state_tokens=1):
+        """Add the flow-matching action expert that shares this trunk. n_layers = the trunk's block count
+        so each expert layer KV-cache cross-attends to the matching trunk layer + matching VLM ctx layer.
+        trunk_dim / vlm_dim are BOTH self.d (the trunk hidden = the per-layer VLM ctx projection dim).
+        The expert also cross-attends to a PROPRIOCEPTION state (current qpos = anchor) via n_state_tokens
+        condition tokens (state cross-attn), with the flow-matching loss only on the 50 action tokens."""
+        from .action_expert import ActionExpert, ActionNormalizer
+        n_l = len(self.blocks)
+        self.action_expert = ActionExpert(
+            n_layers=n_l, action_dim=action_dim, action_steps=action_steps, d=d_act,
+            n_heads=n_heads_act, trunk_dim=self.d, vlm_dim=self.d, mlp_ratio=mlp_ratio,
+            n_state_tokens=n_state_tokens)
+        if norm_stats_path is not None:
+            self.act_norm = ActionNormalizer.from_stats_file(norm_stats_path, dim=action_dim)
+        else:
+            self.act_norm = ActionNormalizer(torch.zeros(action_dim), torch.ones(action_dim), dim=action_dim)
+        self.w_flow_vla, self.w_act_vla = 1.0, 1.0
+        return self.action_expert
+
+    def _trunk_features(self, b):
+        """Run conditioning + trunk ONCE, returning (xyz1_pred, feat_pred-or-None, l_geom-context tensors,
+        trunk_layers list[n_l] [1,M,d], vlm_ctx list[n_l] [1,Q,d], ctx_mask). Mirrors forward()'s trunk
+        path but exposes the per-layer features for the action expert. JEPA is OFF (VLA spec)."""
+        ctx, ctxm, cond, text_feats = self.encode_cond(b["vlm0"])
+        grid0, ghw0 = (self.dino.grid(b["rgb0_np"]) if self.dino is not None
+                       else self.encoder.image_grid_features(b["vlm0"]))
+        tok_feat = self.feat_in(sample_grid_feat(grid0, ghw0, b["cen"], b["H"], b["W"])).float()
+        cam_tok = None
+        if getattr(self, "cam_cond", False):
+            cg, cam_tok = self.cam_cond_signals(b["tok_xyz0"].float(), b["center"], b["radius"],
+                                                b["K_intr"].float(), b["viewmat"].float())
+            cond = cond + cg
+        x, layers = self.predict(b["tok_xyz0"], tok_feat, b["sig_n"], b["center"], b["radius"],
+                                 ctx, ctxm, cond, cam_tok=cam_tok, return_layers=True)
+        # per-layer VLM ctx = ctx[:, j] for j=0..n_l-1 (the same aggregated context each DiTBlock sees)
+        vlm_ctx = [ctx[:, j] for j in range(ctx.shape[1])]
+        return x, tok_feat, layers, vlm_ctx, ctxm
+
+    # ---------------- BATCHED VLA (real batching: B clips/forward, padded to L tokens) ----------------
+    def _grid_from_hidden(self, hidden_last, vlm_inputs):
+        """Extract the last-layer image-token grid [gh,gw,H] from a forward's last hidden state. This is
+        EXACTLY what encoder.image_grid_features computes, but reusing encode_cond's forward (hidden_all[-1]
+        == hs[num_layers]) instead of running a SECOND full Qwen forward. Returns (grid, (gh,gw)) or (None,None)."""
+        if "image_grid_thw" not in vlm_inputs or "pixel_values" not in vlm_inputs:
+            return (None, None)
+        ids = vlm_inputs["input_ids"][0]
+        image_pos = (ids == self.encoder.image_token_id)
+        if not bool(image_pos.any()):
+            return (None, None)
+        img_tokens = hidden_last[image_pos].float()                      # [n_img, H] contiguous, row-major
+        t, h, w = [int(x) for x in vlm_inputs["image_grid_thw"][0].tolist()]
+        gh, gw = h // self.encoder.merge, w // self.encoder.merge
+        if t * gh * gw != img_tokens.shape[0]:
+            return (None, None)
+        return (img_tokens.reshape(t, gh, gw, -1)[0].contiguous(), (gh, gw))
+
+    def _encode_cond_one(self, vlm_inputs):
+        """ONE frozen Qwen forward -> BOTH (a) the per-block aggregated conditioning AND (b) the last-layer
+        image grid. Replaces encode_cond + a separate image_grid_features (which would be a 2nd forward).
+        Returns ctx_per_block [1,n_l,Q,d], ctx_mask [1,Q], cond_global [1,d], (grid[gh,gw,H], (gh,gw))."""
+        enc = self.encoder(vlm_inputs)
+        hidden_all, valid_mask, text_mask = enc if len(enc) == 3 else (enc[0], enc[1], enc[1])
+        n_l = hidden_all.shape[0]
+        ctx_full = torch.stack([self.layer_proj[j](hidden_all[j].float()) for j in range(n_l)], 0)
+        tw = text_mask.float()[:, None]
+        pooled = (hidden_all[-1].float() * tw).sum(0) / tw.sum().clamp_min(1e-6)
+        cond_global = self.cond_proj(pooled)[None]
+        agg = []
+        for j in range(n_l):
+            q = (self.query + self.layer_id_emb[j])[None]
+            a = self.aggregator(q, ctx_full[j][None], valid_mask[None])[0]
+            agg.append(self.agg_norm(a))
+        ctx_per_block = torch.stack(agg, 0)[None]                        # [1,n_l,Q,d]
+        ctx_mask = torch.ones(1, self.n_query, dtype=torch.bool, device=hidden_all.device)
+        grid = self._grid_from_hidden(hidden_all[-1], vlm_inputs)
+        return ctx_per_block, ctx_mask, cond_global, grid
+
+    def encode_cond_batch_seq(self, vlm_list):
+        """Reference: per-clip loop (B sequential forwards). Kept for the batched==per-clip verification."""
+        ctxs, conds, grids = [], [], []
+        for vlm in vlm_list:
+            ctx, ctxm, cond, grid = self._encode_cond_one(vlm)
+            ctxs.append(ctx); conds.append(cond); grids.append(grid)
+        ctx = torch.cat(ctxs, 0); cond = torch.cat(conds, 0)
+        ctx_mask = torch.ones(ctx.shape[0], self.n_query, dtype=torch.bool, device=ctx.device)
+        return ctx, ctx_mask, cond, grids
+
+    def _grid_from_row(self, hidden_last_row, ids_row, thw_row):
+        """Grid from ONE row of a batched forward's last hidden state (padding excluded via image_token_id)."""
+        image_pos = (ids_row == self.encoder.image_token_id)
+        if not bool(image_pos.any()):
+            return (None, None)
+        img_tokens = hidden_last_row[image_pos].float()
+        t, h, w = [int(x) for x in thw_row.tolist()]
+        gh, gw = h // self.encoder.merge, w // self.encoder.merge
+        if t * gh * gw != img_tokens.shape[0]:
+            return (None, None)
+        return (img_tokens.reshape(t, gh, gw, -1)[0].contiguous(), (gh, gw))
+
+    def encode_cond_batch(self, vlm_list):
+        """ONE BATCHED frozen forward -> per-block aggregated context + per-clip image grid (replaces the
+        B sequential forwards; ~8x fewer launches). Returns ctx [B,n_l,Q,d], ctx_mask [B,Q], cond [B,d],
+        grids list[B] of (grid[gh,gw,H], (gh,gw))."""
+        hidden_all, valid, text_mask, input_ids, thw = self.encoder.forward_batch(vlm_list)   # [n_l,B,Lmax,H]
+        n_l, B = hidden_all.shape[0], hidden_all.shape[1]
+        ctx_full = torch.stack([self.layer_proj[j](hidden_all[j].float()) for j in range(n_l)], 0)  # [n_l,B,Lmax,d]
+        tw = text_mask.float()[..., None]                                # [B,Lmax,1]
+        pooled = (hidden_all[-1].float() * tw).sum(1) / tw.sum(1).clamp_min(1e-6)    # [B,H]
+        cond_global = self.cond_proj(pooled)                             # [B,d]
+        agg = []
+        for j in range(n_l):
+            q = self.query[None].expand(B, -1, -1) + self.layer_id_emb[j][None, None]    # [B,Q,d]
+            a = self.aggregator(q, ctx_full[j], valid)                   # [B,Q,d]; padded keys masked
+            agg.append(self.agg_norm(a))
+        ctx = torch.stack(agg, 1)                                        # [B,n_l,Q,d]
+        ctx_mask = torch.ones(B, self.n_query, dtype=torch.bool, device=hidden_all.device)
+        grids = [self._grid_from_row(hidden_all[-1, i], input_ids[i], thw[i]) for i in range(B)]
+        return ctx, ctx_mask, cond_global, grids
+
+    def predict_batch(self, tok_xyz0, tok_feat_fdim, tok_sigma, center, radius,
+                      ctx_per_block, ctx_mask, cond_global, tok_mask, cam_tok=None):
+        """Batched trunk. Shapes carry a leading B and a padded token axis L:
+          tok_xyz0 [B,L,3], tok_feat_fdim [B,L,fdim], tok_sigma [B,L,2], center [B,1,3], radius [B,1],
+          ctx_per_block [B,n_l,Q,d], ctx_mask [B,Q], cond_global [B,d], tok_mask [B,L] (True=real token).
+        Returns out [B,L,d] (final-norm) and layers list[n_l] of [B,L,d] (residual stream entering block j)."""
+        norm_xyz = (tok_xyz0 - center) / radius[..., None]               # [B,L,3]
+        pe = self.pe(norm_xyz)                                            # [B,L,pe_out]
+        x = torch.cat([pe.float(), tok_feat_fdim.float(), tok_sigma.float()], dim=-1)
+        x = self.tok_embed(x)                                            # [B,L,d]
+        if cam_tok is not None:
+            x = x + cam_tok
+        layers = []
+        for j, blk in enumerate(self.blocks):
+            layers.append(x)                                             # residual stream ENTERING block j
+            x = blk(x, cond_global, ctx_per_block[:, j], ctx_mask, self_mask=tok_mask)
+        return self.final_norm(x), layers
+
+    def _trunk_features_batch(self, b):
+        """Batched mirror of _trunk_features. b carries padded/stacked tensors (see train_vla.build_batch_padded):
+          vlm_list (len B), tok_xyz0 [B,L,3], cen [B,L,2], sig_n [B,L,2], center [B,1,3], radius [B,1],
+          tok_mask [B,L], grid0 list[B] (gh,gw,H) + ghw list, H_list/W_list.
+        Returns x [B,L,d], tok_feat [B,L,fdim], layers list[n_l], vlm_ctx list[n_l] [B,Q,d], ctxm [B,Q]."""
+        ctx, ctxm, cond, grids = self.encode_cond_batch(b["vlm_list"])
+        B, L = b["tok_xyz0"].shape[0], b["tok_xyz0"].shape[1]
+        # per-token frozen visual feature: sample each clip's own grid. The grid now comes from
+        # encode_cond_batch's SAME forward (no separate image_grid_features 2nd forward).
+        feats = []
+        for i in range(B):
+            grid0, ghw0 = grids[i]
+            fi = self.feat_in(sample_grid_feat(grid0, ghw0, b["cen"][i], b["H_list"][i], b["W_list"][i]))  # [L,fdim]
+            feats.append(fi)
+        tok_feat = torch.stack(feats, 0).float()                         # [B,L,fdim]
+        cam_tok = None
+        if getattr(self, "cam_cond", False):
+            cts = []
+            for i in range(B):
+                cg, ct = self.cam_cond_signals(b["tok_xyz0"][i].float(), b["center"][i], b["radius"][i, 0],
+                                               b["K_intr"][i].float(), b["viewmat"][i].float())
+                cond[i:i + 1] = cond[i:i + 1] + cg
+                cts.append(ct)
+            cam_tok = torch.stack(cts, 0)
+        x, layers = self.predict_batch(b["tok_xyz0"], tok_feat, b["sig_n"], b["center"], b["radius"],
+                                       ctx, ctxm, cond, b["tok_mask"], cam_tok=cam_tok)
+        vlm_ctx = [ctx[:, j] for j in range(ctx.shape[1])]
+        return x, tok_feat, layers, vlm_ctx, ctxm
+
+    def _flow_geom_loss_batch(self, b, xyz1_pred, tok_mask):
+        """Batched 3D-flow (img_loss) loss: per-clip projection (K/viewmat differ) but masked-meaned over
+        the batch. Returns (l_geom, fp, fg, mv) where fp/fg are padded [B,L,2] image-flow for dcos logs."""
+        B, L = tok_mask.shape
+        fp = xyz1_pred.new_zeros(B, L, 2); fg = xyz1_pred.new_zeros(B, L, 2)
+        l_img_sum = xyz1_pred.new_zeros(()); l_dep_sum = xyz1_pred.new_zeros(()); nval = 0.0
+        for i in range(B):
+            m = tok_mask[i]                                              # [L]
+            K_ = b["K_intr"][i].float(); vm_ = b["viewmat"][i].float()
+            Wn = xyz1_pred.new_tensor([float(b["W_list"][i]), float(b["H_list"][i])])
+            x0i = b["tok_xyz0"][i].float(); xpi = xyz1_pred[i].float(); xgi = b["xyz1_gt"][i].float()
+            uv0 = project_to_uv(x0i, K_, vm_); z0 = to_cam(x0i, vm_)[:, 2].clamp_min(1e-3)
+            uv1p = project_to_uv(xpi, K_, vm_); uv1g = project_to_uv(xgi, K_, vm_)
+            fpi = (uv1p - uv0) / Wn; fgi = (uv1g - uv0) / Wn
+            fp[i] = fpi; fg[i] = fgi
+            per = F.smooth_l1_loss(fpi, fgi, beta=0.02, reduction="none").mean(-1)        # [L]
+            ldp = torch.log(to_cam(xpi, vm_)[:, 2].clamp_min(1e-3) / z0)
+            ldg = torch.log(to_cam(xgi, vm_)[:, 2].clamp_min(1e-3) / z0)
+            perz = F.smooth_l1_loss(ldp, ldg, beta=0.05, reduction="none")               # [L]
+            mf = m.float(); denom = mf.sum().clamp_min(1.0)
+            l_img_sum = l_img_sum + (per * mf).sum() / denom
+            l_dep_sum = l_dep_sum + (perz * mf).sum() / denom
+            nval += 1.0
+        l_geom = (l_img_sum + getattr(self, "w_depth", 0.5) * l_dep_sum) / max(nval, 1.0)
+        mv = (b["disp_tok"] > 0.01) & tok_mask
+        return l_geom, fp, fg, mv
+
+    def forward_vla_batch(self, b: dict):
+        """REAL-BATCHED JOINT VLA step. b carries B clips padded to L tokens (build_batch_padded).
+        Identical objective to forward_vla, computed over the whole batch in one trunk + one expert pass."""
+        x, tok_feat, layers, vlm_ctx, ctxm = self._trunk_features_batch(b)
+        tok_mask = b["tok_mask"]
+        # ----- 3D-flow head (geom_mode=xyz; img_loss path) -----
+        g = self.geom_head(x).float()                                    # [B,L,3]
+        xyz1_pred = b["tok_xyz0"].float() + g if self.geom_mode == "xyz" else None
+        if xyz1_pred is None:                                            # flowd: per-clip geom_to_xyz
+            xyz1_pred = torch.stack([self.geom_to_xyz(g[i], b["tok_xyz0"][i].float(),
+                                     b["K_intr"][i].float(), b["viewmat"][i].float()) for i in range(g.shape[0])], 0)
+        if getattr(self, "img_loss", False):
+            l_geom, fp, fg, mv = self._flow_geom_loss_batch(b, xyz1_pred, tok_mask)
+        else:
+            # masked smooth-L1 on raw 3D position
+            per = F.smooth_l1_loss(xyz1_pred.float(), b["xyz1_gt"].float(), beta=0.01, reduction="none").mean(-1)
+            mf = tok_mask.float(); l_geom = (per * mf).sum() / mf.sum().clamp_min(1.0)
+            fp = fg = None; mv = (b["disp_tok"] > 0.01) & tok_mask
+        # ----- action expert (flow-matching) with PROPRIOCEPTION state cross-attn -----
+        x1 = self.act_norm.normalize(b["dq"].float())                    # [B,A,14] normalized target
+        state_kv = self.action_expert.embed_state(b["anchor"].float())   # [B,Ns,d]
+        l_flow, flogs = self.action_expert.flow_loss(x1, layers, vlm_ctx, state_kv,
+                                                     trunk_mask=tok_mask, vlm_mask=ctxm)
+        loss = self.w_flow_vla * l_geom + self.w_act_vla * l_flow
+        if getattr(self, "_ddp_touch", False):   # zero-weight touch so EVERY trainable param participates ->
+            loss = loss + 0.0 * sum(p.float().sum()  # DDP find_unused_parameters=False stays correct (unused
+                                    for p in self.parameters() if p.requires_grad)  # heads: content/jepa/rel/cam)
+        with torch.no_grad():
+            err_pred = ((xyz1_pred - b["xyz1_gt"]).norm(dim=-1) * tok_mask.float()).sum() / tok_mask.float().sum().clamp_min(1.0)
+            if getattr(self, "img_loss", False) and mv.any():
+                dcos = F.cosine_similarity(fp[mv], fg[mv], dim=-1).mean()
+            elif mv.any():
+                dpred = (xyz1_pred - b["tok_xyz0"]); dgt = (b["xyz1_gt"] - b["tok_xyz0"])
+                dcos = F.cosine_similarity(dpred[mv], dgt[mv], dim=-1).mean()
+            else:
+                dcos = torch.zeros((), device=x.device)
+        logs = {"loss": loss.detach(), "geom": l_geom.detach(), "flow": l_flow.detach(),
+                "v_norm": flogs["v_norm"], "errp": err_pred.detach(), "dcos": dcos.detach()}
+        return loss, logs
+
+    @torch.no_grad()
+    def predict_action_batch(self, b: dict, n_steps=10):
+        """Batched inference: trunk + expert ODE -> raw Δqpos [B,A,14] (denormalized)."""
+        x, tok_feat, layers, vlm_ctx, ctxm = self._trunk_features_batch(b)
+        state_kv = self.action_expert.embed_state(b["anchor"].float())
+        z = self.action_expert.sample(layers, vlm_ctx, state_kv, trunk_mask=b["tok_mask"], vlm_mask=ctxm,
+                                      n_steps=n_steps, device=x.device, dtype=torch.float32)
+        return self.act_norm.denormalize(z)                             # [B,A,14] raw
+
+    def forward_vla(self, b: dict):
+        """JOINT VLA training step: shared trunk -> (3D-flow head, img_loss) + (action expert, flow-matching).
+        Both losses backprop the trunk. NO JEPA. b carries the world-model clip tensors PLUS:
+            dq [A,14] raw Δqpos action chunk (the action target).
+        gt_rgb[0]-only is the caller's responsibility (it builds vlm0 from frame0 only)."""
+        x, tok_feat, layers, vlm_ctx, ctxm = self._trunk_features(b)
+        # ----- 3D-flow head (unchanged math; img_loss path) -----
+        if self.traj_pred:
+            g = self.geom_head(x[0]).float()
+            traj_pred_xyz = self.geom_to_traj(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
+            xyz1_pred = traj_pred_xyz[-1]
+        else:
+            xyz1_pred, _ = self.heads(x, b["tok_xyz0"], b["K_intr"], b["viewmat"])
+            traj_pred_xyz = None
+        mw = None
+        if getattr(self, "img_loss", False):
+            K_ = b["K_intr"].float(); vm_ = b["viewmat"].float()
+            Wn = xyz1_pred.new_tensor([float(b["W"]), float(b["H"])])
+            uv0 = project_to_uv(b["tok_xyz0"].float(), K_, vm_)
+            z0 = to_cam(b["tok_xyz0"].float(), vm_)[:, 2].clamp_min(1e-3)
+            if self.traj_pred:
+                tg = b["traj_gt"].float()
+                img_acc = depth_acc = 0.0
+                for t in range(self.Kf):
+                    uvtp = project_to_uv(traj_pred_xyz[t], K_, vm_)
+                    uvtg = project_to_uv(tg[t], K_, vm_)
+                    fpt = (uvtp - uv0) / Wn; fgt = (uvtg - uv0) / Wn
+                    img_acc = img_acc + F.smooth_l1_loss(fpt, fgt, beta=0.02, reduction="none").mean(-1).mean()
+                    ldpt = torch.log(to_cam(traj_pred_xyz[t], vm_)[:, 2].clamp_min(1e-3) / z0)
+                    ldgt = torch.log(to_cam(tg[t], vm_)[:, 2].clamp_min(1e-3) / z0)
+                    depth_acc = depth_acc + F.smooth_l1_loss(ldpt, ldgt, beta=0.05, reduction="none").mean()
+                    if t == self.Kf - 1:
+                        self._fp, self._fg = fpt, fgt
+                l_geom = img_acc / self.Kf + getattr(self, "w_depth", 0.5) * (depth_acc / self.Kf)
+            else:
+                uv1p = project_to_uv(xyz1_pred.float(), K_, vm_)
+                uv1g = project_to_uv(b["xyz1_gt"].float(), K_, vm_)
+                self._fp = (uv1p - uv0) / Wn; self._fg = (uv1g - uv0) / Wn
+                img_l = F.smooth_l1_loss(self._fp, self._fg, beta=0.02, reduction="none").mean(-1).mean()
+                ldp = torch.log(to_cam(xyz1_pred.float(), vm_)[:, 2].clamp_min(1e-3) / z0)
+                ldg = torch.log(to_cam(b["xyz1_gt"].float(), vm_)[:, 2].clamp_min(1e-3) / z0)
+                depth_l = F.smooth_l1_loss(ldp, ldg, beta=0.05, reduction="none").mean()
+                l_geom = img_l + getattr(self, "w_depth", 0.5) * depth_l
+        else:
+            l_geom = geom_loss(xyz1_pred.float(), b["xyz1_gt"].float())
+        # ----- action expert (flow-matching) with PROPRIOCEPTION state cross-attn -----
+        x1 = self.act_norm.normalize(b["dq"].float())[None]                  # [1,A,14] normalized target
+        state_kv = self.action_expert.embed_state(b["anchor"].float()[None])  # [1,Ns,d]
+        l_flow, flogs = self.action_expert.flow_loss(x1, layers, vlm_ctx, state_kv, trunk_mask=None, vlm_mask=ctxm)
+        # ----- joint loss (both backprop the trunk) -----
+        loss = self.w_flow_vla * l_geom + self.w_act_vla * l_flow
+        with torch.no_grad():
+            err_pred = (xyz1_pred - b["xyz1_gt"]).norm(dim=-1).mean()
+            mv = b["disp_tok"] > 0.01
+            if getattr(self, "img_loss", False) and mv.any():
+                dcos = F.cosine_similarity(self._fp[mv], self._fg[mv], dim=-1).mean()
+            else:
+                dcos = (F.cosine_similarity((xyz1_pred - b["tok_xyz0"])[mv], (b["xyz1_gt"] - b["tok_xyz0"])[mv],
+                        dim=-1).mean() if mv.any() else torch.zeros((), device=x.device))
+        logs = {"loss": loss.detach(), "geom": l_geom.detach(), "flow": l_flow.detach(),
+                "v_norm": flogs["v_norm"], "errp": err_pred.detach(), "dcos": dcos.detach()}
+        return loss, logs
+
+    @torch.no_grad()
+    def predict_action(self, b: dict, n_steps=10):
+        """Inference: run trunk + expert ODE -> raw Δqpos[A,14] (denormalized)."""
+        x, tok_feat, layers, vlm_ctx, ctxm = self._trunk_features(b)
+        state_kv = self.action_expert.embed_state(b["anchor"].float()[None])  # [1,Ns,d]
+        z = self.action_expert.sample(layers, vlm_ctx, state_kv, trunk_mask=None, vlm_mask=ctxm,
+                                      n_steps=n_steps, device=x.device, dtype=torch.float32)
+        return self.act_norm.denormalize(z[0])                              # [A,14] raw
 
     def num_trainable(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
