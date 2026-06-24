@@ -24,7 +24,7 @@ DEFAULT_QWEN_PATH = "/mnt/pfs/public/xuhaoming/model_zoo/Cosmos-Reason2-2B"
 
 class QwenVLEncoder(nn.Module):
     def __init__(self, model_path: str = DEFAULT_QWEN_PATH, dtype: torch.dtype = torch.bfloat16,
-                 attn_layers: int = 8):
+                 attn_layers: int = 8, attn_impl: str | None = None):
         super().__init__()
         from transformers import AutoProcessor
         try:
@@ -32,7 +32,11 @@ class QwenVLEncoder(nn.Module):
         except Exception:
             from transformers import AutoModelForImageTextToText as _Model
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-        kw = dict(trust_remote_code=True)   # default (flash/sdpa) attention -> fast
+        # attn_impl="eager" is REQUIRED for encode_grounded (output_attentions returns None under sdpa/flash);
+        # default None keeps the fast sdpa/flash path for the training forward.
+        kw = dict(trust_remote_code=True)
+        if attn_impl is not None:
+            kw["attn_implementation"] = attn_impl
         try:
             model = _Model.from_pretrained(model_path, dtype=dtype, **kw)
         except TypeError:
@@ -203,6 +207,39 @@ class QwenVLEncoder(nn.Module):
         # take frame t=0 (single image -> t=1); row-major reshape -> [gh, gw, H]
         grid = img_tokens.reshape(t, gh, gw, -1)[0].contiguous()     # [gh, gw, H]
         return grid.float().detach(), (gh, gw)
+
+    @torch.no_grad()
+    def relevance_grid(self, inputs: dict):
+        """INFERENCE-AVAILABLE token-placement saliency (NO GT future): cosine similarity between each
+        image patch's last-layer hidden state and the POOLED instruction-text hidden -> [gh,gw] map in
+        [0,1]. Patches whose visual content matches the instruction score high. Uses ONLY the fast forward
+        (hidden states; NO attention rollout / NO eager attention needed -> works on the SDPA/flash path
+        used in training, unlike encode_grounded which needs output_attentions=eager). This is the
+        deployment-time replacement for the GT-motion mover_saliency. Returns (rel[gh,gw], (gh,gw)) or
+        (None,None) if there is no image/text or the grid count mismatches."""
+        if "pixel_values" not in inputs or "image_grid_thw" not in inputs:
+            return None, None
+        out = self.model(**inputs, output_hidden_states=True, use_cache=False)
+        hs = out.hidden_states[self.num_layers][0]                   # [L,H] last layer
+        ids = inputs["input_ids"][0]
+        image_pos = (ids == self.image_token_id)
+        valid = inputs["attention_mask"][0].bool() if "attention_mask" in inputs \
+            else torch.ones_like(ids, dtype=torch.bool)
+        text_mask = valid.clone()
+        for sp in self._special:
+            text_mask &= (ids != sp)
+        if not bool(image_pos.any()) or not bool(text_mask.any()):
+            return None, None
+        img = hs[image_pos].float()                                 # [n_img,H] (causal: patches encode visual content)
+        txt = hs[text_mask].float().mean(0, keepdim=True)           # [1,H] pooled instruction text
+        rel = torch.nn.functional.cosine_similarity(img, txt, dim=-1)   # [n_img]
+        thw = inputs["image_grid_thw"]; t, h, w = [int(x) for x in thw[0].tolist()]
+        gh, gw = h // self.merge, w // self.merge
+        if t * gh * gw != rel.shape[0]:
+            return None, None
+        rel = rel.reshape(t, gh, gw)[0]                             # [gh,gw]
+        rel = (rel - rel.min()) / (rel.max() - rel.min()).clamp_min(1e-6)
+        return rel.detach(), (gh, gw)
 
     # ------------------------------------------------------------------
     # MetaQuery conditioning (arXiv:2504.06256, research_G): append N learnable

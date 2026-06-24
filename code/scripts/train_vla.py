@@ -28,7 +28,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from igsw.gpstoken_wm import GPSTokenWM, place_tokens  # noqa: E402
-from igsw.gaussians.gpstoken import mover_saliency  # noqa: E402
+from igsw.gaussians.gpstoken import mover_saliency, relevance_saliency  # noqa: E402
 
 
 def _to_dev(o, dev):
@@ -76,21 +76,36 @@ def save_ckpt(mdl, model, args, step, use_fsdp, is_main):
         print(f"[vla] saved vla_{step:06d}.pt ({len(sd)} tensors)", flush=True)
 
 
+def placement_saliency(args, enc, vlm0, uv, disp, n_keep, H, W):
+    """Token-placement saliency (where the sparse GPSTokens go). 'relevance' (default, DEPLOYABLE) uses the
+    frozen-Qwen instruction<->image-patch relevance grid (inference-available, NO GT). 'oracle' (ablation
+    only) uses the GT future-motion mover_saliency (the old train+eval leak). beta<=0 -> None (pure entropy).
+    NB: we NEVER silently fall back to the GT oracle at inference — if relevance is unavailable, sal=None."""
+    plc = getattr(args, "placement", "entropy")
+    if args.beta <= 0 or plc == "entropy":
+        return None                                       # pure image-complexity (entropy) partition — DEPLOYABLE
+    if plc == "oracle":
+        return mover_saliency(uv, disp, n_keep, H, W)     # GT future-motion (ablation only — train/eval LEAK)
+    rel, ghw = enc.relevance_grid(vlm0)                    # 'relevance': frozen-Qwen grounding (weak on RT2)
+    return relevance_saliency(rel, ghw, H, W) if rel is not None else None
+
+
 def build_batch(c, dev, args, enc):
     """rt2_joint clip dict -> prepared VLA batch (frame0-only; adds dq). Mirrors the world-model prep."""
     means = c["means"].to(dev).float(); uv = c["uv"].to(dev).float()
     traj = c["traj"].to(dev).float(); N = means.shape[0]
     H, W = int(c["H"]), int(c["W"]); K = int(c["Kf"])
     instr = c.get("instruction", ""); n_keep = N - int(c.get("n_fill", 0))
-    disp = (traj[K] - traj[0]).norm(dim=-1)
-    sal = mover_saliency(uv, disp, n_keep, H, W) if args.beta > 0 else None
+    disp = (traj[K] - traj[0]).norm(dim=-1)                            # GT future: TARGET ONLY (xyz1_gt/disp_tok)
     rgb0 = c["gt_rgb"][0].cpu().numpy().astype(np.uint8)               # frame0 ONLY (no future frame)
+    vlm0 = mv_in(enc.build_inputs(instr, rgb0), dev)
+    sal = placement_saliency(args, enc, vlm0, uv, disp, n_keep, H, W)  # relevance (deployable) | oracle (ablation)
     cen, sig, idx = place_tokens(rgb0, uv, n_keep, args.L, dev, sal=sal, beta=args.beta)
     if idx.shape[0] < 16:
         raise ValueError("too few tokens")
     center = means[:n_keep].mean(0, keepdim=True)
     return {
-        "vlm0": mv_in(enc.build_inputs(instr, rgb0), dev),
+        "vlm0": vlm0,
         "cen": cen, "sig_n": (sig / float(max(H, W))).clamp(0, 1),
         "tok_xyz0": means[idx], "xyz1_gt": traj[K][idx], "disp_tok": disp[idx],
         "traj_gt": (traj[1:K + 1][:, idx] if args.traj_pred else None),
@@ -98,6 +113,8 @@ def build_batch(c, dev, args, enc):
         "K_intr": c["K_intr"].to(dev).float(), "viewmat": c["viewmat"].to(dev).float(),
         "H": H, "W": W, "rgb0_np": rgb0,
         "dq": c["dq"].to(dev).float(),                                 # [A,14] action target
+        "anchor": c["anchor"].to(dev).float(),                        # [14] current qpos (proprioception);
+        #          REQUIRED by predict_action -> embed_state. Was missing -> eval KeyErrored on the 1st clip.
     }
 
 
@@ -108,9 +125,10 @@ def build_clip_single(c, dev, args, enc):
     traj = c["traj"].to(dev).float(); N = means.shape[0]
     H, W = int(c["H"]), int(c["W"]); K = int(c["Kf"])
     instr = c.get("instruction", ""); n_keep = N - int(c.get("n_fill", 0))
-    disp = (traj[K] - traj[0]).norm(dim=-1)
-    sal = mover_saliency(uv, disp, n_keep, H, W) if args.beta > 0 else None
+    disp = (traj[K] - traj[0]).norm(dim=-1)                            # GT future: TARGET ONLY (xyz1_gt/disp_tok)
     rgb0 = c["gt_rgb"][0].cpu().numpy().astype(np.uint8)
+    vlm0 = mv_in(enc.build_inputs(instr, rgb0), dev)
+    sal = placement_saliency(args, enc, vlm0, uv, disp, n_keep, H, W)  # relevance (deployable) | oracle (ablation)
     cen, sig, idx = place_tokens(rgb0, uv, n_keep, args.L, dev, sal=sal, beta=args.beta)
     M = idx.shape[0]
     if M < 16:
@@ -118,7 +136,7 @@ def build_clip_single(c, dev, args, enc):
     center = means[:n_keep].mean(0, keepdim=True)
     radius = (means[:n_keep] - center).norm(dim=-1).amax().clamp_min(1e-6)
     return {
-        "vlm0": mv_in(enc.build_inputs(instr, rgb0), dev),
+        "vlm0": vlm0,
         "cen": cen, "sig_n": (sig / float(max(H, W))).clamp(0, 1),
         "tok_xyz0": means[idx], "xyz1_gt": traj[K][idx], "disp_tok": disp[idx],
         "center": center, "radius": radius, "M": M,
@@ -185,6 +203,15 @@ def make_lr_lambda(warmup_steps, total_steps, peak_lr, floor_lr):
         cos = 0.5 * (1.0 + math.cos(math.pi * prog))
         return floor_frac + (1.0 - floor_frac) * cos
     return fn
+
+
+def adamw_param_groups(params, weight_decay):
+    """Decoupled AdamW groups: weight decay on weight MATRICES (ndim>=2) only; norms/biases (ndim<2) get 0
+    (the standard recipe — decaying LayerNorm/bias hurts)."""
+    params = [p for p in params if p.requires_grad]
+    decay = [p for p in params if p.ndim >= 2]
+    no_decay = [p for p in params if p.ndim < 2]
+    return [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
 
 
 def build_fsdp(model, local_rank, reduce_dtype="fp32"):
@@ -276,8 +303,8 @@ def run_smoke():
     std = torch.rand(AD) * 0.02 + 0.005
     norm = ActionNormalizer(mean, std, gripper_dims=(6, 13), dim=AD)
     dq = torch.randn(A, AD) * 0.05
-    dq[:, 6] = (torch.rand(A) > 0.5).float()      # gripper near-binary {0,1}
-    dq[:, 13] = (torch.rand(A) > 0.5).float()
+    dq[:, 6] = torch.randint(-1, 2, (A,)).float()   # gripper PER-STEP Δ in {-1,0,+1} (NOT absolute {0,1})
+    dq[:, 13] = torch.randint(-1, 2, (A,)).float()
     z = norm.normalize(dq)
     dq_rt = norm.denormalize(z)
     rt_err = (dq - dq_rt).abs().max().item()
@@ -766,6 +793,12 @@ def main():
     ap.add_argument("--L", type=int, default=512)
     ap.add_argument("--fdim", type=int, default=128)
     ap.add_argument("--beta", type=float, default=30.0)
+    ap.add_argument("--placement", default="entropy", choices=["entropy", "relevance", "oracle"],
+                    help="token placement. 'entropy' (default, DEPLOYABLE) = pure image-complexity partition "
+                         "(no GT, no grounding; the textured object gets tokens via its edges). 'relevance' = "
+                         "frozen-Qwen instruction grounding — but on RoboTwin2 frames it peaks on BACKGROUND not "
+                         "the object (verified, _check_relevance.py), so weak. 'oracle' = GT future-motion "
+                         "mover_saliency (the old train+eval LEAK; ablation only). prep_cache bakes this in.")
     ap.add_argument("--steps", type=int, default=40000, help="OPTIMIZER steps (the real run = 40000)")
     ap.add_argument("--batch", type=int, default=8, help="B_per_gpu (clips per GPU per micro-step) — REAL batching")
     ap.add_argument("--accum", type=int, default=1, help="grad-accum micro-steps (effective = batch*world*accum)")
@@ -785,6 +818,7 @@ def main():
     ap.add_argument("--lr_peak", type=float, default=5e-5, help="peak LR after warmup")
     ap.add_argument("--lr_floor", type=float, default=1e-5, help="cosine decay floor")
     ap.add_argument("--warmup_steps", type=int, default=1500, help="linear warmup steps (~3-5%% of 40k)")
+    ap.add_argument("--weight_decay", type=float, default=0.01, help="decoupled AdamW weight decay (on weight matrices only, not norms/biases). Mild default — the held-task failure is data-diversity/underfitting, NOT overfitting, so do NOT crank this")
     # action expert
     ap.add_argument("--action_dim", type=int, default=14)
     ap.add_argument("--action_steps", type=int, default=50)
@@ -799,6 +833,7 @@ def main():
     ap.add_argument("--lr_min_frac", type=float, default=1.0)
     ap.add_argument("--eval_ckpt", default="", help="if set: load ckpt, eval --eval_split (action metrics via predict_action), exit")
     ap.add_argument("--eval_split", default="heldseed")
+    ap.add_argument("--eval_max", type=int, default=600, help="cap # eval clips (2 passes: real + instruction-shuffle). 0 = all")
     args = ap.parse_args()
 
     if args.smoke:
@@ -879,7 +914,7 @@ def main():
         # client AdamW over the TRAINABLE params only (frozen 2B encoder excluded -> not sharded, stays
         # replicated). client LambdaLR = the SAME warmup->peak->cosine->floor schedule; DeepSpeed steps it
         # on each optimizer step. ZeRO-2 shards this optimizer's states + grads /world.
-        opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr_peak, weight_decay=0.0)
+        opt = torch.optim.AdamW(adamw_param_groups(model.parameters(), args.weight_decay), lr=args.lr_peak)
         sched = torch.optim.lr_scheduler.LambdaLR(
             opt, make_lr_lambda(args.warmup_steps, args.steps, args.lr_peak, args.lr_floor))
         ds_config = {
@@ -900,7 +935,7 @@ def main():
     elif use_fsdp:
         mdl = build_fsdp(model, local, reduce_dtype=args.fsdp_reduce)
         # optimizer AFTER the FSDP wrap, on the (orig) trainable params now owned by FSDP.
-        opt = torch.optim.AdamW([p for p in mdl.parameters() if p.requires_grad], lr=args.lr_peak, weight_decay=0.0)
+        opt = torch.optim.AdamW(adamw_param_groups(mdl.parameters(), args.weight_decay), lr=args.lr_peak)
         sched = torch.optim.lr_scheduler.LambdaLR(
             opt, make_lr_lambda(args.warmup_steps, args.steps, args.lr_peak, args.lr_floor))
         if is_main:
@@ -908,7 +943,7 @@ def main():
     else:
         mdl = DDP(model, device_ids=[local], find_unused_parameters=False, broadcast_buffers=False) if ddp else model
         # AdamW with base lr = peak; LambdaLR applies linear warmup -> cosine decay -> floor (the spec).
-        opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr_peak, weight_decay=0.0)
+        opt = torch.optim.AdamW(adamw_param_groups(model.parameters(), args.weight_decay), lr=args.lr_peak)
         sched = torch.optim.lr_scheduler.LambdaLR(
             opt, make_lr_lambda(args.warmup_steps, args.steps, args.lr_peak, args.lr_floor))
     if is_main:
@@ -935,23 +970,57 @@ def main():
             print(f"[vla-eval] loaded {len(sd)} tensors; non-encoder missing={len(miss)} unexpected={len(unexp)}", flush=True)
         model.eval()
         evf = sorted(glob.glob(f"{args.data}/*{args.eval_split}*.pt"))
-        arm = [i for i in range(14) if i not in (6, 13)]
-        ers, dcs, gacc = [], [], []
-        for cp in evf:
-            try:
-                c = torch.load(cp, map_location=dev, weights_only=False); b = build_batch(c, dev, args, enc)
-            except Exception:
-                continue
-            with torch.no_grad(), amp:
-                pred = model.predict_action(b).float()                    # [A,14] raw Δqpos
-            gt = b["dq"].float()
-            ers.append(float((pred[:, arm] - gt[:, arm]).norm(dim=-1).mean()))
-            dcs.append(float(_F.cosine_similarity(pred[:, arm].reshape(-1), gt[:, arm].reshape(-1), dim=0)))
-            gacc.append(float(((pred[:, [6, 13]] > 0.5) == (gt[:, [6, 13]] > 0.5)).float().mean()))
+        if args.eval_max > 0:
+            evf = evf[:args.eval_max]
+        arm = [i for i in range(14) if i not in (6, 13)]; grip = [6, 13]
+
+        def _eval_pass(instr_override=None):
+            """One eval pass over evf. instr_override[ci] (aligned to evf) replaces each clip's instruction
+            (the language-shuffle test); None = real. Returns (metrics, instrs_used aligned to evf).
+            NB: predict_action is INSIDE the try, so a bad clip is skipped (was: aborted the whole eval)."""
+            early, late, dmean, ers, gstate, gtrans, used = [], [], [], [], [], [], []
+            for ci, cp in enumerate(evf):
+                instr_i = ""
+                try:
+                    c = torch.load(cp, map_location=dev, weights_only=False)
+                    instr_i = instr_override[ci] if instr_override is not None else c.get("instruction", "")
+                    c["instruction"] = instr_i
+                    b = build_batch(c, dev, args, enc)
+                    with torch.no_grad(), amp:
+                        pred = model.predict_action(b).float()                 # [A,14] raw Δqpos
+                    gt = b["dq"].float(); anch = b["anchor"].float()
+                    ps = _F.cosine_similarity(pred[:, arm], gt[:, arm], dim=1)  # [A] PER-STEP arm dir-cos
+                    A = ps.shape[0]; q = max(1, A // 5)
+                    early.append(float(ps[:q].mean())); late.append(float(ps[-q:].mean())); dmean.append(float(ps.mean()))
+                    ers.append(float((pred[:, arm] - gt[:, arm]).norm(dim=-1).mean()))
+                    # gripper on the ABSOLUTE reconstructed state (anchor + cumsum of Δ), not the raw per-step Δ
+                    a0 = anch[grip].round()                                     # frame0 open/close state
+                    gt_st = (a0[None] + torch.cumsum(gt[:, grip], 0)).round().clamp(0, 1)
+                    pr_st = (a0[None] + torch.cumsum(pred[:, grip], 0)).round().clamp(0, 1)
+                    gstate.append(float((gt_st == pr_st).float().mean()))
+                    m = gt[:, grip].abs() > 0.5                                 # the open/close transition steps only
+                    if m.any():
+                        gtrans.append(float((torch.sign(pred[:, grip]) == torch.sign(gt[:, grip]))[m].float().mean()))
+                except Exception:
+                    pass
+                used.append(instr_i)
+            med = lambda v: float(_np.median(v)) if v else float("nan")
+            men = lambda v: float(_np.mean(v)) if v else float("nan")
+            return ({"early": med(early), "late": med(late), "mean": med(dmean), "err": med(ers),
+                     "gstate": men(gstate), "gtrans": men(gtrans), "n": len(dmean)}, used)
+
+        real, instrs = _eval_pass(None)
+        n = len(instrs); shuf = (instrs[n // 2:] + instrs[:n // 2]) if n > 1 else instrs   # derangement (roll n/2)
+        shf, _ = _eval_pass(shuf)
         if is_main:
-            print(f"[vla-eval] {os.path.basename(args.eval_ckpt)} {args.eval_split}: n={len(ers)} "
-                  f"arm_dΔqpos_err={_np.median(ers):.4f} arm_dcos={_np.median(dcs):+.3f} "
-                  f"grip_acc={_np.mean(gacc)*100:.0f}%", flush=True)
+            _plc = getattr(args, "placement", "oracle")
+            print(f"[vla-eval] {os.path.basename(args.eval_ckpt)} {args.eval_split} n={real['n']} (placement={_plc})", flush=True)
+            print(f"  arm dir-cos: early={real['early']:+.3f} late={real['late']:+.3f} mean={real['mean']:+.3f}  "
+                  f"drift(late-early)={real['late'] - real['early']:+.3f}", flush=True)
+            print(f"  arm Δqpos err (median)={real['err']:.4f}", flush=True)
+            print(f"  gripper: abs-state acc={real['gstate'] * 100:.0f}%  transition-sign acc={real['gtrans'] * 100:.0f}%", flush=True)
+            print(f"  LANGUAGE shuffle: dir-cos real={real['mean']:+.3f} shuf={shf['mean']:+.3f}  "
+                  f"delta={real['mean'] - shf['mean']:+.3f}  (delta~0 => instruction ignored)", flush=True)
         return
     def make_single(cp):
         if args.prep_cache:                                              # I/O-only producer (overlaps compute)
@@ -1085,11 +1154,13 @@ def main():
                 ok = flag.item() > 0.5
             if not ok:
                 continue
-            # FSDP grad-accum: wrap all but the LAST micro-step in no_sync() so grads accumulate locally
-            # (no reduce-scatter / resharding per micro-step); the final micro-step (outside no_sync)
-            # triggers the single reduce-scatter for the whole accum window. (Cheap: skips world-1 comms.)
-            is_last_micro = (_m == accum - 1)
-            use_nosync = use_fsdp and accum > 1 and not is_last_micro
+            # FSDP grad-accum: every micro reduce-scatters (no no_sync). The old "no_sync all but the
+            # positional last micro" was BUGGY: if the last micro got skipped by the ok-sync (bad clip),
+            # NO micro ran outside no_sync -> the reduce-scatter never fired -> opt.step() ran on per-rank
+            # UN-synced grads (silent divergence). Reducing every micro is correct (FSDP accumulates the
+            # sharded grads across backwards) and only costs extra comms on this LEGACY path — the supported
+            # fast path is DeepSpeed (--deepspeed 1), whose engine handles accum correctly.
+            use_nosync = False
             ctx = mdl.no_sync() if use_nosync else _nullctx()
             with ctx:
                 with amp:

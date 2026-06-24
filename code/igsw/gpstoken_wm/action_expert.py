@@ -48,7 +48,9 @@ from ..dynamics.transformer import SelfAttention, CrossAttention, TimestepEmbed,
 # ----------------------------------------------------------------------------- normalization
 class ActionNormalizer(nn.Module):
     """Normalize/denormalize the Δqpos action chunk. Stats are BUFFERS (move with the module, saved in
-    the ckpt) so train/inference use identical constants. arm dims standardized; gripper dims -> [-1,1]."""
+    the ckpt) so train/inference use identical constants. arm dims standardized to ~N(0,1); gripper dims
+    are PER-STEP Δ in {-1,0,+1} and pass through (mean=0,std=1) so they stay in [-1,1], unit-scale at the
+    transitions and balanced with the arm dims."""
 
     def __init__(self, mean, std, gripper_dims=(6, 13), dim=14):
         super().__init__()
@@ -57,11 +59,16 @@ class ActionNormalizer(nn.Module):
         grip = torch.zeros(dim, dtype=torch.bool)
         for g in gripper_dims:
             grip[int(g)] = True
-        # For gripper dims we OVERRIDE the standardize stats so the same affine handles both:
-        #   normalize(x) = (x - m) / s.  Pick m=0.5, s=0.5 on gripper dims -> (g-0.5)/0.5 = 2g-1 in [-1,1].
+        # Gripper channels of `dq` are a PER-STEP DELTA of a near-binary state -> values in {-1, 0, +1},
+        # mode 0 (~no change on ~90%+ steps), ±1 only at the open/close transitions. They are NOT absolute
+        # {0,1}. So we PASS THEM THROUGH (mean=0, std=1): already symmetric in [-1,1] and unit-scale at the
+        # transitions, balanced with the standardized arm dims. (The old 0.5/0.5 affine = 2g-1 was for the
+        # ABSOLUTE state and on a delta mapped the dominant 0 -> -1 and a close -> -3, an ~9x MSE imbalance
+        # that drowned the arm loss and corrupted training. Do NOT use the data std for gripper either: it
+        # is tiny, which would blow the ±1 transitions up to ±5..10 — the same imbalance in reverse.)
         mean = mean.clone(); std = std.clone()
-        mean[grip] = 0.5
-        std[grip] = 0.5
+        mean[grip] = 0.0
+        std[grip] = 1.0
         self.register_buffer("mean", mean)        # [14]
         self.register_buffer("std", std)          # [14]
         self.register_buffer("grip", grip)        # [14] bool (informational)

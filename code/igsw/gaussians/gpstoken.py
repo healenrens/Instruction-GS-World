@@ -104,6 +104,22 @@ def mover_saliency(uv: torch.Tensor, disp: torch.Tensor, n_keep: int, H: int, W:
     return img / max(float(img.max()), 1e-6)
 
 
+def relevance_saliency(rel, ghw, H: int, W: int, blur: int = 31):
+    """INFERENCE-AVAILABLE placement saliency [H,W] in [0,1] (drop-in for mover_saliency, which used GT
+    future motion). `rel` is the [gh,gw] instruction<->image-patch relevance map from
+    QwenVLEncoder.relevance_grid; upsample to [H,W], blur, renorm. rel=None -> None (caller then falls back
+    to pure-entropy placement; we NEVER fall back to the GT mover_saliency at inference)."""
+    if rel is None:
+        return None
+    import cv2
+    r = rel.detach().float().cpu().numpy() if torch.is_tensor(rel) else np.asarray(rel, dtype=np.float32)
+    r = cv2.resize(r, (int(W), int(H)), interpolation=cv2.INTER_LINEAR)
+    k = max(3, int(blur) | 1)                                  # force odd kernel
+    r = cv2.GaussianBlur(r, (k, k), 0)
+    r = r - float(r.min())
+    return r / max(float(r.max()), 1e-6)
+
+
 def gpstoken_ctrl_idx(rgb_uint8: np.ndarray, uv: torch.Tensor, n_keep: int, L: int, dev,
                       sal=None, beta: float = 0.0):
     """Full keypoint-selection: frame-0 RGB -> entropy-partition (+saliency) -> L token centers ->

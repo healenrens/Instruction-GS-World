@@ -32,7 +32,6 @@ def place_tokens(rgb_uint8: np.ndarray, uv: torch.Tensor, n_keep: int, L: int, d
     uvk = uv[:n_keep].to(dev).float()                                                     # [n_keep,2]
     nn_idx = torch.cdist(cen, uvk).argmin(dim=1)                                          # [L]
     # dedup collisions so each token is a distinct dense identity (keeps the per-token GT clean)
-    uniq, first = torch.unique(nn_idx, return_inverse=False), None
     keep = torch.zeros(nn_idx.shape[0], dtype=torch.bool, device=dev)
     seen = set()
     order = []
@@ -49,8 +48,11 @@ def sample_grid_feat(grid: torch.Tensor, ghw, uv: torch.Tensor, H: int, W: int) 
     """Bilinear-sample a frozen patch-feature grid [gh,gw,Hf] at pixel coords uv [M,2] (x=col,y=row in
     HxW image space) -> per-token feature [M,Hf]. grid_sample handles the (different) grid resolution."""
     g = grid.permute(2, 0, 1)[None].float()                                  # [1,Hf,gh,gw]
-    u = uv[:, 0] / max(W, 1.0) * 2.0 - 1.0
-    v = uv[:, 1] / max(H, 1.0) * 2.0 - 1.0
+    # pixel-center convention consistent with align_corners=False: map pixel center (uv+0.5) in [0,size]
+    # -> normalized [-1,1]. (Previously omitted the +0.5 while still passing align_corners=False -> a
+    # half-pixel sampling offset that blurred the per-token feature.)
+    u = (uv[:, 0] + 0.5) / max(W, 1.0) * 2.0 - 1.0
+    v = (uv[:, 1] + 0.5) / max(H, 1.0) * 2.0 - 1.0
     samp = torch.stack([u, v], dim=-1)[None, None]                           # [1,1,M,2] (x,y)
     out = torch.nn.functional.grid_sample(g, samp.to(g.dtype), align_corners=False, mode="bilinear")
     return out[0, :, 0, :].transpose(0, 1).contiguous()                      # [M,Hf]
