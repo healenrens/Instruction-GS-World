@@ -23,7 +23,13 @@ from igsw.adaptive_gaussian_wm import (  # noqa: E402
     AdaptiveGaussianWMConfig,
 )
 from igsw.adaptive_gaussian_wm.checkpointing import CHECKPOINT_VERSION  # noqa: E402
-from igsw.adaptive_gaussian_wm.dynamics_runtime import run_object_dynamics  # noqa: E402
+from igsw.adaptive_gaussian_wm.dynamics_runtime import (  # noqa: E402
+    factorized_result_fields,
+    run_object_dynamics,
+)
+from igsw.adaptive_gaussian_wm.object_memory_objectives import (  # noqa: E402
+    object_memory_geometry_loss,
+)
 from igsw.adaptive_gaussian_wm.observed_action import posterior_from_targets  # noqa: E402
 from igsw.adaptive_gaussian_wm.relative_geometry import (  # noqa: E402
     pairwise_relative_geometry,
@@ -280,6 +286,25 @@ def verify_model(model, batch: dict) -> dict:
     base_difference = max_difference(zero.base_future_slots, action.base_future_slots)
     require(zero_residual == 0.0, "zero action produced a residual")
     require(base_difference < 1e-6, "action changed the action-free base")
+    objective_output = factorized_result_fields(action, zero, target_future)
+    objective_output.update(
+        {
+            "predicted_future_slots": action.future_slots,
+            "target_future_activity": target_future["activity"],
+            "target_future_existence": target_future["existence"],
+            "target_future_relative_scale": target_future["relative_scale"],
+            "target_future_relations": target_future["relations"],
+        }
+    )
+    geometry_loss, geometry_parts = object_memory_geometry_loss(
+        objective_output,
+        batch,
+    )
+    require(bool(torch.isfinite(geometry_loss)), "object memory loss is not finite")
+    require(
+        all(bool(torch.isfinite(value)) for value in geometry_parts.values()),
+        "object memory loss component is not finite",
+    )
 
     current = history["last_memory"]
     predicted = model.object_memory.predict(
@@ -316,6 +341,7 @@ def verify_model(model, batch: dict) -> dict:
         "sidecar_prior_swap_max_difference": sidecar_prior_difference,
         "zero_action_residual_max": zero_residual,
         "action_free_base_max_difference": base_difference,
+        "object_memory_geometry_loss": float(geometry_loss),
         "occlusion_existence_max_difference": existence_difference,
         "active_token_count": float(active_count.mean()),
     }
