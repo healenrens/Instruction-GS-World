@@ -10,7 +10,7 @@
 /third_party/
 
 # Local environments and caches.
-/.venv/
+/.venv
 /.uv_cache/
 /venv/
 /env/
