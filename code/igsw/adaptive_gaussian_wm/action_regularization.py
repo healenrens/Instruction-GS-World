@@ -12,6 +12,7 @@ from .distributed_statistics import (
     gather_batch_with_grad,
     statistical_batch_size,
 )
+from .dynamics_runtime import run_object_dynamics
 from .jepa_losses import weighted_mean
 from .scale import signed_gap_scale
 
@@ -221,7 +222,8 @@ def effect_aligned_action_loss(
     local_action_flat = regularized_actions.flatten(0, 2)
     action_flat = gather_batch_with_grad(local_action_flat)
     action_std = action_flat.std(dim=0, unbiased=False)
-    action_variance = F.relu(0.5 - action_std).mean()
+    variance_floor = 0.05 if model.config.continuous_effect_action else 0.5
+    action_variance = F.relu(variance_floor - action_std).mean()
     centered_action = action_flat - action_flat.mean(dim=0, keepdim=True)
     action_covariance = (
         centered_action.transpose(0, 1) @ centered_action
@@ -329,7 +331,8 @@ def action_specificity_loss(
         [state.activity for state in output["history_slot_states"]],
         dim=1,
     )
-    shuffled = model.dynamics(
+    shuffled = run_object_dynamics(
+        model,
         output["online_history_slots"],
         history_activity,
         signed_gap_scale(batch["history_times"], model.config.gap_reference),
@@ -338,6 +341,12 @@ def action_specificity_loss(
         output["history_mask"],
         output["online_history_centers"],
         output.get("language_condition"),
+        history_relative_scale=output.get("online_history_relative_scale"),
+        history_relative_disparity=output.get(
+            "online_history_relative_disparity"
+        ),
+        history_relations=output.get("online_history_relations"),
+        history_existence=output.get("online_history_existence"),
     )
     shuffled_centers = (
         shuffled.future_centers

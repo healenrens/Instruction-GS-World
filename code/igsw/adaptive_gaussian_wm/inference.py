@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import torch
 
+from .dynamics_runtime import run_object_dynamics
 from .readout_runtime import decode_gaussian_readout
 from .scale import signed_gap_scale
 
@@ -48,7 +49,8 @@ def predict_prior_states(
         dtype=torch.bool,
     )
     for actions in action_samples:
-        prediction = model.dynamics(
+        prediction = run_object_dynamics(
+            model,
             history["slots"],
             history["activity"],
             history_scale,
@@ -57,6 +59,10 @@ def predict_prior_states(
             empty_mask,
             history["center"],
             dynamics_condition,
+            history_relative_scale=history.get("relative_scale"),
+            history_relative_disparity=history.get("relative_disparity"),
+            history_relations=history.get("relations"),
+            history_existence=history.get("existence"),
         )
         predictions.append(prediction.future_slots)
         centers.append(
@@ -109,7 +115,8 @@ def predict_prior_features(
     )
     features = []
     for actions in action_samples:
-        prediction = model.dynamics(
+        prediction = run_object_dynamics(
+            model,
             history["slots"],
             history["activity"],
             history_scale,
@@ -118,6 +125,10 @@ def predict_prior_features(
             empty_mask,
             history["center"],
             dynamics_condition,
+            history_relative_scale=history.get("relative_scale"),
+            history_relative_disparity=history.get("relative_disparity"),
+            history_relations=history.get("relations"),
+            history_existence=history.get("existence"),
         )
         predicted_centers = (
             prediction.future_centers
@@ -131,6 +142,12 @@ def predict_prior_features(
             current_slots,
             prediction.future_slots,
             predicted_centers,
+            predicted_relative_scale=getattr(
+                prediction, "future_relative_scale", None
+            ),
+            predicted_relative_disparity=getattr(
+                prediction, "future_relative_disparity", None
+            ),
         )
         rendered = model.gaussian_readout.splat_features(
             readout,

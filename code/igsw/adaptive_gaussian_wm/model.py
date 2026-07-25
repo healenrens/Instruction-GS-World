@@ -9,6 +9,8 @@ from .conditioning import LanguageConditionProjector
 from .config import AdaptiveGaussianWMConfig
 from .decoder import GaussianReadout
 from .dynamics import JointObjectLatentDynamics
+from .dynamics_runtime import factorized_result_fields, run_object_dynamics
+from .factorized_dynamics import FactorizedObjectDynamics
 from .gpstoken import LearnableGPSTokenAllocator
 from .latent_action import LatentActionModel
 from .language_effect import LanguageEffectAlignment
@@ -19,7 +21,6 @@ from .readout_runtime import decode_gaussian_readout, residual_future_features
 from .rgb_supervision import residual_future_rgb, render_current_rgb, render_future_rgb
 from .scale import signed_gap_scale
 from .sequence_encoding import encode_visual_sequence
-
 class AdaptiveGaussianObjectWorldModel(nn.Module):
     def __init__(self, config: AdaptiveGaussianWMConfig):
         super().__init__()
@@ -46,7 +47,11 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             for parameter in self.target_object_memory.parameters():
                 parameter.requires_grad_(False)
         self.latent_actions = LatentActionModel(config)
-        self.dynamics = JointObjectLatentDynamics(config)
+        self.dynamics = (
+            FactorizedObjectDynamics(config)
+            if config.factorized_dynamics
+            else JointObjectLatentDynamics(config)
+        )
         self.gaussian_readout = GaussianReadout(config)
         self.language_condition = (
             LanguageConditionProjector(config)
@@ -231,10 +236,22 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
                 sample_count=1,
                 stochastic=True,
             )[0]
-        actions = residual_action_dropout(actions, self.config.action_residual_dropout, self.training)
+        actions = residual_action_dropout(
+            actions,
+            self.config.action_residual_dropout,
+            self.training,
+            self.config.canonical_action_dim,
+        )
         if history_mask is None:
             history_mask = self.make_history_mask(history["slots"])
-        future_output = self.dynamics(
+        dynamics_memory = {
+            "history_relative_scale": history.get("relative_scale"),
+            "history_relative_disparity": history.get("relative_disparity"),
+            "history_relations": history.get("relations"),
+            "history_existence": history.get("existence"),
+        }
+        future_output = run_object_dynamics(
+            self,
             history["slots"],
             history["activity"],
             history_scale,
@@ -243,8 +260,10 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             history_mask,
             history["center"],
             condition,
+            **dynamics_memory,
         )
-        history_output = self.dynamics(
+        history_output = run_object_dynamics(
+            self,
             history["slots"],
             history["activity"],
             history_scale,
@@ -253,6 +272,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             history_mask,
             history["center"],
             condition,
+            **dynamics_memory,
         )
         predicted_future_centers = (
             future_output.future_centers
@@ -284,6 +304,12 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             current_slot_state,
             future_output.future_slots,
             predicted_future_centers,
+            predicted_relative_scale=getattr(
+                future_output, "future_relative_scale", None
+            ),
+            predicted_relative_disparity=getattr(
+                future_output, "future_relative_disparity", None
+            ),
         )
         future_count = future_output.future_slots.shape[1]
         current_readout, _ = decode_gaussian_readout(
@@ -426,6 +452,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             "history_token_states": history["token_states"],
             "history_slot_states": history["slot_states"],
         }
+        result.update(factorized_result_fields(future_output, history_output))
         if compute_joint_loss:
             if loss_weights is None:
                 raise ValueError("joint_loss phase requires loss_weights")
@@ -470,5 +497,4 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         stochastic: bool = True,
     ) -> torch.Tensor:
         from .inference import predict_prior_features
-
         return predict_prior_features(self, batch, sample_count, stochastic)

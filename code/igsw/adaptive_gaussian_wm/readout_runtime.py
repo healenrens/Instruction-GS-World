@@ -54,6 +54,9 @@ def decode_gaussian_readout(
     predicted_slots: torch.Tensor,
     predicted_centers: torch.Tensor | None = None,
     micro_rgb: torch.Tensor | None = None,
+    *,
+    predicted_relative_scale: torch.Tensor | None = None,
+    predicted_relative_disparity: torch.Tensor | None = None,
 ) -> tuple[GaussianReadoutState, GaussianReadoutContext]:
     """Combine predicted object state with current local residual detail."""
     predicted_features = model.object_aggregator.decode_feature(predicted_slots)
@@ -78,6 +81,12 @@ def decode_gaussian_readout(
         current_object_features=current_slots.feature,
         predicted_centers=predicted_centers,
         current_object_centers=current_slots.center,
+        predicted_relative_scale=predicted_relative_scale,
+        current_relative_scale=getattr(current_slots, "relative_scale", None),
+        predicted_relative_disparity=predicted_relative_disparity,
+        current_relative_disparity=getattr(
+            current_slots, "relative_disparity", None
+        ),
         current_rgb=micro_rgb,
         predicted_rgb_logits=predicted_rgb_logits,
         current_object_rgb=current_object_rgb,

@@ -10,6 +10,7 @@ from .action_posterior import (
     weighted_slot_pool,
 )
 from .config import AdaptiveGaussianWMConfig
+from .continuous_effect import ContinuousEffectPosterior
 from .flow_matching import flow_training_objective, sample_flow_source
 from .source_lifted_prior import SourceLiftedJointFlowPrior
 from .mode_set_prior import ModeSetActionPrior
@@ -279,11 +280,12 @@ class LatentActionModel(nn.Module):
         self.action_tokens = config.action_tokens
         self.multi_query_prior_context = config.multi_query_prior_context
         self.prior_query_residual = config.prior_query_residual
-        self.posterior = (
-            ObjectDeltaActionPosterior(config)
-            if config.structured_action
-            else ActionPosterior(config)
-        )
+        if config.continuous_effect_action:
+            self.posterior = ContinuousEffectPosterior(config)
+        elif config.structured_action:
+            self.posterior = ObjectDeltaActionPosterior(config)
+        else:
+            self.posterior = ActionPosterior(config)
         self.object_aligned_actions = config.object_aligned_actions
         self.prior_token_conditioner = (
             PriorTokenConditioner(config)

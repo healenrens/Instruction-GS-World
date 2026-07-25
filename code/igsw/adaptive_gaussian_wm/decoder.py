@@ -57,6 +57,10 @@ class GaussianReadout(nn.Module):
         current_object_features: torch.Tensor,
         predicted_centers: torch.Tensor | None = None,
         current_object_centers: torch.Tensor | None = None,
+        predicted_relative_scale: torch.Tensor | None = None,
+        current_relative_scale: torch.Tensor | None = None,
+        predicted_relative_disparity: torch.Tensor | None = None,
+        current_relative_disparity: torch.Tensor | None = None,
         current_rgb: torch.Tensor | None = None,
         predicted_rgb_logits: torch.Tensor | None = None,
         current_object_rgb: torch.Tensor | None = None,
@@ -139,7 +143,28 @@ class GaussianReadout(nn.Module):
             + center_transport
             + 0.25 * torch.tanh(raw[..., :2])
         )
-        diagonal_scale = torch.exp(0.5 * torch.tanh(raw[..., 2:4]))
+        scale_transport = raw.new_zeros(*raw.shape[:-1])
+        if predicted_relative_scale is not None:
+            expected = predicted_slots.shape[:3]
+            if predicted_relative_scale.shape != expected:
+                raise ValueError(
+                    f"predicted_relative_scale must have shape {expected}"
+                )
+            if current_relative_scale is None or current_relative_scale.shape != (
+                predicted_slots.shape[0], predicted_slots.shape[2]
+            ):
+                raise ValueError("current_relative_scale must have shape [B,K]")
+            object_log_scale = (
+                predicted_relative_scale.clamp_min(1e-6).log()
+                - current_relative_scale[:, None].clamp_min(1e-6).log()
+            ).clamp(-2.0, 2.0)
+            scale_transport = torch.einsum(
+                "bmk,bqk->bqm", current_object_assignment, object_log_scale
+            )
+        diagonal_scale = torch.exp(
+            scale_transport[..., None]
+            + 0.5 * torch.tanh(raw[..., 2:4])
+        )
         shear = 0.25 * torch.tanh(raw[..., 4])
         transform = raw.new_zeros(*raw.shape[:-1], 2, 2)
         transform[..., 0, 0] = diagonal_scale[..., 0]
@@ -156,7 +181,35 @@ class GaussianReadout(nn.Module):
             dtype=covariance.dtype,
         )
         covariance = covariance + self.covariance_floor * identity
-        depth_order = current_tokens.depth_order[:, None] + raw[..., 5:6]
+        disparity_transport = raw.new_zeros(*raw.shape[:-1])
+        if predicted_relative_disparity is not None:
+            expected = predicted_slots.shape[:3]
+            if predicted_relative_disparity.shape != expected:
+                raise ValueError(
+                    "predicted_relative_disparity has an invalid shape"
+                )
+            if (
+                current_relative_disparity is None
+                or current_relative_disparity.shape
+                != (predicted_slots.shape[0], predicted_slots.shape[2])
+            ):
+                raise ValueError(
+                    "current_relative_disparity must have shape [B,K]"
+                )
+            object_disparity_delta = (
+                predicted_relative_disparity
+                - current_relative_disparity[:, None]
+            )
+            disparity_transport = torch.einsum(
+                "bmk,bqk->bqm",
+                current_object_assignment,
+                object_disparity_delta,
+            )
+        depth_order = (
+            current_tokens.depth_order[:, None]
+            + disparity_transport[..., None]
+            + raw[..., 5:6]
+        )
         opacity_logit = _stable_logit(current_tokens.opacity)[:, None]
         activation_logit = _stable_logit(current_tokens.activation)[:, None]
         opacity = torch.sigmoid(opacity_logit + raw[..., 6:7].float())

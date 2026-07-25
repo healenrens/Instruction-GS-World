@@ -14,4 +14,5 @@ class AdaptiveGaussianLossWeights:
     slot: float = 0.01
     action: float = 0.1
     action_specificity: float = 0.0
+    geometry: float = 0.0
     rgb: float = 1.0

@@ -292,6 +292,12 @@ class AdaptiveGaussianWMConfig:
                 raise ValueError(
                     "object_memory_v1 requires persistent memory and hard token gates"
                 )
+            if not self.continuous_effect_action or not self.factorized_dynamics:
+                raise ValueError(
+                    "object_memory_v1 requires continuous effects and factorized Dynamics"
+                )
+            if (self.action_tokens, self.action_dim) != (4, 32):
+                raise ValueError("object_memory_v1 action contract is [4,32]")
             if self.condition_dim != 0 or self.rgb_supervision:
                 raise ValueError("object_memory_v1 is language-free and feature-only")
             if any(

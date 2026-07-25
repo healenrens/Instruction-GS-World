@@ -9,7 +9,6 @@ from .action_regularization import (
     effect_aligned_action_loss,
 )
 from .change_objectives import (
-    change_balanced_rgb_delta_loss,
     dense_feature_loss,
     scale_invariant_object_change_loss,
 )
@@ -21,9 +20,9 @@ from .jepa_losses import (
     weighted_mean as _weighted_mean,
 )
 from .loss_weights import AdaptiveGaussianLossWeights
+from .object_memory_objectives import object_memory_geometry_loss
 from .object_slots import ObjectSlotState
-from .observed_action import future_object_rgb_loss
-from .rgb_supervision import rgb_reconstruction_loss
+from .rgb_objective import rgb_loss_bundle
 from .zero_action_margin import observed_zero_action_margin_loss
 
 
@@ -351,56 +350,10 @@ def adaptive_world_model_loss(
         batch["future_valid"],
         output["render_coverage"],
     )
-    rgb = feature * 0.0
-    rgb_delta = feature * 0.0
-    rgb_parts = {}
-    if model.config.rgb_supervision:
-        if output["rendered_future_rgb"] is None:
-            raise ValueError("RGB supervision requires a future render")
-        future_rgb, future_rgb_parts = rgb_reconstruction_loss(
-            output["rendered_future_rgb"],
-            batch["future_rgb"],
-            batch["future_rgb_valid"],
-            model.config.rgb_ssim_weight,
-        )
-        if output["rendered_current_rgb"] is None:
-            rgb = future_rgb
-            rgb_parts = {
-                f"future_{name}": value
-                for name, value in future_rgb_parts.items()
-            }
-        else:
-            current_rgb, current_rgb_parts = rgb_reconstruction_loss(
-                output["rendered_current_rgb"],
-                batch["history_rgb"][:, -1:],
-                batch["history_rgb_valid"][:, -1:],
-                model.config.rgb_ssim_weight,
-            )
-            rgb = 0.5 * (current_rgb + future_rgb)
-            rgb_parts = {
-                f"current_{name}": value
-                for name, value in current_rgb_parts.items()
-            }
-            rgb_parts.update(
-                {
-                    f"future_{name}": value
-                    for name, value in future_rgb_parts.items()
-                }
-            )
-        rgb_delta, rgb_delta_parts = change_balanced_rgb_delta_loss(
-            output["rendered_future_rgb"],
-            batch["future_rgb"],
-            batch["history_rgb"][:, -1:],
-            batch["future_rgb_valid"],
-            batch["history_rgb_valid"][:, -1:],
-            model.config.rgb_change_threshold,
-        )
-        rgb = rgb + model.config.rgb_change_loss_weight * rgb_delta
-        rgb_parts.update(
-            {f"delta_{name}": value for name, value in rgb_delta_parts.items()}
-        )
-    rgb_object = future_object_rgb_loss(model, output)
-    rgb = rgb + rgb_object
+    rgb, rgb_delta, rgb_object, rgb_parts = rgb_loss_bundle(
+        model, batch, output, feature
+    )
+    geometry, geometry_parts = object_memory_geometry_loss(output)
     zero_margin, zero_margin_parts = observed_zero_action_margin_loss(model, batch, output)
     language_effect = feature * 0.0
     language_effect_parts = {}
@@ -461,6 +414,7 @@ def adaptive_world_model_loss(
         + weights.slot * slot
         + weights.action * action
         + weights.action_specificity * action_specificity
+        + weights.geometry * geometry
         + weights.rgb * model.config.rgb_loss_weight * rgb
         + model.config.zero_action_margin_weight * zero_margin
         + model.config.language_effect_weight * language_effect
@@ -484,6 +438,7 @@ def adaptive_world_model_loss(
             "feature": feature,
             "allocator": allocator,
             "slot": slot,
+            "geometry": geometry,
             "rgb_future": rgb,
             "rgb_change_future": rgb_delta,
             "rgb_object_future": rgb_object,
@@ -493,6 +448,7 @@ def adaptive_world_model_loss(
     )
     parts.update(action_parts)
     parts.update(action_specificity_parts)
+    parts.update(geometry_parts)
     parts.update({f"rgb_future_{name}": value for name, value in rgb_parts.items()})
     parts.update(zero_margin_parts)
     parts.update(language_effect_parts)
