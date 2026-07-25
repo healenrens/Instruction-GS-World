@@ -2,20 +2,24 @@
 set -euo pipefail
 
 ROOT="${ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
-required=(WORLD_SIZE RANK MASTER_ADDR MASTER_PORT STAGE GATE_REPORT)
+required=(STAGE GATE_REPORT)
 for name in "${required[@]}"; do
     if [[ -z "${!name:-}" ]]; then
         echo "[object-memory-v28] missing environment variable: ${name}" >&2
         exit 2
     fi
 done
-if ! [[ "${WORLD_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "[object-memory-v28] WORLD_SIZE must be a positive node count" >&2
+NNODES="${NNODES:-${WORLD_SIZE:-1}}"
+NODE_RANK="${NODE_RANK:-${RANK:-0}}"
+MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+MASTER_PORT="${MASTER_PORT:-29500}"
+if ! [[ "${NNODES}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[object-memory-v28] NNODES must be a positive node count" >&2
     exit 2
 fi
-if ! [[ "${RANK}" =~ ^[0-9]+$ ]] \
-    || [[ "${RANK}" -ge "${WORLD_SIZE}" ]]; then
-    echo "[object-memory-v28] invalid node rank: ${RANK}" >&2
+if ! [[ "${NODE_RANK}" =~ ^[0-9]+$ ]] \
+    || [[ "${NODE_RANK}" -ge "${NNODES}" ]]; then
+    echo "[object-memory-v28] invalid node rank: ${NODE_RANK}" >&2
     exit 2
 fi
 if ! [[ "${MASTER_PORT}" =~ ^[0-9]+$ ]] \
@@ -23,7 +27,7 @@ if ! [[ "${MASTER_PORT}" =~ ^[0-9]+$ ]] \
     echo "[object-memory-v28] MASTER_PORT must be in 1..65535" >&2
     exit 2
 fi
-if [[ "${WORLD_SIZE}" -gt 1 ]] \
+if [[ "${NNODES}" -gt 1 ]] \
     && [[ "${MASTER_ADDR}" == "127.0.0.1" || "${MASTER_ADDR}" == "localhost" ]]; then
     echo "[object-memory-v28] MASTER_ADDR must be reachable from node 1" >&2
     exit 2
@@ -249,8 +253,8 @@ cd "${ROOT}"
 cmd=(
     .venv/bin/torchrun
     --nproc_per_node "${TORCHRUN_NPROC}"
-    --nnodes "${WORLD_SIZE}"
-    --node_rank "${RANK}"
+    --nnodes "${NNODES}"
+    --node_rank "${NODE_RANK}"
     --master_addr "${MASTER_ADDR}"
     --master_port "${MASTER_PORT}"
     code/scripts/train_adaptive_gaussian_wm.py
@@ -295,10 +299,10 @@ cmd=(
     "${sidecar_args[@]}"
     "${init_args[@]}"
 )
-echo "[object-memory-v28] commit=${current_commit} node=${RANK}/${WORLD_SIZE} stage=${STAGE}"
+echo "[object-memory-v28] commit=${current_commit} node=${NODE_RANK}/${NNODES} stage=${STAGE}"
 echo "[object-memory-v28] nproc=${TORCHRUN_NPROC} grad_accum=${GRAD_ACCUM} target_global_batch=${TARGET_GLOBAL_BATCH} steps=${STEPS}"
 printf '[object-memory-v28] command:'
 printf ' %q' "${cmd[@]}"
 printf '\n'
-exec > >(tee -a "${LOG_ROOT}/node_${RANK}.log") 2>&1
+exec > >(tee -a "${LOG_ROOT}/node_${NODE_RANK}.log") 2>&1
 exec "${cmd[@]}"
