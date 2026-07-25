@@ -30,6 +30,9 @@ from igsw.adaptive_gaussian_wm.dynamics_runtime import (  # noqa: E402
 from igsw.adaptive_gaussian_wm.object_memory_objectives import (  # noqa: E402
     object_memory_geometry_loss,
 )
+from igsw.adaptive_gaussian_wm.loss_weights import (  # noqa: E402
+    AdaptiveGaussianLossWeights,
+)
 from igsw.adaptive_gaussian_wm.observed_action import posterior_from_targets  # noqa: E402
 from igsw.adaptive_gaussian_wm.relative_geometry import (  # noqa: E402
     pairwise_relative_geometry,
@@ -226,6 +229,57 @@ def verify_parameter_contract(model) -> dict:
     }
 
 
+def verify_representation_backward(model, batch: dict) -> dict:
+    weights = AdaptiveGaussianLossWeights(
+        future=1.0,
+        history=0.5,
+        flow=0.0,
+        feature=0.5,
+        allocator=0.2,
+        slot=0.2,
+        action=0.0,
+        action_specificity=0.0,
+        geometry=0.25,
+        rgb=0.0,
+    )
+    model.train()
+    model.zero_grad(set_to_none=True)
+    with torch.autograd.detect_anomaly(check_nan=True):
+        result = model(
+            batch,
+            phase="object_memory_representation_loss",
+            loss_weights=weights,
+        )
+        loss = result["loss"]
+        require(bool(torch.isfinite(loss)), "representation loss is not finite")
+        loss.backward()
+    gradients = [
+        (name, parameter.grad)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and parameter.grad is not None
+    ]
+    require(gradients, "representation backward produced no gradients")
+    offenders = [
+        name
+        for name, gradient in gradients
+        if not bool(torch.isfinite(gradient).all())
+    ]
+    require(not offenders, f"non-finite representation gradients: {offenders}")
+    gradient_norm = torch.linalg.vector_norm(
+        torch.stack(
+            [gradient.detach().float().norm() for _, gradient in gradients]
+        )
+    )
+    require(bool(torch.isfinite(gradient_norm)), "gradient norm is not finite")
+    model.zero_grad(set_to_none=True)
+    model.eval()
+    return {
+        "representation_loss": float(loss.detach()),
+        "representation_gradient_norm": float(gradient_norm),
+        "representation_gradient_tensors": len(gradients),
+    }
+
+
 @torch.no_grad()
 def verify_model(model, batch: dict) -> dict:
     history, history_scale, future_scale, prior = history_and_prior(model, batch)
@@ -384,6 +438,7 @@ def main() -> None:
     )
     with amp:
         model_checks = verify_model(model, batch)
+        backward_checks = verify_representation_backward(model, batch)
     report = {
         "status": "passed",
         "architecture": "object_memory_v1",
@@ -402,6 +457,7 @@ def main() -> None:
         "ddp_parameter_contract": verify_parameter_contract(model),
         **checkpoint,
         **model_checks,
+        **backward_checks,
     }
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as handle:

@@ -197,9 +197,12 @@ class ObjectMemoryTransition(nn.Module):
             observation.decoded_feature,
             dim=-1,
         )
-        center_distance = (
-            observed_geometry.center - predicted.center
-        ).square().sum(dim=-1).sqrt()
+        center_distance = torch.sqrt(
+            (observed_geometry.center - predicted.center)
+            .square()
+            .sum(dim=-1)
+            + 1e-6
+        )
         gate_features = torch.cat(
             (
                 predicted.tracking_slots,

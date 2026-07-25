@@ -104,7 +104,7 @@ def allocator_loss(
     scene_feature = feature_mean
     token_importance = (
         state.decoded_features - scene_feature
-    ).square().mean(dim=-1).sqrt()
+    ).square().mean(dim=-1).add(1e-6).sqrt()
     activation_score = activation - activation.mean(dim=1, keepdim=True)
     activation_score = activation_score / activation_score.std(
         dim=1, keepdim=True, unbiased=False
