@@ -1,32 +1,35 @@
-# Data directories
-data/
-checkpoints/
-outputs/
-viz/
-model_zoo/
-third_party/
+# Project runtime state. Root anchors keep source packages such as
+# code/igsw/data visible to Git.
+/data/
+/checkpoints/
+/outputs/
+/logs/
+/eval/
+/viz/
+/model_zoo/
+/third_party/
 
-# Virtual environments
-.venv/
-venv/
-env/
+# Local environments and caches.
+/.venv/
+/.uv_cache/
+/venv/
+/env/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
 
-# Python bytecode
-__pycache__/
-*.pyc
-*.pyo
-
-# Model weights and checkpoints
-*.pt
-*.pth
+# Model and experiment artifacts.
 *.ckpt
+*.pth
+*.pt
 *.bin
 *.safetensors
-
-# Large binary/media files
+*.npz
 *.mp4
 *.ply
-*.npz
 *.png
 *.jpg
 *.jpeg
@@ -35,15 +38,9 @@ __pycache__/
 *.tiff
 *.so
 *.dylib
-
-# Logs
 *.log
+*.pid
 
-# macOS
+# Local operating-system files.
 .DS_Store
-
-# Misc
-*.egg-info/
-.eggs/
-dist/
-build/
+._*

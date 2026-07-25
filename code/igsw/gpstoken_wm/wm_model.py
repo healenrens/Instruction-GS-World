@@ -462,12 +462,13 @@ class GPSTokenWM(nn.Module):
         image_pos = (ids == self.encoder.image_token_id)
         if not bool(image_pos.any()):
             return (None, None)
-        img_tokens = hidden_last[image_pos].float()                      # [n_img, H] contiguous, row-major
-        t, h, w = [int(x) for x in vlm_inputs["image_grid_thw"][0].tolist()]
+        img_tokens = hidden_last[image_pos].float()                      # [n_img_total, H] head(+wrist), row-major
+        t, h, w = [int(x) for x in vlm_inputs["image_grid_thw"][0].tolist()]   # image #0 = HEAD (3D stays head-only)
         gh, gw = h // self.encoder.merge, w // self.encoder.merge
-        if t * gh * gw != img_tokens.shape[0]:
+        n_head = t * gh * gw                                              # head tokens come FIRST; wrist views (if
+        if img_tokens.shape[0] < n_head:                                  #   any) follow and only enrich the context
             return (None, None)
-        return (img_tokens.reshape(t, gh, gw, -1)[0].contiguous(), (gh, gw))
+        return (img_tokens[:n_head].reshape(t, gh, gw, -1)[0].contiguous(), (gh, gw))
 
     def _encode_cond_one(self, vlm_inputs):
         """ONE frozen Qwen forward -> BOTH (a) the per-block aggregated conditioning AND (b) the last-layer
@@ -505,12 +506,13 @@ class GPSTokenWM(nn.Module):
         image_pos = (ids_row == self.encoder.image_token_id)
         if not bool(image_pos.any()):
             return (None, None)
-        img_tokens = hidden_last_row[image_pos].float()
-        t, h, w = [int(x) for x in thw_row.tolist()]
+        img_tokens = hidden_last_row[image_pos].float()                  # head(+wrist) tokens, row-major
+        t, h, w = [int(x) for x in thw_row.tolist()]                     # thw_row = HEAD (image #0 of this clip)
         gh, gw = h // self.encoder.merge, w // self.encoder.merge
-        if t * gh * gw != img_tokens.shape[0]:
+        n_head = t * gh * gw                                             # head tokens FIRST
+        if img_tokens.shape[0] < n_head:
             return (None, None)
-        return (img_tokens.reshape(t, gh, gw, -1)[0].contiguous(), (gh, gw))
+        return (img_tokens[:n_head].reshape(t, gh, gw, -1)[0].contiguous(), (gh, gw))
 
     def encode_cond_batch(self, vlm_list):
         """ONE BATCHED frozen forward -> per-block aggregated context + per-clip image grid (replaces the
@@ -529,7 +531,11 @@ class GPSTokenWM(nn.Module):
             agg.append(self.agg_norm(a))
         ctx = torch.stack(agg, 1)                                        # [B,n_l,Q,d]
         ctx_mask = torch.ones(B, self.n_query, dtype=torch.bool, device=hidden_all.device)
-        grids = [self._grid_from_row(hidden_all[-1, i], input_ids[i], thw[i]) for i in range(B)]
+        # each clip's HEAD thw is at its cumulative image offset (head = image #0; wrist views follow)
+        offs, acc = [], 0
+        for v in vlm_list:
+            offs.append(acc); acc += int(v["image_grid_thw"].shape[0])
+        grids = [self._grid_from_row(hidden_all[-1, i], input_ids[i], thw[offs[i]]) for i in range(B)]
         return ctx, ctx_mask, cond_global, grids
 
     def predict_batch(self, tok_xyz0, tok_feat_fdim, tok_sigma, center, radius,
@@ -582,11 +588,14 @@ class GPSTokenWM(nn.Module):
     def _flow_geom_loss_batch(self, b, xyz1_pred, tok_mask):
         """Batched 3D-flow (img_loss) loss: per-clip projection (K/viewmat differ) but masked-meaned over
         the batch. Returns (l_geom, fp, fg, mv) where fp/fg are padded [B,L,2] image-flow for dcos logs."""
+        geom_mask = tok_mask & b.get("geom_valid", tok_mask)
         B, L = tok_mask.shape
         fp = xyz1_pred.new_zeros(B, L, 2); fg = xyz1_pred.new_zeros(B, L, 2)
         l_img_sum = xyz1_pred.new_zeros(()); l_dep_sum = xyz1_pred.new_zeros(()); nval = 0.0
         for i in range(B):
-            m = tok_mask[i]                                              # [L]
+            m = geom_mask[i]                                             # label-valid tokens only
+            if not bool(m.any()):
+                continue
             K_ = b["K_intr"][i].float(); vm_ = b["viewmat"][i].float()
             Wn = xyz1_pred.new_tensor([float(b["W_list"][i]), float(b["H_list"][i])])
             x0i = b["tok_xyz0"][i].float(); xpi = xyz1_pred[i].float(); xgi = b["xyz1_gt"][i].float()
@@ -602,8 +611,9 @@ class GPSTokenWM(nn.Module):
             l_img_sum = l_img_sum + (per * mf).sum() / denom
             l_dep_sum = l_dep_sum + (perz * mf).sum() / denom
             nval += 1.0
-        l_geom = (l_img_sum + getattr(self, "w_depth", 0.5) * l_dep_sum) / max(nval, 1.0)
-        mv = (b["disp_tok"] > 0.01) & tok_mask
+        l_geom = ((l_img_sum + getattr(self, "w_depth", 0.5) * l_dep_sum) / nval
+                  if nval else xyz1_pred.sum() * 0.0)
+        mv = (b["disp_tok"] > 0.01) & geom_mask
         return l_geom, fp, fg, mv
 
     def forward_vla_batch(self, b: dict):
@@ -611,6 +621,7 @@ class GPSTokenWM(nn.Module):
         Identical objective to forward_vla, computed over the whole batch in one trunk + one expert pass."""
         x, tok_feat, layers, vlm_ctx, ctxm = self._trunk_features_batch(b)
         tok_mask = b["tok_mask"]
+        geom_mask = tok_mask & b.get("geom_valid", tok_mask)
         # ----- 3D-flow head (geom_mode=xyz; img_loss path) -----
         g = self.geom_head(x).float()                                    # [B,L,3]
         xyz1_pred = b["tok_xyz0"].float() + g if self.geom_mode == "xyz" else None
@@ -622,8 +633,8 @@ class GPSTokenWM(nn.Module):
         else:
             # masked smooth-L1 on raw 3D position
             per = F.smooth_l1_loss(xyz1_pred.float(), b["xyz1_gt"].float(), beta=0.01, reduction="none").mean(-1)
-            mf = tok_mask.float(); l_geom = (per * mf).sum() / mf.sum().clamp_min(1.0)
-            fp = fg = None; mv = (b["disp_tok"] > 0.01) & tok_mask
+            mf = geom_mask.float(); l_geom = (per * mf).sum() / mf.sum().clamp_min(1.0)
+            fp = fg = None; mv = (b["disp_tok"] > 0.01) & geom_mask
         # ----- action expert (flow-matching) with PROPRIOCEPTION state cross-attn -----
         x1 = self.act_norm.normalize(b["dq"].float())                    # [B,A,14] normalized target
         state_kv = self.action_expert.embed_state(b["anchor"].float())   # [B,Ns,d]
@@ -634,7 +645,7 @@ class GPSTokenWM(nn.Module):
             loss = loss + 0.0 * sum(p.float().sum()  # DDP find_unused_parameters=False stays correct (unused
                                     for p in self.parameters() if p.requires_grad)  # heads: content/jepa/rel/cam)
         with torch.no_grad():
-            err_pred = ((xyz1_pred - b["xyz1_gt"]).norm(dim=-1) * tok_mask.float()).sum() / tok_mask.float().sum().clamp_min(1.0)
+            err_pred = ((xyz1_pred - b["xyz1_gt"]).norm(dim=-1) * geom_mask.float()).sum() / geom_mask.float().sum().clamp_min(1.0)
             if getattr(self, "img_loss", False) and mv.any():
                 dcos = F.cosine_similarity(fp[mv], fg[mv], dim=-1).mean()
             elif mv.any():
@@ -726,6 +737,22 @@ class GPSTokenWM(nn.Module):
         z = self.action_expert.sample(layers, vlm_ctx, state_kv, trunk_mask=None, vlm_mask=ctxm,
                                       n_steps=n_steps, device=x.device, dtype=torch.float32)
         return self.act_norm.denormalize(z[0])                              # [A,14] raw
+
+    @torch.no_grad()
+    def rollout_predict(self, b: dict, n_steps=10):
+        """DEPLOY inference from one reconstructed obs (no GT): ONE trunk forward -> both the action chunk
+        and the per-token predicted future 3D (for the rollout viz). Returns
+        (dq [A,14] raw per-step Δqpos, xyz1_pred [M,3] per-token future 3D position)."""
+        x, tok_feat, layers, vlm_ctx, ctxm = self._trunk_features(b)
+        state_kv = self.action_expert.embed_state(b["anchor"].float()[None])
+        z = self.action_expert.sample(layers, vlm_ctx, state_kv, trunk_mask=None, vlm_mask=ctxm,
+                                      n_steps=n_steps, device=x.device, dtype=torch.float32)
+        dq = self.act_norm.denormalize(z[0])                                # [A,14] raw
+        xx = x if x.dim() == 2 else x[0]                                    # [M,d]
+        g = self.geom_head(xx).float()                                      # [M,3]
+        xyz1 = (b["tok_xyz0"].float() + g) if self.geom_mode == "xyz" \
+            else self.geom_to_xyz(g, b["tok_xyz0"].float(), b["K_intr"].float(), b["viewmat"].float())
+        return dq, xyz1
 
     def num_trainable(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

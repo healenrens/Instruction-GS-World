@@ -22,6 +22,30 @@ import torch.nn as nn
 DEFAULT_QWEN_PATH = "/mnt/pfs/public/xuhaoming/model_zoo/Cosmos-Reason2-2B"
 
 
+def build_qwen_inputs(processor, text: str, image):
+    """Build the shared Qwen image+text processor payload without running the model."""
+    from PIL import Image as PILImage
+    content, images = [], None
+    if image is not None:
+        imgs = list(image) if isinstance(image, (list, tuple)) else [image]
+        images = [PILImage.fromarray(im).convert("RGB") for im in imgs]
+        content += [{"type": "image"} for _ in images]
+    content.append({"type": "text", "text": text})
+    messages = [{"role": "user", "content": content}]
+    prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return processor(text=[prompt], images=images, return_tensors="pt")
+
+
+class QwenInputProcessor:
+    """Processor-only cache-prep path; output is identical to QwenVLEncoder.build_inputs."""
+    def __init__(self, model_path: str = DEFAULT_QWEN_PATH):
+        from transformers import AutoProcessor
+        self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+
+    def build_inputs(self, text: str, image):
+        return build_qwen_inputs(self.processor, text, image)
+
+
 class QwenVLEncoder(nn.Module):
     def __init__(self, model_path: str = DEFAULT_QWEN_PATH, dtype: torch.dtype = torch.bfloat16,
                  attn_layers: int = 8, attn_impl: str | None = None):
@@ -59,16 +83,12 @@ class QwenVLEncoder(nn.Module):
             getattr(cfg.text_config, "bos_token_id", 151643), getattr(cfg.text_config, "eos_token_id", 151645),
         ])
 
-    def build_inputs(self, text: str, image: np.ndarray | None):
-        from PIL import Image as PILImage
-        content, images = [], None
-        if image is not None:
-            content.append({"type": "image"})
-            images = [PILImage.fromarray(image).convert("RGB")]
-        content.append({"type": "text", "text": text})
-        messages = [{"role": "user", "content": content}]
-        prompt = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        return self.processor(text=[prompt], images=images, return_tensors="pt")
+    def build_inputs(self, text: str, image):
+        """image: a single HxWx3 np.ndarray, OR a list/tuple of them (multi-view: [head, left, right]).
+        Each becomes its own <image> token for Qwen3-VL. The FIRST image is the HEAD view — the per-token
+        GPSToken grid is sliced from image #0 (see _grid_from_*), so the 3D head stays head-only while the
+        extra wrist views only enrich the cross-attention context (hidden_all)."""
+        return build_qwen_inputs(self.processor, text, image)
 
     @torch.no_grad()
     def encode_grounded(self, text: str, image: np.ndarray, device, dtype=torch.bfloat16, grounding=True):
@@ -197,15 +217,15 @@ class QwenVLEncoder(nn.Module):
         image_pos = (ids == self.image_token_id)
         if not bool(image_pos.any()):
             return None, None
-        img_tokens = hidden_last[image_pos]                           # [n_img, H] contiguous, row-major
+        img_tokens = hidden_last[image_pos]                           # [n_img_total, H] head(+wrist), row-major
         thw = inputs["image_grid_thw"]
-        t, h, w = [int(x) for x in thw[0].tolist()]
+        t, h, w = [int(x) for x in thw[0].tolist()]                   # image #0 = HEAD (3D stays head-only)
         gh, gw = h // self.merge, w // self.merge
-        n_img = img_tokens.shape[0]
-        if t * gh * gw != n_img:
+        n_head = t * gh * gw                                          # head tokens FIRST; wrist views (if any) follow
+        if img_tokens.shape[0] < n_head:
             return None, None
-        # take frame t=0 (single image -> t=1); row-major reshape -> [gh, gw, H]
-        grid = img_tokens.reshape(t, gh, gw, -1)[0].contiguous()     # [gh, gw, H]
+        # head frame (t=0); row-major reshape -> [gh, gw, H]
+        grid = img_tokens[:n_head].reshape(t, gh, gw, -1)[0].contiguous()   # [gh, gw, H]
         return grid.float().detach(), (gh, gw)
 
     @torch.no_grad()

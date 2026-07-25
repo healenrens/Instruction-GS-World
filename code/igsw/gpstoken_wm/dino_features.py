@@ -26,12 +26,21 @@ class DinoFeatures(nn.Module):
         self.register_buffer("std", torch.tensor(cfg["std"]).view(1, 3, 1, 1))
 
     @torch.no_grad()
-    def grid(self, rgb_uint8: np.ndarray):
-        """[H,W,3] uint8 RGB -> dense patch-feature grid [gh,gw,C] + (gh,gw). Frozen, no grad."""
-        x = torch.from_numpy(rgb_uint8).float().permute(2, 0, 1)[None] / 255.0      # [1,3,H,W]
+    def grid_batch(self, rgb_uint8: torch.Tensor):
+        """[B,H,W,3] uint8 RGB -> frozen dense grids [B,gh,gw,C]."""
+        if rgb_uint8.ndim != 4 or rgb_uint8.shape[-1] != 3:
+            raise ValueError("RGB batch must have shape [B,H,W,3]")
+        x = rgb_uint8.float().permute(0, 3, 1, 2) / 255.0
         x = F.interpolate(x, size=(self.img_size, self.img_size), mode="bilinear", align_corners=False)
         x = (x.to(self.mean.device, self.mean.dtype) - self.mean) / self.std
-        feats = self.model.forward_features(x)                                       # [1, n_prefix+N, C]
-        patches = feats[:, self.n_prefix:, :]                                        # [1, N, C]
+        feats = self.model.forward_features(x)
+        patches = feats[:, self.n_prefix:, :]
         g = self.img_size // self.patch
-        return patches.reshape(g, g, -1).float(), (g, g)
+        return patches.reshape(len(x), g, g, -1).float(), (g, g)
+
+    @torch.no_grad()
+    def grid(self, rgb_uint8: np.ndarray):
+        """[H,W,3] uint8 RGB -> dense patch-feature grid [gh,gw,C] + (gh,gw). Frozen, no grad."""
+        batch = torch.from_numpy(rgb_uint8)[None]
+        grid, shape = self.grid_batch(batch)
+        return grid[0], shape

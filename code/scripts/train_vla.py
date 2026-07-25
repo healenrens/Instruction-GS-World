@@ -1,18 +1,22 @@
-"""VLA trainer — JOINT (mixed) training of the 3D-flow head + π0-style action expert sharing the 1.6B DiT
-trunk (agent.md §VLA). NO JEPA. Builds on the world-model trainer but:
+"""VLA trainer for the joint geometry head and pi0-style action expert sharing the DiT trunk.
+
+The causal-v1 run uses a strict observation contract:
+  * means/uv/K/center/radius come from the current RGB frame through single-frame VGGT,
+  * the fixed 48x48 candidate grid is never filtered by future visibility,
+  * full-video SpaTracker output supplies only xyz1_gt/geom_valid supervision,
+  * clips without a tracker target still train the action expert.
+
+The trainer also:
   * adds the flow-matching ACTION EXPERT (predicts Δqpos[50,14]) on the SAME trunk (both losses backprop it),
   * reads ONLY frame0 (gt_rgb[0]) — no future frame, no JEPA target, no vlmK,
-  * warm-starts the trunk + geom_head from checkpoints/wm_rt2/wm_002500.pt (expert trains from scratch),
-  * loads data/rt2_joint/ clips (each has dq[50,14] + anchor[14] on top of the world-model keys),
   * action normalization from data/rt2_act/norm_stats.pt (arm dims standardized; gripper dims -> [-1,1]).
 
   torchrun --nproc_per_node=4 code/scripts/train_vla.py \
-      --data data/rt2_joint --out checkpoints/vla_rt2 \
-      --init_from checkpoints/wm_rt2/wm_002500.pt \
+      --data data/rt2_causal_v1 --prep_cache data/rt2_causal_v1_prepcache_wrist \
+      --out checkpoints/vla_causal_v1 --init_from "" \
       --norm_stats data/rt2_act/norm_stats.pt \
-      --geom_mode xyz --img_loss 1 --L 512 --steps 4000 \
-      --w_flow 1.0 --w_act 1.0
-  (geom_mode=xyz + img_loss=1 MATCH the warm-start ckpt wm_rt2/wm_002500.pt — keep them aligned.)
+      --geom_mode xyz --img_loss 1 --L 512 --wrist 1 --placement entropy \
+      --causal_geometry_version vggt_t1_grid48_v1 --deepspeed 1 --steps 50000
 
 CPU smoke-test (tiny dims, fake clip, no GPU):
   python code/scripts/train_vla.py --smoke
@@ -27,6 +31,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from igsw.distributed import assert_same_paths, init_torchrun, shard_for_rank  # noqa: E402
 from igsw.gpstoken_wm import GPSTokenWM, place_tokens  # noqa: E402
 from igsw.gaussians.gpstoken import mover_saliency, relevance_saliency  # noqa: E402
 
@@ -90,16 +95,28 @@ def placement_saliency(args, enc, vlm0, uv, disp, n_keep, H, W):
     return relevance_saliency(rel, ghw, H, W) if rel is not None else None
 
 
+def _imgs_with_wrist(args, c, rgb0):
+    """Head frame0 alone, OR [head, left, right] when --wrist and the clip carries wrist frames. Head is
+    ALWAYS first so the per-token 3D grid (image #0) stays head-only; wrist views only enrich VLM context."""
+    if not getattr(args, "wrist", 0) or "left_rgb" not in c or "right_rgb" not in c:
+        return rgb0
+    def _np(x):
+        return (x.cpu().numpy() if hasattr(x, "cpu") else np.asarray(x)).astype(np.uint8)
+    return [rgb0, _np(c["left_rgb"]), _np(c["right_rgb"])]
+
+
 def build_batch(c, dev, args, enc):
     """rt2_joint clip dict -> prepared VLA batch (frame0-only; adds dq). Mirrors the world-model prep."""
     means = c["means"].to(dev).float(); uv = c["uv"].to(dev).float()
     traj = c["traj"].to(dev).float(); N = means.shape[0]
     H, W = int(c["H"]), int(c["W"]); K = int(c["Kf"])
     instr = c.get("instruction", ""); n_keep = N - int(c.get("n_fill", 0))
+    geom_valid = c.get("geom_valid", torch.ones(N, dtype=torch.bool)).to(dev).bool()
     disp = (traj[K] - traj[0]).norm(dim=-1)                            # GT future: TARGET ONLY (xyz1_gt/disp_tok)
-    rgb0 = c["gt_rgb"][0].cpu().numpy().astype(np.uint8)               # frame0 ONLY (no future frame)
-    vlm0 = mv_in(enc.build_inputs(instr, rgb0), dev)
-    sal = placement_saliency(args, enc, vlm0, uv, disp, n_keep, H, W)  # relevance (deployable) | oracle (ablation)
+    rgb0 = c["gt_rgb"][0].cpu().numpy().astype(np.uint8)               # head frame0 (drives 3D/placement)
+    vlm0 = mv_in(enc.build_inputs(instr, _imgs_with_wrist(args, c, rgb0)), dev)   # +wrist views -> context only
+    placement_target = disp if getattr(args, "placement", "entropy") == "oracle" else None
+    sal = placement_saliency(args, enc, vlm0, uv, placement_target, n_keep, H, W)
     cen, sig, idx = place_tokens(rgb0, uv, n_keep, args.L, dev, sal=sal, beta=args.beta)
     if idx.shape[0] < 16:
         raise ValueError("too few tokens")
@@ -108,6 +125,7 @@ def build_batch(c, dev, args, enc):
         "vlm0": vlm0,
         "cen": cen, "sig_n": (sig / float(max(H, W))).clamp(0, 1),
         "tok_xyz0": means[idx], "xyz1_gt": traj[K][idx], "disp_tok": disp[idx],
+        "geom_valid": geom_valid[idx],
         "traj_gt": (traj[1:K + 1][:, idx] if args.traj_pred else None),
         "center": center, "radius": (means[:n_keep] - center).norm(dim=-1).amax().clamp_min(1e-6),
         "K_intr": c["K_intr"].to(dev).float(), "viewmat": c["viewmat"].to(dev).float(),
@@ -125,10 +143,16 @@ def build_clip_single(c, dev, args, enc):
     traj = c["traj"].to(dev).float(); N = means.shape[0]
     H, W = int(c["H"]), int(c["W"]); K = int(c["Kf"])
     instr = c.get("instruction", ""); n_keep = N - int(c.get("n_fill", 0))
+    causal_version = getattr(args, "causal_geometry_version", "")
+    if causal_version and c.get("causal_geometry_version") != causal_version:
+        raise ValueError(f"causal geometry mismatch: clip={c.get('causal_geometry_version')!r} "
+                         f"run={causal_version!r}")
+    geom_valid = c.get("geom_valid", torch.ones(N, dtype=torch.bool)).to(dev).bool()
     disp = (traj[K] - traj[0]).norm(dim=-1)                            # GT future: TARGET ONLY (xyz1_gt/disp_tok)
     rgb0 = c["gt_rgb"][0].cpu().numpy().astype(np.uint8)
-    vlm0 = mv_in(enc.build_inputs(instr, rgb0), dev)
-    sal = placement_saliency(args, enc, vlm0, uv, disp, n_keep, H, W)  # relevance (deployable) | oracle (ablation)
+    vlm0 = mv_in(enc.build_inputs(instr, _imgs_with_wrist(args, c, rgb0)), dev)   # +wrist views -> context only
+    placement_target = disp if getattr(args, "placement", "entropy") == "oracle" else None
+    sal = placement_saliency(args, enc, vlm0, uv, placement_target, n_keep, H, W)
     cen, sig, idx = place_tokens(rgb0, uv, n_keep, args.L, dev, sal=sal, beta=args.beta)
     M = idx.shape[0]
     if M < 16:
@@ -139,6 +163,7 @@ def build_clip_single(c, dev, args, enc):
         "vlm0": vlm0,
         "cen": cen, "sig_n": (sig / float(max(H, W))).clamp(0, 1),
         "tok_xyz0": means[idx], "xyz1_gt": traj[K][idx], "disp_tok": disp[idx],
+        "geom_valid": geom_valid[idx],
         "center": center, "radius": radius, "M": M,
         "K_intr": c["K_intr"].to(dev).float(), "viewmat": c["viewmat"].to(dev).float(),
         "H": H, "W": W, "rgb0_np": rgb0,
@@ -160,6 +185,7 @@ def build_batch_padded(clips, dev, args, enc, L=None):
     xyz1_gt = torch.zeros(B, L, 3, device=dev)
     disp_tok = torch.zeros(B, L, device=dev)
     tok_mask = torch.zeros(B, L, dtype=torch.bool, device=dev)
+    geom_valid = torch.zeros(B, L, dtype=torch.bool, device=dev)
     center = torch.zeros(B, 1, 3, device=dev)
     radius = torch.ones(B, 1, device=dev)
     dq = torch.zeros(B, args.action_steps, args.action_dim, device=dev)
@@ -170,6 +196,7 @@ def build_batch_padded(clips, dev, args, enc, L=None):
         tok_xyz0[i, :M] = s["tok_xyz0"][:M]; cen[i, :M] = s["cen"][:M]
         sig_n[i, :M] = s["sig_n"][:M]; xyz1_gt[i, :M] = s["xyz1_gt"][:M]
         disp_tok[i, :M] = s["disp_tok"][:M]; tok_mask[i, :M] = True
+        geom_valid[i, :M] = s.get("geom_valid", torch.ones(M, dtype=torch.bool, device=dev))[:M]
         center[i] = s["center"]; radius[i, 0] = s["radius"]
         dq[i] = s["dq"]; anchor[i] = s["anchor"]
         vlm_list.append(s["vlm0"])
@@ -179,7 +206,8 @@ def build_batch_padded(clips, dev, args, enc, L=None):
         H_list.append(s["H"]); W_list.append(s["W"])
     return {
         "vlm_list": vlm_list, "tok_xyz0": tok_xyz0, "cen": cen, "sig_n": sig_n,
-        "xyz1_gt": xyz1_gt, "disp_tok": disp_tok, "tok_mask": tok_mask, "center": center, "radius": radius,
+        "xyz1_gt": xyz1_gt, "disp_tok": disp_tok, "tok_mask": tok_mask, "geom_valid": geom_valid,
+        "center": center, "radius": radius,
         "K_intr": K_list, "viewmat": vm_list, "H_list": H_list, "W_list": W_list,
         "dq": dq, "anchor": anchor,
     }
@@ -268,20 +296,29 @@ def make_model(args, dev, Kf):
     model.img_loss = bool(args.img_loss)
     model.w_depth = args.w_depth
     model.cam_cond = bool(args.cam_cond)
-    # FROM SCRATCH by default (--init_from empty): DiT trunk + 3D-flow head + action expert all random-init,
-    # only the Cosmos-Reason2-2B encoder is frozen. (--init_from kept available but unused per the spec.)
-    if args.init_from:
-        sd = torch.load(args.init_from, map_location=dev, weights_only=False)["model"]
-        miss, unexp = model.load_state_dict(sd, strict=False)
-        print(f"[vla] warm-start {args.init_from}: loaded {len(sd)} tensors, {len(miss)} new", flush=True)
-    else:
-        print("[vla] FROM SCRATCH: no warm-start (trunk + heads + expert random-init; encoder frozen)", flush=True)
-    # attach the action expert (with proprioception state cross-attn)
+    # Attach before loading so a VLA checkpoint restores the expert and action-normalizer buffers too.
     model.attach_action_expert(action_dim=args.action_dim, action_steps=args.action_steps,
                                d_act=args.d_act, n_heads_act=args.n_heads_act, mlp_ratio=args.mlp_ratio,
                                norm_stats_path=(args.norm_stats or None), n_state_tokens=args.n_state_tokens)
     model.w_flow_vla, model.w_act_vla = args.w_flow, args.w_act
-    model = model.to(dev)                       # move the newly-attached action expert + act_norm onto dev
+    model = model.to(dev)
+
+    # FROM SCRATCH by default. A VLA warm-start must restore every non-encoder tensor; the frozen encoder is
+    # intentionally omitted from VLA checkpoints and comes from the configured base model.
+    if args.init_from:
+        sd = torch.load(args.init_from, map_location="cpu", weights_only=False)["model"]
+        miss, unexp = model.load_state_dict(sd, strict=False)
+        missing_non_encoder = [key for key in miss if not key.startswith("encoder.")]
+        is_vla_checkpoint = any(key.startswith("action_expert.") for key in sd)
+        if is_vla_checkpoint and (missing_non_encoder or unexp):
+            raise RuntimeError(
+                "incompatible VLA checkpoint: "
+                f"missing_non_encoder={missing_non_encoder[:20]} unexpected={unexp[:20]}"
+            )
+        print(f"[vla] warm-start {args.init_from}: loaded {len(sd)} tensors, "
+              f"missing_non_encoder={len(missing_non_encoder)} unexpected={len(unexp)}", flush=True)
+    else:
+        print("[vla] FROM SCRATCH: no warm-start (trunk + heads + expert random-init; encoder frozen)", flush=True)
     return model
 
 
@@ -799,6 +836,11 @@ def main():
                          "frozen-Qwen instruction grounding — but on RoboTwin2 frames it peaks on BACKGROUND not "
                          "the object (verified, _check_relevance.py), so weak. 'oracle' = GT future-motion "
                          "mover_saliency (the old train+eval LEAK; ablation only). prep_cache bakes this in.")
+    ap.add_argument("--wrist", type=int, default=0, help="1 = feed left+right wrist frame0 as EXTRA Qwen images "
+                    "(head stays image #0 -> 3D/GPSToken unchanged; wrist only enriches VLM context). Requires "
+                    "clips patched with left_rgb/right_rgb (rt2_add_wrist.py). Changes the encode -> rebuild prep_cache.")
+    ap.add_argument("--causal_geometry_version", default="", help="non-empty enforces a matching causal input "
+                    "contract in every clip and records it in the checkpoint")
     ap.add_argument("--steps", type=int, default=40000, help="OPTIMIZER steps (the real run = 40000)")
     ap.add_argument("--batch", type=int, default=8, help="B_per_gpu (clips per GPU per micro-step) — REAL batching")
     ap.add_argument("--accum", type=int, default=1, help="grad-accum micro-steps (effective = batch*world*accum)")
@@ -818,6 +860,7 @@ def main():
     ap.add_argument("--lr_peak", type=float, default=5e-5, help="peak LR after warmup")
     ap.add_argument("--lr_floor", type=float, default=1e-5, help="cosine decay floor")
     ap.add_argument("--warmup_steps", type=int, default=1500, help="linear warmup steps (~3-5%% of 40k)")
+    ap.add_argument("--seed", type=int, default=42, help="shared model-init seed; training RNG is offset by global rank")
     ap.add_argument("--weight_decay", type=float, default=0.01, help="decoupled AdamW weight decay (on weight matrices only, not norms/biases). Mild default — the held-task failure is data-diversity/underfitting, NOT overfitting, so do NOT crank this")
     # action expert
     ap.add_argument("--action_dim", type=int, default=14)
@@ -836,6 +879,9 @@ def main():
     ap.add_argument("--eval_max", type=int, default=600, help="cap # eval clips (2 passes: real + instruction-shuffle). 0 = all")
     args = ap.parse_args()
 
+    if args.causal_geometry_version and args.placement == "oracle":
+        raise ValueError("causal training forbids future-motion oracle token placement")
+
     if args.smoke:
         run_smoke()
         return
@@ -851,33 +897,55 @@ def main():
 
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
-    ddp = "RANK" in os.environ
-    if ddp:
-        dist.init_process_group("nccl")
-        rank, world = dist.get_rank(), dist.get_world_size()
-        local = int(os.environ["LOCAL_RANK"]); torch.cuda.set_device(local); dev = f"cuda:{local}"
-    else:
-        rank, world, local, dev = 0, 1, 0, "cuda"
-    is_main = rank == 0
+    context = init_torchrun()
+    ddp = context.distributed
+    rank, world, local, dev = (
+        context.rank,
+        context.world_size,
+        context.local_rank,
+        context.device,
+    )
+    is_main = context.is_main
     if is_main:
         os.makedirs(args.out, exist_ok=True)
+    if ddp:
+        dist.barrier()
+
+    # Every rank constructs identical parameters. Training randomness is rank-offset after wrapping.
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
 
     use_ds = bool(args.deepspeed) and ddp
     use_fsdp = bool(args.fsdp) and ddp and not use_ds       # DeepSpeed overrides FSDP
     _probe = sorted(glob.glob(f"{args.data}/*_train.pt"))
-    _Kf = int(torch.load(_probe[0], map_location="cpu", weights_only=False)["Kf"]) if _probe else 12
-    # n_l for the expert comes from the trunk's block count inside attach_action_expert (= Qwen layers)
-    model = make_model(args, dev, Kf=_Kf)
-    enc = model.encoder
-
+    assert_same_paths(_probe, context, "training clips")
+    probe_clip = torch.load(_probe[0], map_location="cpu", weights_only=False) if _probe else None
+    _Kf = int(probe_clip["Kf"]) if probe_clip is not None else 12
+    if args.causal_geometry_version:
+        if probe_clip is None:
+            raise ValueError("causal training data is empty")
+        if probe_clip.get("causal_geometry_version") != args.causal_geometry_version:
+            raise ValueError("training data does not satisfy the requested causal geometry contract")
+        if "geom_valid" not in probe_clip or int(probe_clip["means"].shape[0]) != 48 * 48:
+            raise ValueError("causal training clip must contain geom_valid and the full 48x48 input grid")
+        if is_main:
+            print(f"[vla] causal input contract={args.causal_geometry_version} grid=48x48; future labels "
+                  "mask geometry loss only", flush=True)
     if args.cache_prep:                                                  # PRECOMPUTE the prep cache, then exit
         assert args.prep_cache, "--cache_prep needs --prep_cache <dir>"
+        if args.placement == "entropy":
+            from igsw.dynamics.conditioning import QwenInputProcessor
+            enc = QwenInputProcessor()
+        else:
+            enc = make_model(args, dev, Kf=_Kf).encoder
         if is_main:
             os.makedirs(args.prep_cache, exist_ok=True)
         if ddp:
             dist.barrier()
         allclips = sorted(glob.glob(f"{args.data}/*.pt"))                # ALL splits (train + held)
-        myshard = allclips[rank::world]
+        assert_same_paths(allclips, context, "cache input clips")
+        myshard = shard_for_rank(allclips, rank, world, "cache input clips")
         done, skip = 0, 0
         for cp in myshard:
             out = os.path.join(args.prep_cache, os.path.basename(cp))
@@ -900,6 +968,9 @@ def main():
         if ddp:
             dist.barrier(); dist.destroy_process_group()
         return
+    # n_l for the expert comes from the trunk's block count inside attach_action_expert (= Qwen layers)
+    model = make_model(args, dev, Kf=_Kf)
+    enc = model.encoder
     # capture TRUE global param counts BEFORE the FSDP wrap (after wrap the orig params are 1-D flat shards
     # /world, so num_trainable()/num_params() would report the per-rank shard, not the global model).
     _global_trainable = model.num_trainable()
@@ -954,8 +1025,12 @@ def main():
               f"eff_batch={eff} lr_peak={args.lr_peak} lr_floor={args.lr_floor} warmup={args.warmup_steps} "
               f"fsdp={int(use_fsdp)} ds={int(use_ds)}", flush=True)
 
-    clips = sorted(glob.glob(f"{args.data}/*_train.pt"))
-    shard = clips[rank::world]
+    torch.manual_seed(args.seed + rank)
+    np.random.seed(args.seed + rank)
+    torch.cuda.manual_seed_all(args.seed + rank)
+
+    clips = _probe
+    shard = shard_for_rank(clips, rank, world, "training clips")
     if is_main:
         print(f"[vla] {len(clips)} train clips ({len(shard)}/rank)", flush=True)
     amp = torch.autocast("cuda", dtype=torch.bfloat16)
@@ -1039,10 +1114,18 @@ def main():
         n_workers = max(1, args.prefetch_workers)
         q: "queue.Queue" = queue.Queue(maxsize=max(args.prefetch_depth, n_workers + 1))
         stop = threading.Event()
+        shard_cursor = 0
+        shard_cursor_lock = threading.Lock()
+
+        def take_clip_path():
+            nonlocal shard_cursor
+            with shard_cursor_lock:
+                cp = shard[shard_cursor % len(shard)]
+                shard_cursor += 1
+            return cp
 
         def producer(tid):
             torch.cuda.set_device(local)                          # threads use this rank's device
-            j = rank + tid * world                                # each worker starts at a distinct offset
             while not stop.is_set():
                 singles, tries = [], 0
                 # BOUND the fill loop. Without the tries cap, a run of clips that fail make_single makes
@@ -1051,7 +1134,8 @@ def main():
                 # cap we always q.put() within args.batch*8 tries; a short batch -> consumer returns None ->
                 # the all_reduce(MIN) makes ALL ranks skip that micro-step together (no deadlock).
                 while len(singles) < args.batch and tries < args.batch * 8 and not stop.is_set():
-                    cp = shard[j % len(shard)]; j += world * n_workers; tries += 1  # stride by world*n_workers
+                    cp = take_clip_path()
+                    tries += 1
                     try:
                         singles.append(make_single(cp))
                     except Exception:
@@ -1131,10 +1215,12 @@ def main():
                           f"errp{l['errp'].item()*100:.1f}cm dcos{l['dcos'].item():.2f} "
                           f"lr{cur_lr:.1e} {gs/(time.time()-t0):.2f}it/s", flush=True)
                 agg, n_micro = None, 0
-                if (gs % args.save_every == 0 or gs == args.steps) and is_main:
-                    sd = {k: v for k, v in mdl.module.state_dict().items() if not k.startswith("encoder.")}
-                    torch.save({"model": sd, "args": vars(args), "step": gs}, f"{args.out}/vla_{gs:06d}.pt")
-                    print(f"[vla] saved vla_{gs:06d}.pt ({len(sd)} tensors, deepspeed zero2)", flush=True)
+                if gs % args.save_every == 0 or gs == args.steps:
+                    if is_main:
+                        sd = {k: v for k, v in mdl.module.state_dict().items() if not k.startswith("encoder.")}
+                        torch.save({"model": sd, "args": vars(args), "step": gs}, f"{args.out}/vla_{gs:06d}.pt")
+                        print(f"[vla] saved vla_{gs:06d}.pt ({len(sd)} tensors, deepspeed zero2)", flush=True)
+                    dist.barrier()
         if args.prefetch:
             stop.set()
         if is_main:
