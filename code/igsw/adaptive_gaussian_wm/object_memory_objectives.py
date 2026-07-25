@@ -44,11 +44,11 @@ def object_memory_geometry_loss(
         activity.unsqueeze(-1) * activity.unsqueeze(-2)
     )
     relations = weighted_mean(relation_error, pair_weight)
-    predicted_existence = output.get("predicted_future_existence")
-    if predicted_existence is None:
-        raise ValueError("factorized Dynamics has no existence prediction")
-    existence = F.binary_cross_entropy(
-        predicted_existence.clamp(1e-5, 1.0 - 1e-5),
+    predicted_existence_logits = output.get("predicted_future_existence_logits")
+    if predicted_existence_logits is None:
+        raise ValueError("factorized Dynamics has no existence logits")
+    existence = F.binary_cross_entropy_with_logits(
+        predicted_existence_logits,
         output["target_future_existence"].detach(),
     )
     teacher, teacher_parts = teacher_sidecar_loss(output, batch, reference)
@@ -146,8 +146,8 @@ def teacher_sidecar_loss(output: dict, batch: dict, reference: torch.Tensor):
     if not bool(batch["teacher_sidecar_present"].all()):
         raise ValueError("teacher sidecar presence differs within the batch")
     predicted_disparity = output.get("predicted_future_relative_disparity")
-    predicted_visibility = output.get("predicted_future_visibility")
-    if predicted_disparity is None or predicted_visibility is None:
+    predicted_visibility_logits = output.get("predicted_future_visibility_logits")
+    if predicted_disparity is None or predicted_visibility_logits is None:
         raise ValueError("teacher sidecar requires factorized Dynamics outputs")
     target_disparity, target_visibility, object_valid, confidence, correspondence = (
         _pool_dense_teacher(output, batch)
@@ -159,8 +159,8 @@ def teacher_sidecar_loss(output: dict, batch: dict, reference: torch.Tensor):
         weight,
     )
     visibility = weighted_mean(
-        F.binary_cross_entropy(
-            predicted_visibility.clamp(1e-5, 1.0 - 1e-5),
+        F.binary_cross_entropy_with_logits(
+            predicted_visibility_logits,
             target_visibility.detach(),
             reduction="none",
         ),

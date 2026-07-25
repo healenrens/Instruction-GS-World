@@ -22,6 +22,8 @@ class FactorizedDynamicsOutput:
     history_centers: torch.Tensor
     future_relative_scale: torch.Tensor
     future_relative_disparity: torch.Tensor
+    future_visibility_logits: torch.Tensor
+    future_existence_logits: torch.Tensor
     future_visibility: torch.Tensor
     future_existence: torch.Tensor
     future_relations: torch.Tensor
@@ -337,16 +339,18 @@ class FactorizedObjectDynamics(nn.Module):
         lifecycle = self.base_lifecycle_output(future_hidden)
         current_visibility = history_activity[:, -1, None]
         current_existence = existence[:, -1, None]
-        future_visibility = torch.sigmoid(
+        future_visibility_logits = (
             _stable_logit(current_visibility)
             + lifecycle[..., 0]
             + action_geometry[..., 4]
         )
-        future_existence = torch.sigmoid(
+        future_existence_logits = (
             _stable_logit(current_existence)
             + lifecycle[..., 1]
             + action_geometry[..., 5]
         )
+        future_visibility = torch.sigmoid(future_visibility_logits)
+        future_existence = torch.sigmoid(future_existence_logits)
         future_relations = pairwise_relative_geometry(
             future_centers,
             future_relative_scale,
@@ -360,6 +364,8 @@ class FactorizedObjectDynamics(nn.Module):
             history_centers=history_centers,
             future_relative_scale=future_relative_scale,
             future_relative_disparity=future_relative_disparity,
+            future_visibility_logits=future_visibility_logits,
+            future_existence_logits=future_existence_logits,
             future_visibility=future_visibility,
             future_existence=future_existence,
             future_relations=future_relations,

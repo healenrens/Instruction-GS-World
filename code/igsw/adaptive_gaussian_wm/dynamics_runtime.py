@@ -46,6 +46,8 @@ def factorized_result_fields(future_output, history_output, target_future) -> di
     names = (
         "future_relative_scale",
         "future_relative_disparity",
+        "future_visibility_logits",
+        "future_existence_logits",
         "future_visibility",
         "future_existence",
         "future_relations",
