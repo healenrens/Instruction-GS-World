@@ -9,6 +9,7 @@ from .jepa_losses import weighted_mean
 
 def object_memory_geometry_loss(
     output: dict,
+    batch: dict,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Supervise observable support geometry without metric-depth claims."""
     reference = output["predicted_future_slots"].sum() * 0.0
@@ -43,8 +44,132 @@ def object_memory_geometry_loss(
         activity.unsqueeze(-1) * activity.unsqueeze(-2)
     )
     relations = weighted_mean(relation_error, pair_weight)
-    total = scale + relations
-    return total, {
+    predicted_existence = output.get("predicted_future_existence")
+    if predicted_existence is None:
+        raise ValueError("factorized Dynamics has no existence prediction")
+    existence = F.binary_cross_entropy(
+        predicted_existence.clamp(1e-5, 1.0 - 1e-5),
+        output["target_future_existence"].detach(),
+    )
+    teacher, teacher_parts = teacher_sidecar_loss(output, batch, reference)
+    total = scale + relations + 0.5 * existence + teacher
+    parts = {
         "geometry_relative_scale": scale,
         "geometry_image_plane_relations": relations,
+        "geometry_existence": existence,
+    }
+    parts.update(teacher_parts)
+    return total, parts
+
+
+def _pool_dense_teacher(output: dict, batch: dict):
+    disparity_targets = []
+    visibility_targets = []
+    object_validity = []
+    confidence_means = []
+    correspondence_valid = []
+    states = zip(
+        output["target_future_token_states"],
+        output["target_future_slot_states"],
+        strict=True,
+    )
+    for index, (tokens, slots) in enumerate(states):
+        micro_object = slots.assignment.detach() * tokens.activation.detach()
+        dense_object = torch.einsum(
+            "bmn,bmk->bnk", tokens.assignment.detach(), micro_object
+        )
+        confidence = batch["teacher_future_confidence"][:, index].float()
+        visibility = batch["teacher_future_visibility"][:, index].float()
+        correspondence = batch["teacher_future_correspondence"][:, index]
+        valid_track = (correspondence >= 0).to(confidence.dtype)
+        support = dense_object * (confidence * valid_track)[..., None]
+        support_mass = support.sum(dim=1)
+        denominator = support_mass.clamp_min(1e-6)
+        object_validity.append((support_mass > 1e-5).to(confidence.dtype))
+        visibility_targets.append(
+            (support * visibility[..., None]).sum(dim=1) / denominator
+        )
+        visible_support = support * visibility[..., None]
+        disparity_targets.append(
+            (
+                visible_support
+                * batch["teacher_future_relative_disparity"][:, index, :, None]
+            ).sum(dim=1)
+            / visible_support.sum(dim=1).clamp_min(1e-6)
+        )
+        confidence_means.append(confidence.mean())
+        correspondence_valid.append(valid_track.mean())
+    return (
+        torch.stack(disparity_targets, dim=1),
+        torch.stack(visibility_targets, dim=1),
+        torch.stack(object_validity, dim=1),
+        torch.stack(confidence_means).mean(),
+        torch.stack(correspondence_valid).mean(),
+    )
+
+
+def _scale_shift_invariant_disparity(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    denominator = weight.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+    prediction_mean = (prediction * weight).sum(dim=-1, keepdim=True) / denominator
+    target_mean = (target * weight).sum(dim=-1, keepdim=True) / denominator
+    centered_prediction = prediction - prediction_mean
+    centered_target = target - target_mean
+    scale = (
+        (centered_prediction * centered_target * weight).sum(
+            dim=-1, keepdim=True
+        )
+        / (centered_prediction.square() * weight).sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-6)
+    )
+    scale = scale.clamp_min(0.0)
+    aligned = scale * centered_prediction + target_mean
+    return weighted_mean(
+        F.smooth_l1_loss(aligned, target, beta=0.05, reduction="none"),
+        weight,
+    )
+
+
+def teacher_sidecar_loss(output: dict, batch: dict, reference: torch.Tensor):
+    if "teacher_sidecar_present" not in batch:
+        return reference, {
+            "teacher_sidecar_enabled": reference,
+            "teacher_relative_disparity": reference,
+            "teacher_visibility": reference,
+            "teacher_confidence_mean": reference,
+            "teacher_correspondence_valid": reference,
+        }
+    if not bool(batch["teacher_sidecar_present"].all()):
+        raise ValueError("teacher sidecar presence differs within the batch")
+    predicted_disparity = output.get("predicted_future_relative_disparity")
+    predicted_visibility = output.get("predicted_future_visibility")
+    if predicted_disparity is None or predicted_visibility is None:
+        raise ValueError("teacher sidecar requires factorized Dynamics outputs")
+    target_disparity, target_visibility, object_valid, confidence, correspondence = (
+        _pool_dense_teacher(output, batch)
+    )
+    weight = (target_visibility * object_valid).detach()
+    disparity = _scale_shift_invariant_disparity(
+        predicted_disparity,
+        target_disparity.detach(),
+        weight,
+    )
+    visibility = weighted_mean(
+        F.binary_cross_entropy(
+            predicted_visibility.clamp(1e-5, 1.0 - 1e-5),
+            target_visibility.detach(),
+            reduction="none",
+        ),
+        (output["target_future_existence"] * object_valid).detach(),
+    )
+    return disparity + visibility, {
+        "teacher_sidecar_enabled": reference.new_ones(()),
+        "teacher_relative_disparity": disparity,
+        "teacher_visibility": visibility,
+        "teacher_confidence_mean": confidence,
+        "teacher_correspondence_valid": correspondence,
     }

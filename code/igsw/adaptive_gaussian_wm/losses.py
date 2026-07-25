@@ -315,12 +315,15 @@ def adaptive_world_model_loss(
         0.5 * (zero_alignment + 2.0 * zero_change)
         + 2.0 * (zero_feature_alignment + 2.0 * zero_feature_change)
     )
-    action, action_parts = effect_aligned_action_loss(
-        model,
-        output,
-        future,
-        zero_future,
-    )
+    action = future * 0.0
+    action_parts = {}
+    if weights.action > 0.0:
+        action, action_parts = effect_aligned_action_loss(
+            model,
+            output,
+            future,
+            zero_future,
+        )
     action_specificity = future * 0.0
     action_specificity_parts = {}
     if weights.action_specificity > 0.0:
@@ -353,7 +356,7 @@ def adaptive_world_model_loss(
     rgb, rgb_delta, rgb_object, rgb_parts = rgb_loss_bundle(
         model, batch, output, feature
     )
-    geometry, geometry_parts = object_memory_geometry_loss(output)
+    geometry, geometry_parts = object_memory_geometry_loss(output, batch)
     zero_margin, zero_margin_parts = observed_zero_action_margin_loss(model, batch, output)
     language_effect = feature * 0.0
     language_effect_parts = {}

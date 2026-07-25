@@ -133,7 +133,7 @@ def main() -> None:
         "feature_scale": _feature_scale_contract(),
         "rgb_change": _rgb_change_contract(),
     }
-    _require(CHECKPOINT_VERSION == 27, "checkpoint version was not upgraded")
+    _require(CHECKPOINT_VERSION == 28, "checkpoint version was not upgraded")
     output = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8") as handle:

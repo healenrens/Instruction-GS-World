@@ -18,8 +18,13 @@ def build_config(
         "probe": AdaptiveGaussianWMConfig.probe,
         "full": AdaptiveGaussianWMConfig.full,
     }
+    constructor = (
+        AdaptiveGaussianWMConfig.object_memory_full
+        if args.architecture == "object_memory_v1"
+        else constructors[profile]
+    )
     return replace(
-        constructors[profile](feature_dim),
+        constructor(feature_dim),
         condition_dim=condition_dim,
         rgb_supervision=rgb_supervision,
         rgb_short_side=args.rgb_short_side,

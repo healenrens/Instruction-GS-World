@@ -14,6 +14,7 @@ def add_dataset_arguments(parser) -> None:
     parser.add_argument("--history_frames", type=int, default=4)
     parser.add_argument("--future_frames", type=int, default=4)
     parser.add_argument("--sequence_anchors", default="3,5,8")
+    parser.add_argument("--teacher_sidecar", default="")
 
 
 def build_training_dataset(
@@ -22,6 +23,8 @@ def build_training_dataset(
     language_enabled: bool,
     rgb_enabled: bool,
 ):
+    if args.teacher_sidecar and args.data_format != "sequence":
+        raise ValueError("teacher sidecars require sequence data")
     if args.data_format == "pair":
         if not args.dino:
             raise ValueError("pair data requires --dino")
@@ -49,4 +52,5 @@ def build_training_dataset(
         load_rgb=rgb_enabled,
         rgb_short_side=args.rgb_short_side,
         rgb_pad_multiple=args.rgb_pad_multiple,
+        teacher_sidecar=args.teacher_sidecar,
     )

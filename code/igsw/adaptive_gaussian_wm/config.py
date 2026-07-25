@@ -298,6 +298,8 @@ class AdaptiveGaussianWMConfig:
                 )
             if (self.action_tokens, self.action_dim) != (4, 32):
                 raise ValueError("object_memory_v1 action contract is [4,32]")
+            if (self.min_active_tokens, self.max_micro_tokens) != (64, 256):
+                raise ValueError("object_memory_v1 token gate contract is [64,256]")
             if self.condition_dim != 0 or self.rgb_supervision:
                 raise ValueError("object_memory_v1 is language-free and feature-only")
             if any(

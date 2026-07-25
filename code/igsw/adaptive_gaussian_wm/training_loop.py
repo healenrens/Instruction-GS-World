@@ -53,7 +53,7 @@ def train_phase(
     optimizer.zero_grad(set_to_none=True)
     while step < phase_steps:
         sampler.set_epoch(
-            args.seed + epoch + (100000 if phase == "joint" else 0)
+            args.seed + epoch + (100000 if phase != "representation" else 0)
         )
         accumulated: dict[str, torch.Tensor] = {}
         micro_count = 0
@@ -72,7 +72,20 @@ def train_phase(
             )
             with sync_context, amp_context():
                 if phase == "representation":
-                    result = wrapped(batch, phase="representation")
+                    model_phase = (
+                        "object_memory_representation_loss"
+                        if args.architecture == "object_memory_v1"
+                        else "representation"
+                    )
+                    result = wrapped(
+                        batch,
+                        phase=model_phase,
+                        loss_weights=(
+                            weights
+                            if model_phase == "object_memory_representation_loss"
+                            else None
+                        ),
+                    )
                     loss, parts = result["loss"], result["parts"]
                 else:
                     result = wrapped(
@@ -143,6 +156,12 @@ def train_phase(
                     "updates_per_epoch": updates_per_epoch,
                     **metrics,
                 }
+                record.update(
+                    {
+                        f"lr_{group.get('group_name', index)}": group["lr"]
+                        for index, group in enumerate(optimizer.param_groups)
+                    }
+                )
                 if device.type == "cuda":
                     record.update(cuda_memory_metrics(device))
                 with open(log_path, "a", encoding="utf-8") as handle:

@@ -45,6 +45,17 @@ from igsw.adaptive_gaussian_wm.training_modes import (  # noqa: E402
     configure_posterior_dynamics_gate,
     staged_loss_weights,
 )
+from igsw.adaptive_gaussian_wm.v28_training import (  # noqa: E402
+    add_v28_arguments,
+    build_optimizer,
+    configure_v28_stage,
+    is_v28,
+    v28_loss_weights,
+    v28_runtime_metadata,
+    validate_v28_arguments,
+    validate_v28_gate,
+    validate_v28_initialization,
+)
 from igsw.distributed import assert_same_paths, init_torchrun  # noqa: E402
 
 
@@ -138,6 +149,7 @@ def parse_args() -> argparse.Namespace:
         choices=("fixed", "learned", "rgb"),
         default="fixed",
     )
+    add_v28_arguments(parser)
     add_wandb_arguments(parser)
     return parser.parse_args()
 
@@ -177,6 +189,7 @@ def main() -> None:
     )
     rgb_enabled = args.rgb_supervision != "off"
     context = init_torchrun()
+    validate_v28_arguments(args, context.world_size)
     device = torch.device(context.device)
     seed = args.seed + context.rank
     random.seed(seed)
@@ -195,7 +208,9 @@ def main() -> None:
         else ""
     )
     args.sequence_data_sha256 = getattr(dataset, "data_sha256", "")
+    args.teacher_sidecar_sha256 = getattr(dataset, "teacher_sidecar_sha256", "")
     assert_same_paths(dataset.paths, context, dataset.contract_label)
+    gate_report = validate_v28_gate(args, dataset, PROJECT_ROOT)
     if args.validate_only:
         if context.is_main:
             sample = dataset[0]
@@ -208,6 +223,7 @@ def main() -> None:
                         "history_shape": list(sample["history_features"].shape),
                         "future_shape": list(sample["future_features"].shape),
                         "condition_dim": dataset.condition_dim,
+                        "teacher_sidecar": bool(args.teacher_sidecar),
                         "rgb_shape": (
                             list(sample["history_rgb"].shape)
                             if rgb_enabled
@@ -262,12 +278,15 @@ def main() -> None:
             map_location="cpu",
             weights_only=False, mmap=True,
         )
+        validate_v28_initialization(init_checkpoint, args)
         warm_start_report = warm_start_model(model, init_checkpoint)
         if context.is_main:
             report_path = os.path.join(args.out, "warm_start_report.json")
             with open(report_path, "w", encoding="utf-8") as handle:
                 json.dump(warm_start_report, handle, indent=2, sort_keys=True)
-    if args.posterior_dynamics_gate:
+    if is_v28(args):
+        configure_v28_stage(model, args)
+    elif args.posterior_dynamics_gate:
         configure_posterior_dynamics_gate(model, args.posterior_update_scope)
     elif args.posterior_core_training:
         configure_posterior_core_training(model)
@@ -315,11 +334,7 @@ def main() -> None:
             "posterior Core steps do not cover one balanced data epoch: "
             f"{args.joint_steps} < {balanced_updates}"
         )
-    optimizer = torch.optim.AdamW(
-        [parameter for parameter in model.parameters() if parameter.requires_grad],
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
+    optimizer = build_optimizer(model, args)
     total_steps = args.representation_steps + args.joint_steps
     warmup_steps = (
         args.warmup_steps
@@ -330,15 +345,14 @@ def main() -> None:
         optimizer,
         warmup_steps,
         total_steps,
-        args.lr_floor / args.lr,
+        0.1 if is_v28(args) else args.lr_floor / args.lr,
     )
     if checkpoint is not None:
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
         restore_rng_state(checkpoint, context)
-    weights = staged_loss_weights(
-        args.posterior_dynamics_gate,
-        args.posterior_core_training,
+    weights = v28_loss_weights(args) or staged_loss_weights(
+        args.posterior_dynamics_gate, args.posterior_core_training
     )
     representation_step = 0
     joint_step = 0
@@ -352,8 +366,18 @@ def main() -> None:
             joint_step = int(checkpoint["phase_step"])
     if context.is_main:
         effective_batch = args.batch * context.world_size * args.grad_accum
+        runtime_metadata = v28_runtime_metadata(args, dataset, gate_report)
+        if is_v28(args):
+            with open(
+                os.path.join(args.out, "run_contract.json"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                json.dump(runtime_metadata, handle, indent=2, sort_keys=True)
         print(
-            f"[adaptive-wm] profile={args.profile} world={context.world_size} "
+            f"[adaptive-wm] architecture={args.architecture} "
+            f"stage={args.training_stage} profile={args.profile} "
+            f"world={context.world_size} "
             f"effective_batch={effective_batch} examples={len(dataset)} "
             f"data_format={args.data_format} "
             f"language={language_enabled} rgb={rgb_enabled} "
@@ -385,6 +409,7 @@ def main() -> None:
                 "condition_dim": dataset.condition_dim,
                 "contract": dataset.contract_label,
                 "sha256": args.sequence_data_sha256,
+                "teacher_sidecar_sha256": args.teacher_sidecar_sha256,
             },
             "runtime": {
                 "checkpoint_version": CHECKPOINT_VERSION,
@@ -395,6 +420,7 @@ def main() -> None:
                 ),
                 "warmup_steps": warmup_steps,
                 "balanced_updates_per_epoch": balanced_updates,
+                **v28_runtime_metadata(args, dataset, gate_report),
             },
         },
     )
@@ -415,7 +441,7 @@ def main() -> None:
         experiment_tracker,
     )
     joint_step, global_step = train_phase(
-        "joint",
+        "posterior" if args.training_stage == "posterior" else "joint",
         args.joint_steps,
         joint_step,
         global_step,

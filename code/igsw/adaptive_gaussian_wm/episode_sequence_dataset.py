@@ -24,6 +24,7 @@ from .sequence_contract import (
     temporal_layout,
 )
 from .group_balanced_sampler import sqrt_coverage_targets
+from .teacher_sidecar import TeacherSidecarStore
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class CausalVisualEpisodeDataset(Dataset):
         explicit_goal: bool = False,
         rgb_short_side: int = 256,
         rgb_pad_multiple: int = 16,
+        teacher_sidecar: str = "",
     ):
         manifest_path = os.path.join(cache_root, EPISODE_MANIFEST_NAME)
         with open(manifest_path, encoding="utf-8") as handle:
@@ -241,6 +243,22 @@ class CausalVisualEpisodeDataset(Dataset):
             )
         self.rgb_height = int(rgb_meta["padded_height"])
         self.rgb_width = int(rgb_meta["padded_width"])
+        self.teacher_sidecar = (
+            TeacherSidecarStore(
+                teacher_sidecar,
+                manifest,
+                self.data_sha256,
+                self.grid_height,
+                self.grid_width,
+            )
+            if teacher_sidecar
+            else None
+        )
+        self.teacher_sidecar_sha256 = (
+            self.teacher_sidecar.manifest_sha256 if self.teacher_sidecar else ""
+        )
+        if self.teacher_sidecar is not None:
+            self.paths.extend(self.teacher_sidecar.paths)
 
     @staticmethod
     def _validate_manifest(manifest: dict, path: str) -> None:
@@ -470,4 +488,13 @@ class CausalVisualEpisodeDataset(Dataset):
                     goal_rgb=future_rgb[-1],
                     goal_rgb_valid=future_rgb_valid[-1],
                 )
+        if self.teacher_sidecar is not None:
+            result.update(
+                self.teacher_sidecar.sample(
+                    record.path,
+                    sampled_controls,
+                    history_index,
+                    future_index,
+                )
+            )
         return result

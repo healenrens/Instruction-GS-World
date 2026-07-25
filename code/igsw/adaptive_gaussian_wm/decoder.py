@@ -288,6 +288,10 @@ class GaussianReadout(nn.Module):
         weight = torch.exp(-0.5 * distance)
         weight = weight * readout.opacity.squeeze(-1)[..., None]
         weight = weight * readout.activation.squeeze(-1)[..., None]
+        relative_order = torch.softmax(
+            readout.depth_order.squeeze(-1).float(), dim=2
+        ).to(weight.dtype)
+        weight = weight * relative_order[..., None] * readout.center.shape[2]
         coverage = weight.sum(dim=2)
         normalized = weight / coverage[:, :, None].clamp_min(1e-6)
         features = torch.einsum(

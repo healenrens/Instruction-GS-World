@@ -41,7 +41,7 @@ def run_object_dynamics(
     )
 
 
-def factorized_result_fields(future_output, history_output) -> dict:
+def factorized_result_fields(future_output, history_output, target_future) -> dict:
     """Expose optional v28 outputs while keeping legacy results unchanged."""
     names = (
         "future_relative_scale",
@@ -57,6 +57,8 @@ def factorized_result_fields(future_output, history_output) -> dict:
         for name in names
         if hasattr(future_output, name)
     }
+    result["target_future_token_states"] = target_future["token_states"]
+    result["target_future_slot_states"] = target_future["slot_states"]
     if hasattr(history_output, "future_relative_scale"):
         result.update(
             {

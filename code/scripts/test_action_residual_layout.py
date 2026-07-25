@@ -467,7 +467,7 @@ def main() -> None:
             for residual_dim in RESIDUAL_DIMS
         },
     }
-    _require(CHECKPOINT_VERSION == 27, "checkpoint version was not upgraded")
+    _require(CHECKPOINT_VERSION == 28, "checkpoint version was not upgraded")
     output = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8") as handle:

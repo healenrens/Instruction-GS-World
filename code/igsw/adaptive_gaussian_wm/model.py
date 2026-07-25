@@ -14,6 +14,7 @@ from .factorized_dynamics import FactorizedObjectDynamics
 from .gpstoken import LearnableGPSTokenAllocator
 from .latent_action import LatentActionModel
 from .language_effect import LanguageEffectAlignment
+from .model_phases import joint_phase_flags, select_dynamics_actions
 from .object_memory import ObjectMemoryTransition
 from .object_slots import ObjectSlotAggregator
 from .observed_action import posterior_from_targets
@@ -193,10 +194,9 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
 
             loss, parts = representation_pretrain_loss(self, batch)
             return {"loss": loss, "parts": parts}
-        compute_joint_loss = phase in ("joint_loss", "posterior_dynamics_loss")
-        posterior_dynamics_loss = phase == "posterior_dynamics_loss"
-        if phase not in ("joint", "joint_loss", "posterior_dynamics_loss"):
-            raise ValueError(f"unknown training phase: {phase}")
+        compute_joint_loss, posterior_dynamics_loss, action_free = (
+            joint_phase_flags(phase, self.config.architecture)
+        )
         history = self.encode_history(batch)
         condition = self.encode_condition(batch)
         target_history, target_future = self.encode_targets(batch)
@@ -224,18 +224,14 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             batch.get("condition_tokens"),
             batch.get("condition_token_valid"),
         )
-        if actions_override is not None:
-            if actions_override.shape != posterior_actions.shape:
-                raise ValueError("actions_override must match posterior actions")
-            actions = actions_override
-        elif use_posterior:
-            actions = posterior_actions
-        else:
-            actions = self.latent_actions.prior.sample(
-                prior_context,
-                sample_count=1,
-                stochastic=True,
-            )[0]
+        actions = select_dynamics_actions(
+            self,
+            posterior_actions,
+            prior_context,
+            use_posterior,
+            actions_override,
+            action_free,
+        )
         actions = residual_action_dropout(
             actions,
             self.config.action_residual_dropout,
@@ -452,7 +448,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             "history_token_states": history["token_states"],
             "history_slot_states": history["slot_states"],
         }
-        result.update(factorized_result_fields(future_output, history_output))
+        result.update(factorized_result_fields(future_output, history_output, target_future))
         if compute_joint_loss:
             if loss_weights is None:
                 raise ValueError("joint_loss phase requires loss_weights")

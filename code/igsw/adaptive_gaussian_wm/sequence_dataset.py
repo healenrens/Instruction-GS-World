@@ -33,7 +33,10 @@ class WindowCausalVisualSequenceDataset(Dataset):
         explicit_goal: bool = False,
         rgb_short_side: int = 256,
         rgb_pad_multiple: int = 16,
+        teacher_sidecar: str = "",
     ):
+        if teacher_sidecar:
+            raise ValueError("teacher sidecars require the dense episode backend")
         clip_paths = [
             path
             for path in sorted(glob.glob(os.path.join(cache_root, "*.pt")))
@@ -266,6 +269,7 @@ def CausalVisualSequenceDataset(
     explicit_goal: bool = False,
     rgb_short_side: int = 256,
     rgb_pad_multiple: int = 16,
+    teacher_sidecar: str = "",
 ):
     """Select the versioned window or dense-episode sequence backend."""
     arguments = dict(
@@ -279,6 +283,7 @@ def CausalVisualSequenceDataset(
         explicit_goal=explicit_goal,
         rgb_short_side=rgb_short_side,
         rgb_pad_multiple=rgb_pad_multiple,
+        teacher_sidecar=teacher_sidecar,
     )
     if os.path.isfile(os.path.join(cache_root, EPISODE_MANIFEST_NAME)):
         from .episode_sequence_dataset import CausalVisualEpisodeDataset

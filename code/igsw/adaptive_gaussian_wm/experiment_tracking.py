@@ -75,7 +75,7 @@ def _write_run_id(path: str, run_id: str) -> None:
 def _metric_name(name: str) -> str:
     if name in _PROGRESS_KEYS:
         return f"progress/{name}"
-    if name in _RUNTIME_KEYS:
+    if name in _RUNTIME_KEYS or name.startswith("lr_"):
         return f"runtime/{name}"
     if name in _SYSTEM_KEYS:
         return f"system/{name}"

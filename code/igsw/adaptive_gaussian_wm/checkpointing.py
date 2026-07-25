@@ -9,7 +9,7 @@ import torch
 import torch.distributed as dist
 
 
-CHECKPOINT_VERSION = 27
+CHECKPOINT_VERSION = 28
 
 
 def collect_rng_states(context) -> list[dict]:
@@ -121,6 +121,10 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "sequence_data_sha256",
         "condition_cache",
         "condition_feature_sha256",
+        "teacher_sidecar",
+        "teacher_sidecar_sha256",
+        "architecture",
+        "training_stage",
         "profile",
         "representation_steps",
         "joint_steps",
@@ -129,6 +133,8 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "max_train_items",
         "lr",
         "lr_floor",
+        "core_lr",
+        "action_lr",
         "warmup_steps",
         "warmup_fraction",
         "weight_decay",
@@ -160,6 +166,7 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "action_residual_gate",
         "action_residual_dropout",
         "semantic_action_basis",
+        "gate_report",
     )
     mismatches = {}
     for name in immutable:
@@ -175,7 +182,13 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         else:
             previous = saved[name]
         current = getattr(args, name)
-        if name in ("data", "dino", "condition_cache") and current:
+        if name in (
+            "data",
+            "dino",
+            "condition_cache",
+            "teacher_sidecar",
+            "gate_report",
+        ) and current:
             current = os.path.abspath(current)
             previous = os.path.abspath(previous)
         if current != previous:
