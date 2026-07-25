@@ -12,6 +12,7 @@ from .loss_weights import AdaptiveGaussianLossWeights
 
 
 ARCHITECTURE = "object_memory_v1"
+DEFAULT_TARGET_GLOBAL_BATCH = 256
 
 
 def add_v28_arguments(parser) -> None:
@@ -27,11 +28,31 @@ def add_v28_arguments(parser) -> None:
     )
     parser.add_argument("--core_lr", type=float, default=2e-4)
     parser.add_argument("--action_lr", type=float, default=2e-4)
+    parser.add_argument(
+        "--target_global_batch",
+        type=int,
+        default=DEFAULT_TARGET_GLOBAL_BATCH,
+    )
     parser.add_argument("--gate_report", default="")
 
 
 def is_v28(args) -> bool:
     return args.architecture == ARCHITECTURE
+
+
+def resolve_v28_gradient_accumulation(args, world_size: int) -> None:
+    if not is_v28(args):
+        return
+    if world_size <= 0 or args.target_global_batch <= 0:
+        raise ValueError("v28 world size and target global batch must be positive")
+    if args.grad_accum == 0:
+        samples_per_micro_step = args.batch * world_size
+        args.grad_accum = max(
+            1,
+            (args.target_global_batch + samples_per_micro_step // 2)
+            // samples_per_micro_step,
+        )
+    args.effective_global_batch = args.batch * args.grad_accum * world_size
 
 
 def validate_v28_arguments(args, world_size: int) -> None:
@@ -53,6 +74,8 @@ def validate_v28_arguments(args, world_size: int) -> None:
         raise ValueError("object_memory_v1 uses training_stage, not legacy modes")
     if args.core_lr <= 0.0 or args.action_lr <= 0.0:
         raise ValueError("v28 learning rates must be positive")
+    if args.grad_accum <= 0:
+        raise ValueError("v28 gradient accumulation did not resolve")
     if args.lr != args.core_lr or abs(args.lr_floor / args.core_lr - 0.1) > 1e-9:
         raise ValueError("v28 legacy LR fields must mirror core LR and its 0.1 floor")
     if args.warmup_steps != 0 or abs(args.warmup_fraction - 0.05) > 1e-9:
@@ -65,12 +88,8 @@ def validate_v28_arguments(args, world_size: int) -> None:
     if args.training_stage == "posterior" and not (args.init_from or args.resume):
         raise ValueError("posterior stage requires representation init or strict resume")
     if not args.validate_only:
-        if world_size != 16:
-            raise ValueError("v28 long training requires exactly 16 DDP ranks")
         if args.batch not in (2, 4, 8):
             raise ValueError("v28 per-rank batch must be 2, 4, or 8")
-        if args.batch * args.grad_accum * world_size != 256:
-            raise ValueError("v28 effective global batch must equal 256")
         if not args.gate_report:
             raise ValueError("v28 training requires --gate_report")
 
@@ -242,6 +261,9 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "data_manifest_sha256": dataset.data_sha256,
         "core_lr": args.core_lr,
         "action_lr": args.action_lr,
+        "gpu_policy": "auto",
+        "target_global_batch": args.target_global_batch,
+        "effective_global_batch": args.effective_global_batch,
         "teacher_sidecar": "enabled" if args.teacher_sidecar else "disabled",
         "teacher_sidecar_sha256": getattr(dataset, "teacher_sidecar_sha256", ""),
         "disabled_teacher_losses": (

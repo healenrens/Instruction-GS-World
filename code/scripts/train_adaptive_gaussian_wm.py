@@ -50,6 +50,7 @@ from igsw.adaptive_gaussian_wm.v28_training import (  # noqa: E402
     build_optimizer,
     configure_v28_stage,
     is_v28,
+    resolve_v28_gradient_accumulation,
     v28_loss_weights,
     v28_runtime_metadata,
     validate_v28_arguments,
@@ -159,8 +160,10 @@ def main() -> None:
         raise ValueError("training steps cannot be negative")
     if not args.validate_only and args.representation_steps + args.joint_steps == 0:
         raise ValueError("training requires at least one optimizer step")
-    if args.batch <= 0 or args.grad_accum <= 0:
-        raise ValueError("batch and grad_accum must be positive")
+    if args.batch <= 0 or args.grad_accum < 0:
+        raise ValueError("batch must be positive and grad_accum non-negative")
+    if args.grad_accum == 0 and not is_v28(args):
+        raise ValueError("automatic grad_accum is only available for v28")
     if args.save_every < 0:
         raise ValueError("save_every must be non-negative")
     if args.resume and args.init_from:
@@ -189,6 +192,7 @@ def main() -> None:
     )
     rgb_enabled = args.rgb_supervision != "off"
     context = init_torchrun()
+    resolve_v28_gradient_accumulation(args, context.world_size)
     validate_v28_arguments(args, context.world_size)
     device = torch.device(context.device)
     seed = args.seed + context.rank

@@ -2,18 +2,19 @@
 set -euo pipefail
 
 ROOT="${ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
-required=(WORLD_SIZE RANK MASTER_ADDR MASTER_PORT NPROC_PER_NODE STAGE GATE_REPORT)
+required=(WORLD_SIZE RANK MASTER_ADDR MASTER_PORT STAGE GATE_REPORT)
 for name in "${required[@]}"; do
     if [[ -z "${!name:-}" ]]; then
         echo "[object-memory-v28] missing environment variable: ${name}" >&2
         exit 2
     fi
 done
-if [[ "${WORLD_SIZE}" -ne 2 || "${NPROC_PER_NODE}" -ne 8 ]]; then
-    echo "[object-memory-v28] expected exactly two nodes x eight GPUs" >&2
+if ! [[ "${WORLD_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[object-memory-v28] WORLD_SIZE must be a positive node count" >&2
     exit 2
 fi
-if [[ "${RANK}" -lt 0 || "${RANK}" -ge "${WORLD_SIZE}" ]]; then
+if ! [[ "${RANK}" =~ ^[0-9]+$ ]] \
+    || [[ "${RANK}" -ge "${WORLD_SIZE}" ]]; then
     echo "[object-memory-v28] invalid node rank: ${RANK}" >&2
     exit 2
 fi
@@ -22,7 +23,8 @@ if ! [[ "${MASTER_PORT}" =~ ^[0-9]+$ ]] \
     echo "[object-memory-v28] MASTER_PORT must be in 1..65535" >&2
     exit 2
 fi
-if [[ "${MASTER_ADDR}" == "127.0.0.1" || "${MASTER_ADDR}" == "localhost" ]]; then
+if [[ "${WORLD_SIZE}" -gt 1 ]] \
+    && [[ "${MASTER_ADDR}" == "127.0.0.1" || "${MASTER_ADDR}" == "localhost" ]]; then
     echo "[object-memory-v28] MASTER_ADDR must be reachable from node 1" >&2
     exit 2
 fi
@@ -32,12 +34,34 @@ if [[ "${STAGE}" != "representation" && "${STAGE}" != "posterior" ]]; then
 fi
 
 DATA="${DATA:-${ROOT}/data/rt2_visual_episodes_no_language_v1}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-auto}"
+if [[ "${NPROC_PER_NODE}" == "auto" ]]; then
+    TORCHRUN_NPROC="gpu"
+elif [[ "${NPROC_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
+    TORCHRUN_NPROC="${NPROC_PER_NODE}"
+else
+    echo "[object-memory-v28] NPROC_PER_NODE must be auto or a positive integer" >&2
+    exit 2
+fi
 TEACHER_SIDECAR="${TEACHER_SIDECAR:-}"
 INIT_FROM="${INIT_FROM:-}"
 RESUME="${RESUME:-}"
 SEED="${SEED:-17}"
 BATCH_PER_GPU="${BATCH_PER_GPU:-4}"
-GRAD_ACCUM="${GRAD_ACCUM:-4}"
+GRAD_ACCUM="${GRAD_ACCUM:-auto}"
+TARGET_GLOBAL_BATCH="${TARGET_GLOBAL_BATCH:-256}"
+if [[ "${GRAD_ACCUM}" == "auto" ]]; then
+    TRAINER_GRAD_ACCUM=0
+elif [[ "${GRAD_ACCUM}" =~ ^[1-9][0-9]*$ ]]; then
+    TRAINER_GRAD_ACCUM="${GRAD_ACCUM}"
+else
+    echo "[object-memory-v28] GRAD_ACCUM must be auto or a positive integer" >&2
+    exit 2
+fi
+if ! [[ "${TARGET_GLOBAL_BATCH}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[object-memory-v28] TARGET_GLOBAL_BATCH must be positive" >&2
+    exit 2
+fi
 WORKERS_PER_RANK="${WORKERS_PER_RANK:-2}"
 SAVE_EVERY="${SAVE_EVERY:-10000}"
 LOG_EVERY="${LOG_EVERY:-20}"
@@ -65,8 +89,8 @@ fi
 OUT="${OUT:-${ROOT}/outputs/${RUN_NAME}}"
 LOG_ROOT="${LOG_ROOT:-${ROOT}/logs/${RUN_NAME}}"
 WANDB_NAME="${WANDB_NAME:-${RUN_NAME}}"
-WANDB_GROUP="${WANDB_GROUP:-object-memory-jepa-v28-2n8g}"
-WANDB_TAGS="${WANDB_TAGS:-object-memory,jepa,no-language,no-rgb,v28,ddp-2n8g,${STAGE}}"
+WANDB_GROUP="${WANDB_GROUP:-object-memory-jepa-v28}"
+WANDB_TAGS="${WANDB_TAGS:-object-memory,jepa,no-language,no-rgb,v28,ddp-auto,${STAGE}}"
 WANDB_DIR="${WANDB_DIR:-${OUT}/wandb}"
 
 for path in "${ROOT}" "${DATA}"; do
@@ -159,16 +183,6 @@ if [[ -z "${WANDB_API_KEY:-}" ]] \
     echo "[object-memory-v28] online W&B credentials are missing" >&2
     exit 2
 fi
-visible_gpus="$("${ROOT}/.venv/bin/python" -c 'import torch; print(torch.cuda.device_count())')"
-if [[ "${visible_gpus}" -ne "${NPROC_PER_NODE}" ]]; then
-    echo "[object-memory-v28] visible GPUs=${visible_gpus}, expected 8" >&2
-    exit 2
-fi
-global_batch=$((BATCH_PER_GPU * WORLD_SIZE * NPROC_PER_NODE * GRAD_ACCUM))
-if [[ "${global_batch}" -ne 256 ]]; then
-    echo "[object-memory-v28] global batch must equal 256, got ${global_batch}" >&2
-    exit 2
-fi
 if [[ "${CONTRACT_WAIT_SECONDS}" -le 0 ]]; then
     echo "[object-memory-v28] contract wait must be positive" >&2
     exit 2
@@ -234,7 +248,7 @@ mkdir -p "${OUT}" "${LOG_ROOT}" "${WANDB_DIR}"
 cd "${ROOT}"
 cmd=(
     .venv/bin/torchrun
-    --nproc_per_node "${NPROC_PER_NODE}"
+    --nproc_per_node "${TORCHRUN_NPROC}"
     --nnodes "${WORLD_SIZE}"
     --node_rank "${RANK}"
     --master_addr "${MASTER_ADDR}"
@@ -251,7 +265,8 @@ cmd=(
     --training_stage "${STAGE}"
     "${phase_args[@]}"
     --batch "${BATCH_PER_GPU}"
-    --grad_accum "${GRAD_ACCUM}"
+    --grad_accum "${TRAINER_GRAD_ACCUM}"
+    --target_global_batch "${TARGET_GLOBAL_BATCH}"
     --workers "${WORKERS_PER_RANK}"
     --lr "${CORE_LR}"
     --lr_floor "${LR_FLOOR}"
@@ -280,8 +295,8 @@ cmd=(
     "${sidecar_args[@]}"
     "${init_args[@]}"
 )
-echo "[object-memory-v28] commit=${current_commit} node=${RANK}/2 stage=${STAGE}"
-echo "[object-memory-v28] global_batch=${global_batch} steps=${STEPS}"
+echo "[object-memory-v28] commit=${current_commit} node=${RANK}/${WORLD_SIZE} stage=${STAGE}"
+echo "[object-memory-v28] nproc=${TORCHRUN_NPROC} grad_accum=${GRAD_ACCUM} target_global_batch=${TARGET_GLOBAL_BATCH} steps=${STEPS}"
 printf '[object-memory-v28] command:'
 printf ' %q' "${cmd[@]}"
 printf '\n'

@@ -47,7 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--history_frames", type=int, default=4)
     parser.add_argument("--future_frames", type=int, default=4)
     parser.add_argument("--sequence_anchors", default="3,5,8")
-    parser.add_argument("--expected_local_gpus", type=int, default=8)
+    parser.add_argument(
+        "--expected_local_gpus",
+        default="auto",
+        help="auto accepts the scheduler-visible GPU set; an integer is optional",
+    )
     return parser.parse_args()
 
 
@@ -325,10 +329,18 @@ def main() -> None:
         require(os.path.isabs(args.teacher_sidecar), "--teacher_sidecar must be absolute")
     require(torch.cuda.is_available(), "v28 verifier requires CUDA")
     local_gpus = torch.cuda.device_count()
-    require(
-        local_gpus == args.expected_local_gpus,
-        f"visible GPU count is {local_gpus}, expected {args.expected_local_gpus}",
-    )
+    require(local_gpus > 0, "v28 verifier requires at least one visible CUDA GPU")
+    if args.expected_local_gpus != "auto":
+        require(
+            args.expected_local_gpus.isdigit()
+            and int(args.expected_local_gpus) > 0,
+            "--expected_local_gpus must be auto or a positive integer",
+        )
+        require(
+            local_gpus == int(args.expected_local_gpus),
+            f"visible GPU count is {local_gpus}, expected "
+            f"{args.expected_local_gpus}",
+        )
     commit = verify_repository()
     data_sha256 = verify_data_manifest(args.data)
     dataset, cpu_batch = build_batch(args)
@@ -358,8 +370,8 @@ def main() -> None:
         "disabled_teacher_losses": (
             [] if args.teacher_sidecar else ["relative_disparity", "visibility"]
         ),
+        "gpu_policy": args.expected_local_gpus,
         "local_gpu_count": local_gpus,
-        "expected_global_ranks": 16,
         "relative_geometry_max_difference": verify_geometry_invariance(device),
         "ddp_parameter_contract": verify_parameter_contract(model),
         **checkpoint,

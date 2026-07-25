@@ -135,6 +135,7 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "lr_floor",
         "core_lr",
         "action_lr",
+        "target_global_batch",
         "warmup_steps",
         "warmup_fraction",
         "weight_decay",
