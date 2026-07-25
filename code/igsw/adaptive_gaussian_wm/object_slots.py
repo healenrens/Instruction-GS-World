@@ -33,6 +33,7 @@ class ObjectSlotAggregator(nn.Module):
         self.aggregation_mode = config.aggregation_mode
         self.auxiliary_enabled = config.slot_auxiliary
         self.decoupled_jepa_slots = config.decoupled_jepa_slots
+        self.use_background_dustbin = config.persistent_object_memory
         self.center_auxiliary_enabled = config.slot_auxiliary
         self.feature_dim = config.feature_dim
         self.token_input = nn.Linear(config.token_dim, dim)
@@ -65,6 +66,11 @@ class ObjectSlotAggregator(nn.Module):
         self.key = nn.Linear(dim, dim, bias=False)
         self.value = nn.Linear(dim, dim, bias=False)
         self.query = nn.Linear(dim, dim, bias=False)
+        self.background_score = (
+            nn.Linear(dim, 1)
+            if self.use_background_dustbin
+            else None
+        )
         self.update = nn.GRUCell(dim, dim)
         self.mlp = nn.Sequential(
             nn.LayerNorm(dim),
@@ -231,7 +237,14 @@ class ObjectSlotAggregator(nn.Module):
                 )[None, None]
                 logits = logits - precision * distance
             if self.aggregation_mode == "competitive":
-                assignment = logits.softmax(dim=-1)
+                if self.background_score is not None:
+                    background = self.background_score(values)
+                    assignment = torch.cat(
+                        (logits, background),
+                        dim=-1,
+                    ).softmax(dim=-1)[..., :-1]
+                else:
+                    assignment = logits.softmax(dim=-1)
                 update_assignment = assignment
             elif self.aggregation_mode == "independent":
                 update_assignment = logits.softmax(dim=1)

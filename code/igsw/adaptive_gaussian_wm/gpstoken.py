@@ -25,6 +25,9 @@ class GPSTokenState:
     activation_logits: torch.Tensor
     density_mode: str
     fixed_token_fraction: float
+    active_count: torch.Tensor
+    budget_fraction: torch.Tensor
+    hard_token_gate: bool
 
 
 class LearnableGPSTokenAllocator(nn.Module):
@@ -68,6 +71,10 @@ class LearnableGPSTokenAllocator(nn.Module):
             nn.SiLU(),
             nn.Linear(dim, 1),
         )
+        self.budget_head = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, 1),
+        )
         self.depth_head = nn.Linear(dim, 1)
         self.opacity_head = nn.Linear(dim, 1)
         self.feature_decoder = nn.Linear(dim, config.feature_dim)
@@ -93,6 +100,33 @@ class LearnableGPSTokenAllocator(nn.Module):
             lower = torch.where(count > target, threshold, lower)
             upper = torch.where(count > target, upper, threshold)
         return torch.sigmoid(logits - 0.5 * (lower + upper))
+
+    def _hard_adaptive_activation(
+        self,
+        logits: torch.Tensor,
+        context: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        soft = torch.sigmoid(logits)
+        budget_fraction = torch.sigmoid(self.budget_head(context)).squeeze(-1)
+        available = self.config.max_micro_tokens - self.config.min_active_tokens
+        active_count = (
+            self.config.min_active_tokens
+            + torch.round(available * budget_fraction.detach()).long()
+        ).clamp(
+            self.config.min_active_tokens,
+            self.config.max_micro_tokens,
+        )
+        scores = logits.squeeze(-1)
+        order = scores.argsort(dim=1, descending=True)
+        ranks = torch.empty_like(order)
+        indices = torch.arange(
+            scores.shape[1],
+            device=scores.device,
+        )[None].expand_as(order)
+        ranks.scatter_(1, order, indices)
+        hard = (ranks < active_count[:, None]).to(soft.dtype)[..., None]
+        activation = hard.detach() + soft - soft.detach()
+        return activation, active_count, budget_fraction
 
     def forward(
         self,
@@ -172,8 +206,16 @@ class LearnableGPSTokenAllocator(nn.Module):
         )
         if self.config.density_mode == "fixed":
             activation = self._fixed_budget_activation(activation_logits)
+            active_count = activation.detach().sum(dim=1).squeeze(-1)
+            budget_fraction = activation.mean(dim=1).squeeze(-1)
+        elif self.config.hard_token_gate:
+            activation, active_count, budget_fraction = (
+                self._hard_adaptive_activation(activation_logits, context)
+            )
         else:
             activation = torch.sigmoid(activation_logits)
+            active_count = activation.detach().sum(dim=1).squeeze(-1)
+            budget_fraction = activation.mean(dim=1).squeeze(-1)
         opacity = torch.sigmoid(self.opacity_head(latent))
         depth_order = torch.tanh(self.depth_head(latent))
         decoded = pooled_features + self.feature_decoder(latent)
@@ -210,4 +252,7 @@ class LearnableGPSTokenAllocator(nn.Module):
             activation_logits=activation_logits,
             density_mode=self.config.density_mode,
             fixed_token_fraction=self.config.fixed_token_fraction,
+            active_count=active_count,
+            budget_fraction=budget_fraction,
+            hard_token_gate=self.config.hard_token_gate,
         )

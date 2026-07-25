@@ -9,14 +9,16 @@ from .conditioning import LanguageConditionProjector
 from .config import AdaptiveGaussianWMConfig
 from .decoder import GaussianReadout
 from .dynamics import JointObjectLatentDynamics
-from .gpstoken import GPSTokenState, LearnableGPSTokenAllocator
+from .gpstoken import LearnableGPSTokenAllocator
 from .latent_action import LatentActionModel
 from .language_effect import LanguageEffectAlignment
-from .object_slots import ObjectSlotAggregator, ObjectSlotState
+from .object_memory import ObjectMemoryTransition
+from .object_slots import ObjectSlotAggregator
 from .observed_action import posterior_from_targets
 from .readout_runtime import decode_gaussian_readout, residual_future_features
 from .rgb_supervision import residual_future_rgb, render_current_rgb, render_future_rgb
 from .scale import signed_gap_scale
+from .sequence_encoding import encode_visual_sequence
 
 class AdaptiveGaussianObjectWorldModel(nn.Module):
     def __init__(self, config: AdaptiveGaussianWMConfig):
@@ -26,10 +28,23 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         self.object_aggregator = ObjectSlotAggregator(config)
         self.target_allocator = copy.deepcopy(self.allocator)
         self.target_object_aggregator = copy.deepcopy(self.object_aggregator)
+        self.object_memory = (
+            ObjectMemoryTransition(config)
+            if config.persistent_object_memory
+            else None
+        )
+        self.target_object_memory = (
+            copy.deepcopy(self.object_memory)
+            if self.object_memory is not None
+            else None
+        )
         for parameter in self.target_allocator.parameters():
             parameter.requires_grad_(False)
         for parameter in self.target_object_aggregator.parameters():
             parameter.requires_grad_(False)
+        if self.target_object_memory is not None:
+            for parameter in self.target_object_memory.parameters():
+                parameter.requires_grad_(False)
         self.latent_actions = LatentActionModel(config)
         self.dynamics = JointObjectLatentDynamics(config)
         self.gaussian_readout = GaussianReadout(config)
@@ -48,6 +63,8 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         super().train(mode)
         self.target_allocator.eval()
         self.target_object_aggregator.eval()
+        if self.target_object_memory is not None:
+            self.target_object_memory.eval()
         return self
 
     @torch.no_grad()
@@ -59,6 +76,8 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             (self.target_allocator, self.allocator),
             (self.target_object_aggregator, self.object_aggregator),
         )
+        if self.object_memory is not None and self.target_object_memory is not None:
+            pairs = pairs + ((self.target_object_memory, self.object_memory),)
         for target, online in pairs:
             for target_parameter, online_parameter in zip(
                 target.parameters(),
@@ -73,75 +92,16 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             ):
                 target_buffer.copy_(online_buffer)
 
-    @staticmethod
-    def _validate_sequence(
-        features: torch.Tensor,
-        coordinates: torch.Tensor,
-        valid: torch.Tensor,
-    ) -> None:
-        if features.ndim != 4:
-            raise ValueError("features must have shape [B,T,N,C]")
-        if coordinates.shape != (*features.shape[:3], 2):
-            raise ValueError("coordinates must have shape [B,T,N,2]")
-        if valid.shape != features.shape[:3]:
-            raise ValueError("valid must have shape [B,T,N]")
-
-    @staticmethod
-    def _encode_sequence(
-        features: torch.Tensor,
-        coordinates: torch.Tensor,
-        valid: torch.Tensor,
-        allocator: LearnableGPSTokenAllocator,
-        aggregator: ObjectSlotAggregator,
-    ) -> dict:
-        AdaptiveGaussianObjectWorldModel._validate_sequence(
-            features,
-            coordinates,
-            valid,
-        )
-        token_states: list[GPSTokenState] = []
-        slot_states: list[ObjectSlotState] = []
-        anchor_slots = None
-        anchor_centers = None
-        for index in range(features.shape[1]):
-            token_state = allocator(
-                features[:, index],
-                coordinates[:, index],
-                valid[:, index],
-            )
-            slot_state = aggregator(
-                token_state,
-                anchor_slots,
-                anchor_centers,
-            )
-            if anchor_slots is None:
-                anchor_slots = slot_state.tracking_slots
-                anchor_centers = slot_state.center
-            token_states.append(token_state)
-            slot_states.append(slot_state)
-        return {
-            "token_states": token_states,
-            "slot_states": slot_states,
-            "slots": torch.stack([state.slots for state in slot_states], dim=1),
-            "tracking_slots": torch.stack(
-                [state.tracking_slots for state in slot_states],
-                dim=1,
-            ),
-            "activity": torch.stack(
-                [state.activity for state in slot_states],
-                dim=1,
-            ),
-            "center": torch.stack([state.center for state in slot_states], dim=1),
-        }
-
     def encode_history(self, batch: dict[str, torch.Tensor]) -> dict:
         """Deployment path: this method reads history fields only."""
-        return self._encode_sequence(
+        return encode_visual_sequence(
             batch["history_features"],
             batch["history_coordinates"],
             batch["history_valid"],
+            batch["history_times"],
             self.allocator,
             self.object_aggregator,
+            self.object_memory,
         )
 
     def encode_condition(
@@ -157,55 +117,28 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
     @torch.no_grad()
     def encode_targets(self, batch: dict[str, torch.Tensor]) -> tuple[dict, dict]:
         """EMA target path; future information never reaches the online encoder."""
-        target_history = self._encode_sequence(
+        target_history = encode_visual_sequence(
             batch["history_features"],
             batch["history_coordinates"],
             batch["history_valid"],
+            batch["history_times"],
             self.target_allocator,
             self.target_object_aggregator,
+            self.target_object_memory,
         )
-        target_history["feature"] = torch.stack(
-            [
-                state.decoded_feature
-                for state in target_history["slot_states"]
-            ],
-            dim=1,
+        target_future = encode_visual_sequence(
+            batch["future_features"],
+            batch["future_coordinates"],
+            batch["future_valid"],
+            batch["future_times"],
+            self.target_allocator,
+            self.target_object_aggregator,
+            self.target_object_memory,
+            initial_memory=target_history["last_memory"],
+            previous_time=batch["history_times"][:, -1],
+            initial_anchor_slots=target_history.get("legacy_anchor_slots"),
+            initial_anchor_centers=target_history.get("legacy_anchor_centers"),
         )
-        anchor_slots = target_history["slot_states"][0].tracking_slots
-        anchor_centers = target_history["slot_states"][0].center
-        token_states = []
-        slot_states = []
-        for index in range(batch["future_features"].shape[1]):
-            token_state = self.target_allocator(
-                batch["future_features"][:, index],
-                batch["future_coordinates"][:, index],
-                batch["future_valid"][:, index],
-            )
-            slot_state = self.target_object_aggregator(
-                token_state,
-                anchor_slots,
-                anchor_centers,
-            )
-            token_states.append(token_state)
-            slot_states.append(slot_state)
-        target_future = {
-            "token_states": token_states,
-            "slot_states": slot_states,
-            "slots": torch.stack([state.slots for state in slot_states], dim=1),
-            "tracking_slots": torch.stack(
-                [state.tracking_slots for state in slot_states],
-                dim=1,
-            ),
-            "activity": torch.stack(
-                [state.activity for state in slot_states],
-                dim=1,
-            ),
-            "center": torch.stack([state.center for state in slot_states], dim=1),
-            "feature": torch.stack(
-                [state.decoded_feature for state in slot_states],
-                dim=1,
-            ),
-        }
         return target_history, target_future
 
     def make_history_mask(self, history_slots: torch.Tensor) -> torch.Tensor:
@@ -417,16 +350,58 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             "predicted_history_centers": predicted_history_centers,
             "target_future_slots": target_future["slots"],
             "target_future_activity": target_future["activity"],
+            "target_future_visibility": target_future.get(
+                "visibility", target_future["activity"]
+            ),
+            "target_future_existence": target_future.get(
+                "existence", target_future["activity"]
+            ),
+            "target_future_in_frame": target_future.get(
+                "in_frame", target_future["activity"]
+            ),
+            "target_future_relative_scale": target_future.get("relative_scale"),
+            "target_future_relative_disparity": target_future.get(
+                "relative_disparity"
+            ),
+            "target_future_relations": target_future.get("relations"),
             "target_future_centers": target_future["center"],
             "target_future_object_features": target_future["feature"],
             "current_object_rgb": action_rgb[0],
             "target_future_object_rgb": action_rgb[1],
             "target_history_slots": target_history["slots"],
             "target_history_activity": target_history["activity"],
+            "target_history_visibility": target_history.get(
+                "visibility", target_history["activity"]
+            ),
+            "target_history_existence": target_history.get(
+                "existence", target_history["activity"]
+            ),
+            "target_history_in_frame": target_history.get(
+                "in_frame", target_history["activity"]
+            ),
+            "target_history_relative_scale": target_history.get("relative_scale"),
+            "target_history_relative_disparity": target_history.get(
+                "relative_disparity"
+            ),
+            "target_history_relations": target_history.get("relations"),
             "target_history_centers": target_history["center"],
             "target_history_object_features": target_history["feature"],
             "online_history_slots": history["slots"],
             "online_history_centers": history["center"],
+            "online_history_visibility": history.get(
+                "visibility", history["activity"]
+            ),
+            "online_history_existence": history.get(
+                "existence", history["activity"]
+            ),
+            "online_history_in_frame": history.get(
+                "in_frame", history["activity"]
+            ),
+            "online_history_relative_scale": history.get("relative_scale"),
+            "online_history_relative_disparity": history.get(
+                "relative_disparity"
+            ),
+            "online_history_relations": history.get("relations"),
             "online_history_object_features": torch.stack(
                 [
                     state.decoded_feature

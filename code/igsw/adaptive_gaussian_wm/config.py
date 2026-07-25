@@ -89,6 +89,15 @@ class AdaptiveGaussianWMConfig:
     language_effect_weight: float = 0.0
     zero_action_margin_weight: float = 0.0
     zero_action_relative_margin: float = 0.01
+    architecture: str = "legacy"
+    persistent_object_memory: bool = False
+    relative_geometry: bool = False
+    hard_token_gate: bool = False
+    min_active_tokens: int = 1
+    memory_motion_scale: float = 0.1
+    memory_relation_dim: int = 64
+    continuous_effect_action: bool = False
+    factorized_dynamics: bool = False
 
     def __post_init__(self) -> None:
         positive = {
@@ -107,12 +116,16 @@ class AdaptiveGaussianWMConfig:
             "flow_steps": self.flow_steps,
             "flow_layers": self.flow_layers,
             "flow_source_components": self.flow_source_components,
+            "min_active_tokens": self.min_active_tokens,
+            "memory_relation_dim": self.memory_relation_dim,
         }
         for name, value in positive.items():
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
         if self.model_dim % self.heads:
             raise ValueError("model_dim must be divisible by heads")
+        if self.architecture not in ("legacy", "object_memory_v1"):
+            raise ValueError("architecture must be legacy or object_memory_v1")
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
         if self.gap_reference <= 0.0:
@@ -123,6 +136,10 @@ class AdaptiveGaussianWMConfig:
             raise ValueError("covariance_floor must be positive")
         if self.token_spatial_precision_floor < 0.0:
             raise ValueError("token_spatial_precision_floor must be non-negative")
+        if self.min_active_tokens > self.max_micro_tokens:
+            raise ValueError("min_active_tokens cannot exceed max_micro_tokens")
+        if self.memory_motion_scale <= 0.0:
+            raise ValueError("memory_motion_scale must be positive")
         if self.prior_effect_weight < 0.0:
             raise ValueError("prior_effect_weight must be non-negative")
         if self.flow_source_scale <= 0.0:
@@ -266,6 +283,26 @@ class AdaptiveGaussianWMConfig:
             raise ValueError("zero-action margin weight must be non-negative")
         if self.zero_action_relative_margin <= 0.0:
             raise ValueError("zero-action relative margin must be positive")
+        if self.persistent_object_memory != self.relative_geometry:
+            raise ValueError(
+                "persistent object memory and relative geometry must be enabled together"
+            )
+        if self.architecture == "object_memory_v1":
+            if not self.persistent_object_memory or not self.hard_token_gate:
+                raise ValueError(
+                    "object_memory_v1 requires persistent memory and hard token gates"
+                )
+            if self.condition_dim != 0 or self.rgb_supervision:
+                raise ValueError("object_memory_v1 is language-free and feature-only")
+            if any(
+                (
+                    self.canonical_center_action,
+                    self.canonical_semantic_action,
+                    self.rgb_semantic_action,
+                    self.object_aligned_actions,
+                )
+            ):
+                raise ValueError("object_memory_v1 forbids explicit action anchors")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -330,6 +367,39 @@ class AdaptiveGaussianWMConfig:
             structured_action=True,
             center_conditioned_posterior=True,
             temporal_prior_context=True,
+        )
+
+    @classmethod
+    def object_memory_full(cls, feature_dim: int) -> "AdaptiveGaussianWMConfig":
+        return cls(
+            feature_dim=feature_dim,
+            token_dim=768,
+            object_dim=1536,
+            model_dim=1536,
+            max_micro_tokens=256,
+            min_active_tokens=64,
+            object_slots=16,
+            slot_iterations=3,
+            dynamics_layers=28,
+            heads=16,
+            action_tokens=4,
+            action_dim=32,
+            flow_hidden_dim=2048,
+            flow_steps=32,
+            density_mode="adaptive",
+            joint_flow=True,
+            normalize_posterior=True,
+            slot_auxiliary=True,
+            structured_action=True,
+            decoupled_jepa_slots=True,
+            temporal_prior_context=True,
+            spatial_slot_attention=True,
+            architecture="object_memory_v1",
+            persistent_object_memory=True,
+            relative_geometry=True,
+            hard_token_gate=True,
+            continuous_effect_action=True,
+            factorized_dynamics=True,
         )
 
     @classmethod

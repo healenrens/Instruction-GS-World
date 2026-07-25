@@ -75,9 +75,8 @@ def allocator_loss(
     repulsion = torch.exp(-distance_square / 0.04) * pair_activity
     diversity = repulsion.masked_select(off_diagonal.expand_as(repulsion)).mean()
 
-    budget = (
-        activation.mean() - state.fixed_token_fraction
-    ).square()
+    token_rate = activation.mean()
+    budget = (token_rate - state.fixed_token_fraction).square()
     sample_variance = (
         (target_features - feature_mean).square().mean(dim=-1)
         * valid_mask
@@ -94,6 +93,11 @@ def allocator_loss(
         * state.fixed_token_fraction
         / target_fraction.mean().clamp_min(1e-6)
     ).clamp(0.1, 0.9)
+    if state.hard_token_gate:
+        budget = F.mse_loss(
+            state.budget_fraction,
+            target_fraction.detach(),
+        )
     density_alignment = F.mse_loss(
         activation.mean(dim=1),
         target_fraction.detach(),
@@ -130,6 +134,7 @@ def allocator_loss(
             reconstruction
             + 0.02 * partition_entropy
             + 0.5 * budget
+            + (0.05 * token_rate if state.hard_token_gate else token_rate * 0.0)
             + (
                 0.5 * density_alignment
                 if state.density_mode == "adaptive"
@@ -148,7 +153,9 @@ def allocator_loss(
         "allocator_coverage": coverage_penalty,
         "allocator_diversity": diversity,
         "allocator_budget": budget,
-        "allocator_count_std": activation.sum(dim=1).std(unbiased=False),
+        "allocator_token_rate": token_rate,
+        "allocator_count_mean": state.active_count.float().mean(),
+        "allocator_count_std": state.active_count.float().std(unbiased=False),
         "allocator_density_alignment": density_alignment,
         "allocator_importance_alignment": importance_alignment,
         "allocator_target_fraction_std": target_fraction.std(unbiased=False),
