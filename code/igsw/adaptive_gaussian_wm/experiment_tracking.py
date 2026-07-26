@@ -111,6 +111,14 @@ class WandbTracker:
         }
         self.run.log(payload, step=step)
 
+    def record_checkpoint(self, manifest: dict) -> None:
+        self.run.summary.update(
+            {
+                f"checkpoint/latest_{name}": value
+                for name, value in manifest.items()
+            }
+        )
+
     def finish(self) -> None:
         self.run.finish()
 

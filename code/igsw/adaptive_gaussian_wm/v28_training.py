@@ -119,6 +119,7 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         "status": "passed",
         "architecture": ARCHITECTURE,
         "checkpoint_version": CHECKPOINT_VERSION,
+        "checkpoint_contract": "rolling_recovery_v1",
         "git_commit": current_commit,
         "data_manifest_sha256": dataset.data_sha256,
         "teacher_sidecar_sha256": getattr(
@@ -253,6 +254,7 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         return {}
     return {
         "checkpoint_version": CHECKPOINT_VERSION,
+        "checkpoint_contract": "rolling_recovery_v1",
         "architecture": args.architecture,
         "training_stage": args.training_stage,
         "diagnostics_contract": "object_memory_training_v1",

@@ -468,6 +468,7 @@ def main() -> None:
         "status": "passed",
         "architecture": "object_memory_v1",
         "checkpoint_version": CHECKPOINT_VERSION,
+        "checkpoint_contract": "rolling_recovery_v1",
         "git_commit": commit,
         "data": os.path.abspath(args.data),
         "data_manifest_sha256": data_sha256,

@@ -56,7 +56,8 @@ def save_checkpoint(
     phase_step: int,
     global_step: int,
     rng_states: list[dict],
-) -> None:
+    checkpoint_kind: str,
+) -> dict:
     state = {
         "checkpoint_version": CHECKPOINT_VERSION,
         "parallelism": "ddp_full_state_dict",
@@ -73,16 +74,64 @@ def save_checkpoint(
         "global_step": global_step,
         "world_size": len(rng_states),
         "rng_states": rng_states,
+        "checkpoint_kind": checkpoint_kind,
     }
     temporary = f"{path}.tmp.{os.getpid()}"
-    torch.save(state, temporary)
+    with open(temporary, "wb") as handle:
+        torch.save(state, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(temporary, path)
+    size_bytes = os.path.getsize(path)
+    if size_bytes <= 0:
+        raise RuntimeError(f"checkpoint is empty after save: {path}")
     latest = os.path.join(os.path.dirname(path), "latest.pt")
     temporary_link = f"{latest}.tmp.{os.getpid()}"
     if os.path.lexists(temporary_link):
         os.unlink(temporary_link)
     os.symlink(os.path.basename(path), temporary_link)
     os.replace(temporary_link, latest)
+    manifest = {
+        "checkpoint_version": CHECKPOINT_VERSION,
+        "checkpoint_kind": checkpoint_kind,
+        "checkpoint_path": os.path.abspath(path),
+        "checkpoint_file": os.path.basename(path),
+        "phase": phase,
+        "phase_step": phase_step,
+        "global_step": global_step,
+        "world_size": len(rng_states),
+        "size_bytes": size_bytes,
+    }
+    manifest_path = os.path.join(os.path.dirname(path), "checkpoint_manifest.json")
+    temporary_manifest = f"{manifest_path}.tmp.{os.getpid()}"
+    with open(temporary_manifest, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary_manifest, manifest_path)
+    return manifest
+
+
+def checkpoint_target(
+    out: str,
+    phase: str,
+    phase_step: int,
+    global_step: int,
+    phase_steps: int,
+    save_every: int,
+    recovery_every: int,
+) -> tuple[str, str] | None:
+    phase_complete = phase_step == phase_steps
+    milestone_due = save_every > 0 and global_step % save_every == 0
+    recovery_due = recovery_every > 0 and (
+        global_step == 1 or global_step % recovery_every == 0
+    )
+    if not (phase_complete or milestone_due or recovery_due):
+        return None
+    if phase_complete or milestone_due:
+        return os.path.join(out, f"{phase}_{phase_step:07d}.pt"), "milestone"
+    return os.path.join(out, f"{phase}_recovery.pt"), "recovery"
 
 
 def validate_resume(checkpoint: dict, args, world_size: int) -> None:

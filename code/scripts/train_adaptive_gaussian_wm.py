@@ -82,6 +82,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup_fraction", type=float, default=0.05)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--save_every", type=int, default=500)
+    parser.add_argument("--recovery_every", type=int, default=500)
     parser.add_argument("--log_every", type=int, default=20)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--amp", choices=("bf16", "fp32"), default="bf16")
@@ -164,8 +165,8 @@ def main() -> None:
         raise ValueError("batch must be positive and grad_accum non-negative")
     if args.grad_accum == 0 and not is_v28(args):
         raise ValueError("automatic grad_accum is only available for v28")
-    if args.save_every < 0:
-        raise ValueError("save_every must be non-negative")
+    if args.save_every < 0 or args.recovery_every < 0:
+        raise ValueError("checkpoint intervals must be non-negative")
     if args.resume and args.init_from:
         raise ValueError("--resume and --init_from are mutually exclusive")
     if not 0.0 < args.lr_floor <= args.lr:
@@ -396,6 +397,7 @@ def main() -> None:
             f"semantic_action_basis={args.semantic_action_basis} "
             f"zero_action_margin={config.zero_action_margin_weight} "
             f"warmup_steps={warmup_steps} "
+            f"recovery_every={args.recovery_every} save_every={args.save_every} "
             f"sampler={type(sampler).__name__} "
             f"balanced_updates_per_epoch={balanced_updates} "
             f"parallelism=DDP checkpoint=v{CHECKPOINT_VERSION}_full_state_dict",

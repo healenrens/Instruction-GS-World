@@ -9,7 +9,7 @@ import time
 import torch
 from torch.utils.data import DataLoader
 
-from .checkpointing import collect_rng_states, save_checkpoint
+from .checkpointing import checkpoint_target, collect_rng_states, save_checkpoint
 from .diagnostic_statistics import finalize_diagnostic_metrics
 from .gradient_health import clip_finite_grad_norm_
 from .train_runtime import (
@@ -179,14 +179,22 @@ def train_phase(
                 print(json.dumps(record, sort_keys=True), flush=True)
                 if experiment_tracker is not None:
                     experiment_tracker.log(record)
-            should_save = args.save_every > 0 and (
-                global_step % args.save_every == 0 or step == phase_steps
+            target = checkpoint_target(
+                args.out,
+                phase,
+                step,
+                global_step,
+                phase_steps,
+                args.save_every,
+                args.recovery_every,
             )
-            if should_save:
+            if target is not None:
+                checkpoint_path, checkpoint_kind = target
                 rng_states = collect_rng_states(context)
+                manifest = None
                 if context.is_main:
-                    save_checkpoint(
-                        os.path.join(args.out, f"{phase}_{step:07d}.pt"),
+                    manifest = save_checkpoint(
+                        checkpoint_path,
                         model,
                         optimizer,
                         scheduler,
@@ -195,9 +203,17 @@ def train_phase(
                         step,
                         global_step,
                         rng_states,
+                        checkpoint_kind,
                     )
                 if context.distributed:
                     torch.distributed.barrier()
+                if context.is_main:
+                    event = {"event": "checkpoint_saved", **manifest}
+                    with open(log_path, "a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(event, sort_keys=True) + "\n")
+                    print(json.dumps(event, sort_keys=True), flush=True)
+                    if experiment_tracker is not None:
+                        experiment_tracker.record_checkpoint(manifest)
             if step >= phase_steps:
                 break
         epoch += 1

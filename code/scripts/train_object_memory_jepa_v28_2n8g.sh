@@ -69,6 +69,7 @@ if ! [[ "${TARGET_GLOBAL_BATCH}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 WORKERS_PER_RANK="${WORKERS_PER_RANK:-2}"
 SAVE_EVERY="${SAVE_EVERY:-10000}"
+RECOVERY_EVERY="${RECOVERY_EVERY:-500}"
 LOG_EVERY="${LOG_EVERY:-20}"
 WANDB_MODE="${WANDB_MODE:-online}"
 WANDB_PROJECT="${WANDB_PROJECT:-instruct-gs-world}"
@@ -167,6 +168,7 @@ expected = {
     "status": "passed",
     "architecture": "object_memory_v1",
     "checkpoint_version": 28,
+    "checkpoint_contract": "rolling_recovery_v1",
     "git_commit": commit,
     "data_manifest_sha256": digest(data_manifest),
     "teacher_sidecar_sha256": digest(sidecar_manifest) if sidecar_manifest else "",
@@ -287,6 +289,7 @@ cmd=(
     --warmup_fraction 0.05
     --weight_decay 1e-4
     --save_every "${SAVE_EVERY}"
+    --recovery_every "${RECOVERY_EVERY}"
     --log_every "${LOG_EVERY}"
     --seed "${SEED}"
     --amp bf16
@@ -307,7 +310,7 @@ cmd=(
     "${init_args[@]}"
 )
 echo "[object-memory-v28] commit=${current_commit} node=${NODE_RANK}/${NNODES} stage=${STAGE}"
-echo "[object-memory-v28] nproc=${TORCHRUN_NPROC} grad_accum=${GRAD_ACCUM} target_global_batch=${TARGET_GLOBAL_BATCH} steps=${STEPS}"
+echo "[object-memory-v28] nproc=${TORCHRUN_NPROC} grad_accum=${GRAD_ACCUM} target_global_batch=${TARGET_GLOBAL_BATCH} steps=${STEPS} recovery_every=${RECOVERY_EVERY} save_every=${SAVE_EVERY}"
 printf '[object-memory-v28] command:'
 printf ' %q' "${cmd[@]}"
 printf '\n'
