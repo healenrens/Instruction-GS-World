@@ -326,10 +326,11 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             readout,
             batch["future_coordinates"],
         )
-        residual_reference_features = self.gaussian_readout.splat_features(
-            current_readout,
-            batch["future_coordinates"],
-        )[0]
+        residual_reference_features, residual_reference_coverage = (
+            self.gaussian_readout.splat_features(
+                current_readout, batch["future_coordinates"]
+            )
+        )
         rendered = residual_future_features(
             direct_rendered,
             residual_reference_features,
@@ -439,6 +440,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             "gaussian_readout": readout,
             "rendered_future_features": rendered,
             "residual_reference_features": residual_reference_features,
+            "residual_reference_coverage": residual_reference_coverage,
             "render_coverage": coverage,
             "rendered_future_rgb": rendered_rgb,
             "residual_reference_rgb": residual_reference_rgb,

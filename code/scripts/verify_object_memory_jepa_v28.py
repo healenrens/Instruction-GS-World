@@ -270,6 +270,9 @@ def verify_representation_backward(model, batch: dict) -> dict:
         "memory_target_disappearance_rate",
         "token_count_vs_spatial_complexity_correlation",
         "horizon_0_object_gain_over_persistence",
+        "readout_current_feature",
+        "readout_comparable_oracle_relative_gain_over_persistence",
+        "readout_dynamic_model_relative_gain_over_persistence",
     }
     missing_diagnostics = required_diagnostics.difference(diagnostic_metrics)
     require(not missing_diagnostics, f"missing diagnostics: {missing_diagnostics}")

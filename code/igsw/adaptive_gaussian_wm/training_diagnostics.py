@@ -10,6 +10,7 @@ from .change_objectives import (
 )
 from .diagnostic_statistics import correlation_moments, ratio_moments
 from .jepa_losses import object_change_loss, object_latent_loss, weighted_mean
+from .readout_diagnostics import gaussian_readout_diagnostics
 
 
 def _object_prediction_terms(
@@ -447,4 +448,5 @@ def object_memory_training_diagnostics(
     result.update(_lifecycle_diagnostics(output))
     result.update(_token_diagnostics(output, batch))
     result.update(_horizon_diagnostics(model, batch, output, persistence))
+    result.update(gaussian_readout_diagnostics(model, batch, output))
     return result
