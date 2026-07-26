@@ -167,7 +167,6 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "action_residual_gate",
         "action_residual_dropout",
         "semantic_action_basis",
-        "gate_report",
     )
     mismatches = {}
     for name in immutable:
@@ -188,7 +187,6 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
             "dino",
             "condition_cache",
             "teacher_sidecar",
-            "gate_report",
         ) and current:
             current = os.path.abspath(current)
             previous = os.path.abspath(previous)

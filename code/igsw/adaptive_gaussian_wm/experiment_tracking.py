@@ -32,6 +32,21 @@ _SYSTEM_KEYS = {
     "memory_headroom_fraction",
     "memory_reserved_headroom_fraction",
 }
+_DIAGNOSTIC_PREFIXES = (
+    "baseline_persistence_",
+    "dynamics_",
+    "dense_feature_",
+    "predictive_",
+    "geometry_relative_scale_gain_",
+    "geometry_relations_gain_",
+    "memory_",
+    "token_current_",
+    "token_spatial_",
+    "token_future_",
+    "token_visible_",
+    "token_count_",
+    "horizon_",
+)
 
 
 def add_wandb_arguments(parser: argparse.ArgumentParser) -> None:
@@ -79,6 +94,8 @@ def _metric_name(name: str) -> str:
         return f"runtime/{name}"
     if name in _SYSTEM_KEYS:
         return f"system/{name}"
+    if name.startswith(_DIAGNOSTIC_PREFIXES):
+        return f"diagnostic/{name}"
     return f"train/{name}"
 
 

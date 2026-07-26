@@ -23,6 +23,7 @@ from .loss_weights import AdaptiveGaussianLossWeights
 from .object_memory_objectives import object_memory_geometry_loss
 from .object_slots import ObjectSlotState
 from .rgb_objective import rgb_loss_bundle
+from .training_diagnostics import object_memory_training_diagnostics
 from .zero_action_margin import observed_zero_action_margin_loss
 
 
@@ -240,6 +241,7 @@ def adaptive_world_model_loss(
     batch: dict[str, torch.Tensor],
     output: dict,
     weights: AdaptiveGaussianLossWeights,
+    collect_diagnostics: bool = False,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     future_alignment = object_latent_loss(
         output["predicted_future_slots"],
@@ -452,6 +454,22 @@ def adaptive_world_model_loss(
     parts.update(action_parts)
     parts.update(action_specificity_parts)
     parts.update(geometry_parts)
+    if collect_diagnostics:
+        parts.update(
+            object_memory_training_diagnostics(
+                model,
+                batch,
+                output,
+                {
+                    "future": future,
+                    "future_latent": future_latent,
+                    "future_object_feature": future_object_feature,
+                    "future_center": future_center,
+                    "feature": feature,
+                },
+                geometry_parts,
+            )
+        )
     parts.update({f"rgb_future_{name}": value for name, value in rgb_parts.items()})
     parts.update(zero_margin_parts)
     parts.update(language_effect_parts)

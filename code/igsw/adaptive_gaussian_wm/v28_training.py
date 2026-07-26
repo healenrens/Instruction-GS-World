@@ -255,6 +255,7 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "checkpoint_version": CHECKPOINT_VERSION,
         "architecture": args.architecture,
         "training_stage": args.training_stage,
+        "diagnostics_contract": "object_memory_training_v1",
         "language_condition": "off",
         "rgb_supervision": "off",
         "latent_action_shape": [4, 32],

@@ -188,6 +188,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         phase: str = "joint",
         loss_weights=None,
         actions_override: torch.Tensor | None = None,
+        collect_diagnostics: bool = False,
     ) -> dict:
         if phase == "representation":
             from .training import representation_pretrain_loss
@@ -459,6 +460,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
                 batch,
                 result,
                 loss_weights,
+                collect_diagnostics,
             )
             result["loss"] = loss
             result["parts"] = parts

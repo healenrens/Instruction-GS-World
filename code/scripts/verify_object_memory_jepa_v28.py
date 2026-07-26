@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -26,6 +27,9 @@ from igsw.adaptive_gaussian_wm.checkpointing import CHECKPOINT_VERSION  # noqa: 
 from igsw.adaptive_gaussian_wm.dynamics_runtime import (  # noqa: E402
     factorized_result_fields,
     run_object_dynamics,
+)
+from igsw.adaptive_gaussian_wm.diagnostic_statistics import (  # noqa: E402
+    finalize_diagnostic_metrics,
 )
 from igsw.adaptive_gaussian_wm.object_memory_objectives import (  # noqa: E402
     object_memory_geometry_loss,
@@ -249,10 +253,30 @@ def verify_representation_backward(model, batch: dict) -> dict:
             batch,
             phase="object_memory_representation_loss",
             loss_weights=weights,
+            collect_diagnostics=True,
         )
         loss = result["loss"]
         require(bool(torch.isfinite(loss)), "representation loss is not finite")
         loss.backward()
+    diagnostic_metrics = finalize_diagnostic_metrics(
+        {name: float(value.detach()) for name, value in result["parts"].items()}
+    )
+    required_diagnostics = {
+        "baseline_persistence_future",
+        "dynamics_gain_over_persistence",
+        "predictive_relative_gain_over_persistence",
+        "geometry_relative_scale_gain_over_persistence",
+        "memory_existence_brier",
+        "memory_target_disappearance_rate",
+        "token_count_vs_spatial_complexity_correlation",
+        "horizon_0_object_gain_over_persistence",
+    }
+    missing_diagnostics = required_diagnostics.difference(diagnostic_metrics)
+    require(not missing_diagnostics, f"missing diagnostics: {missing_diagnostics}")
+    require(
+        all(math.isfinite(diagnostic_metrics[name]) for name in required_diagnostics),
+        "representation diagnostic is not finite",
+    )
     gradients = [
         (name, parameter.grad)
         for name, parameter in model.named_parameters()
@@ -277,6 +301,7 @@ def verify_representation_backward(model, batch: dict) -> dict:
         "representation_loss": float(loss.detach()),
         "representation_gradient_norm": float(gradient_norm),
         "representation_gradient_tensors": len(gradients),
+        "representation_diagnostic_metrics": len(diagnostic_metrics),
     }
 
 

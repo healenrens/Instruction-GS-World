@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from .checkpointing import collect_rng_states, save_checkpoint
+from .diagnostic_statistics import finalize_diagnostic_metrics
 from .gradient_health import clip_finite_grad_norm_
 from .train_runtime import (
     cuda_memory_metrics,
@@ -65,6 +66,11 @@ def train_phase(
             batch = move_to_device(cpu_batch, device)
             micro_count += 1
             synchronize = micro_count == args.grad_accum
+            collect_diagnostics = (
+                step + 1 == 1
+                or (step + 1) % args.log_every == 0
+                or step + 1 == phase_steps
+            )
             sync_context = (
                 wrapped.no_sync()
                 if context.distributed and not synchronize
@@ -85,6 +91,7 @@ def train_phase(
                             if model_phase == "object_memory_representation_loss"
                             else None
                         ),
+                        collect_diagnostics=collect_diagnostics,
                     )
                     loss, parts = result["loss"], result["parts"]
                 else:
@@ -96,6 +103,7 @@ def train_phase(
                             else "joint_loss"
                         ),
                         loss_weights=weights,
+                        collect_diagnostics=collect_diagnostics,
                     )
                     loss, parts = result["loss"], result["parts"]
                 scaled_loss = loss / args.grad_accum
@@ -116,12 +124,14 @@ def train_phase(
             update_target_for_training(model, args.posterior_dynamics_gate)
             step += 1
             global_step += 1
-            metrics = reduce_metrics(
-                {
-                    name: value / args.grad_accum
-                    for name, value in accumulated.items()
-                },
-                context.world_size,
+            metrics = finalize_diagnostic_metrics(
+                reduce_metrics(
+                    {
+                        name: value / args.grad_accum
+                        for name, value in accumulated.items()
+                    },
+                    context.world_size,
+                )
             )
             accumulated = {}
             micro_count = 0
