@@ -451,7 +451,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             "history_token_states": history["token_states"],
             "history_slot_states": history["slot_states"],
         }
-        result.update(factorized_result_fields(future_output, history_output, target_future))
+        result.update(factorized_result_fields(future_output, history_output, target_future, target_history))
         if compute_joint_loss:
             if loss_weights is None:
                 raise ValueError("joint_loss phase requires loss_weights")

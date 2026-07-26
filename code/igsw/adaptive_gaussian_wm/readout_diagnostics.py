@@ -6,6 +6,7 @@ import math
 import torch
 
 from .change_objectives import dense_feature_loss
+from .decoder import GaussianReadoutState
 from .diagnostic_statistics import ratio_moments
 from .readout_runtime import residual_future_features
 
@@ -30,36 +31,86 @@ def _scene_mean_baseline(
     return mean[:, None, None].expand_as(reference)
 
 
-def _oracle_future_readout(model, batch: dict, output: dict):
-    current_tokens = output["history_token_states"][-1]
-    current_slots = output["history_slot_states"][-1]
-    oracle_state = model.gaussian_readout(
-        output["target_future_slots"].detach(),
+def _current_micro_splat(model, batch: dict, output: dict):
+    tokens = output["history_token_states"][-1]
+    state = GaussianReadoutState(
+        feature=tokens.decoded_features[:, None].detach(),
+        center=tokens.center[:, None].detach(),
+        covariance=tokens.covariance[:, None].detach(),
+        depth_order=tokens.depth_order[:, None].detach(),
+        opacity=tokens.opacity[:, None].detach(),
+        activation=tokens.activation[:, None].detach(),
+    )
+    return model.gaussian_readout.splat_features(
+        state,
+        batch["history_coordinates"][:, -1:],
+    )
+
+
+def _branch_readout(
+    model,
+    current_tokens,
+    current_slots,
+    predicted_slots: torch.Tensor,
+    predicted_features: torch.Tensor,
+    predicted_centers: torch.Tensor,
+    predicted_relative_scale: torch.Tensor,
+    predicted_relative_disparity: torch.Tensor,
+):
+    return model.gaussian_readout(
+        predicted_slots.detach(),
         current_tokens,
         current_slots.assignment.detach(),
-        predicted_features=output["target_future_object_features"].detach(),
+        predicted_features=predicted_features.detach(),
         current_object_features=current_slots.feature.detach(),
-        predicted_centers=output["target_future_centers"].detach(),
+        predicted_centers=predicted_centers.detach(),
         current_object_centers=current_slots.center.detach(),
-        predicted_relative_scale=(
-            output["target_future_relative_scale"].detach()
-        ),
+        predicted_relative_scale=predicted_relative_scale.detach(),
         current_relative_scale=current_slots.relative_scale.detach(),
-        predicted_relative_disparity=(
-            output["target_future_relative_disparity"].detach()
-        ),
+        predicted_relative_disparity=predicted_relative_disparity.detach(),
         current_relative_disparity=current_slots.relative_disparity.detach(),
     )
-    direct, coverage = model.gaussian_readout.splat_features(
-        oracle_state,
+
+
+def _teacher_future_readout(model, batch: dict, output: dict):
+    """Render future-conditioned EMA states from an EMA history reference."""
+    current_tokens = output["target_history_token_states"][-1]
+    current_slots = output["target_history_slot_states"][-1]
+    future_count = output["target_future_slots"].shape[1]
+    teacher_state = _branch_readout(
+        model,
+        current_tokens,
+        current_slots,
+        output["target_future_slots"],
+        output["target_future_object_features"],
+        output["target_future_centers"],
+        output["target_future_relative_scale"],
+        output["target_future_relative_disparity"],
+    )
+    reference_state = _branch_readout(
+        model,
+        current_tokens,
+        current_slots,
+        current_slots.slots[:, None].expand(-1, future_count, -1, -1),
+        current_slots.decoded_feature[:, None].expand(
+            -1, future_count, -1, -1
+        ),
+        current_slots.center[:, None].expand(-1, future_count, -1, -1),
+        current_slots.relative_scale[:, None].expand(-1, future_count, -1),
+        current_slots.relative_disparity[:, None].expand(
+            -1, future_count, -1
+        ),
+    )
+    direct, direct_coverage = model.gaussian_readout.splat_features(
+        teacher_state,
         batch["future_coordinates"],
     )
-    rendered = residual_future_features(
-        direct,
-        output["residual_reference_features"].detach(),
-        batch,
+    reference, reference_coverage = model.gaussian_readout.splat_features(
+        reference_state,
+        batch["future_coordinates"],
     )
-    return rendered, coverage
+    rendered = residual_future_features(direct, reference, batch)
+    return rendered, torch.minimum(direct_coverage, reference_coverage)
 
 
 def _change_region_masks(
@@ -93,7 +144,7 @@ def _change_region_masks(
 def _region_metrics(
     name: str,
     model_prediction: torch.Tensor,
-    oracle_prediction: torch.Tensor,
+    teacher_prediction: torch.Tensor,
     persistence: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor,
@@ -102,21 +153,21 @@ def _region_metrics(
     model_loss = dense_feature_loss(
         model_prediction, target, mask, coverage
     )
-    oracle_loss = dense_feature_loss(
-        oracle_prediction, target, mask, coverage
+    teacher_loss = dense_feature_loss(
+        teacher_prediction, target, mask, coverage
     )
     persistence_loss = dense_feature_loss(
         persistence, target, mask, coverage
     )
     result = {
         f"readout_{name}_model_feature": model_loss,
-        f"readout_{name}_oracle_feature": oracle_loss,
+        f"readout_{name}_teacher_feature": teacher_loss,
         f"readout_{name}_persistence_feature": persistence_loss,
         f"readout_{name}_model_gain_over_persistence": (
             persistence_loss - model_loss
         ),
-        f"readout_{name}_oracle_gain_over_persistence": (
-            persistence_loss - oracle_loss
+        f"readout_{name}_teacher_gain_over_persistence": (
+            persistence_loss - teacher_loss
         ),
     }
     result.update(
@@ -128,8 +179,8 @@ def _region_metrics(
     )
     result.update(
         ratio_moments(
-            f"readout_{name}_oracle_relative_gain_over_persistence",
-            persistence_loss - oracle_loss,
+            f"readout_{name}_teacher_relative_gain_over_persistence",
+            persistence_loss - teacher_loss,
             persistence_loss,
         )
     )
@@ -142,61 +193,81 @@ def gaussian_readout_diagnostics(
     batch: dict,
     output: dict,
 ) -> dict[str, torch.Tensor]:
-    """Separate readout capacity, Dynamics error, and static-scene dilution."""
-    reference = output["residual_reference_features"].detach().float()
-    reference_coverage = output["residual_reference_coverage"].detach().float()
-    current_target, current_valid = _current_targets(batch, reference)
-    scene_mean = _scene_mean_baseline(batch, reference)
+    """Separate micro splatting, Dynamics error, and static-scene dilution."""
+    current_target = batch["history_features"][:, -1:].detach().float()
+    current_valid = batch["history_valid"][:, -1:]
+    micro_splat, micro_coverage = _current_micro_splat(model, batch, output)
+    scene_mean = _scene_mean_baseline(batch, current_target)
     token_reconstruction = output["history_token_states"][
         -1
-    ].reconstructed_features.detach().float()[:, None].expand_as(reference)
-    current_loss = dense_feature_loss(
-        reference, current_target, current_valid, reference_coverage
+    ].reconstructed_features.detach().float()[:, None]
+    micro_loss = dense_feature_loss(
+        micro_splat, current_target, current_valid, micro_coverage
     )
     token_loss = dense_feature_loss(
-        token_reconstruction, current_target, current_valid, reference_coverage
+        token_reconstruction, current_target, current_valid, micro_coverage
     )
     scene_loss = dense_feature_loss(
-        scene_mean, current_target, current_valid, reference_coverage
+        scene_mean, current_target, current_valid, micro_coverage
+    )
+    online_reference = output["residual_reference_features"].detach().float()
+    online_reference_coverage = output[
+        "residual_reference_coverage"
+    ].detach().float()
+    online_target, online_valid = _current_targets(batch, online_reference)
+    online_basis_loss = dense_feature_loss(
+        online_reference,
+        online_target,
+        online_valid,
+        online_reference_coverage,
     )
     result = {
-        "readout_current_feature": current_loss,
+        "readout_current_micro_splat_feature": micro_loss,
         "readout_current_token_feature": token_loss,
         "readout_current_scene_mean_feature": scene_loss,
-        "readout_current_gain_over_scene_mean": scene_loss - current_loss,
-        "readout_current_gap_to_token_reconstruction": current_loss - token_loss,
+        "readout_current_micro_splat_gain_over_scene_mean": (
+            scene_loss - micro_loss
+        ),
+        "readout_current_micro_splat_gap_to_token_reconstruction": (
+            micro_loss - token_loss
+        ),
+        "readout_online_residual_basis_feature": online_basis_loss,
     }
     result.update(
         ratio_moments(
-            "readout_current_relative_gain_over_scene_mean",
-            scene_loss - current_loss,
+            "readout_current_micro_splat_relative_gain_over_scene_mean",
+            scene_loss - micro_loss,
             scene_loss,
         )
     )
 
-    oracle, oracle_coverage = _oracle_future_readout(model, batch, output)
+    teacher, teacher_coverage = _teacher_future_readout(model, batch, output)
     model_prediction = output["rendered_future_features"].detach().float()
     target = batch["future_features"].detach().float()
     persistence = batch["history_features"][:, -1:].detach().float().expand_as(
         target
     )
-    common_coverage = torch.minimum(
+    model_coverage = torch.minimum(
         output["render_coverage"].detach().float(),
-        oracle_coverage.detach().float(),
+        online_reference_coverage,
+    )
+    common_coverage = torch.minimum(
+        model_coverage,
+        teacher_coverage.detach().float(),
     )
     comparable = _region_metrics(
         "comparable",
         model_prediction,
-        oracle,
+        teacher,
         persistence,
         target,
         batch["future_valid"],
         common_coverage,
     )
     result.update(comparable)
-    result["readout_comparable_model_gap_to_oracle"] = (
+    result["readout_comparable_model_gap_to_teacher"] = (
         comparable["readout_comparable_model_feature"]
-        - comparable["readout_comparable_oracle_feature"]
+        - comparable["readout_comparable_teacher_feature"]
     )
 
     dynamic, static, valid = _change_region_masks(batch, common_coverage)
@@ -204,7 +275,7 @@ def gaussian_readout_diagnostics(
         _region_metrics(
             "dynamic",
             model_prediction,
-            oracle,
+            teacher,
             persistence,
             target,
             dynamic,
@@ -215,7 +286,7 @@ def gaussian_readout_diagnostics(
         _region_metrics(
             "static",
             model_prediction,
-            oracle,
+            teacher,
             persistence,
             target,
             static,
@@ -230,12 +301,16 @@ def gaussian_readout_diagnostics(
         )
     )
     for name, coverage in (
-        ("current", reference_coverage),
-        ("model", output["render_coverage"].detach().float()),
-        ("oracle", oracle_coverage.detach().float()),
+        ("current_micro_splat", micro_coverage.detach().float()),
+        ("model", model_coverage),
+        ("teacher", teacher_coverage.detach().float()),
         ("common", common_coverage),
     ):
-        valid_mask = current_valid if name == "current" else batch["future_valid"]
+        valid_mask = (
+            current_valid
+            if name == "current_micro_splat"
+            else batch["future_valid"]
+        )
         result.update(
             ratio_moments(
                 f"readout_{name}_coverage_fraction",
