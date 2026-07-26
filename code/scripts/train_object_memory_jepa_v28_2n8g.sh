@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="${ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
+VENV_ROOT="${VENV_ROOT:-${ROOT}}"
 required=(STAGE GATE_REPORT)
 for name in "${required[@]}"; do
     if [[ -z "${!name:-}" ]]; then
@@ -103,6 +104,12 @@ for path in "${ROOT}" "${DATA}"; do
         exit 2
     fi
 done
+if [[ "${VENV_ROOT}" != /* ]] \
+    || [[ ! -x "${VENV_ROOT}/.venv/bin/python" ]] \
+    || [[ ! -x "${VENV_ROOT}/.venv/bin/torchrun" ]]; then
+    echo "[object-memory-v28] VENV_ROOT has no usable .venv: ${VENV_ROOT}" >&2
+    exit 2
+fi
 for path in "${GATE_REPORT}"; do
     if [[ "${path}" != /* || ! -f "${path}" ]]; then
         echo "[object-memory-v28] required absolute file is missing: ${path}" >&2
@@ -138,7 +145,7 @@ if [[ -n "${TEACHER_SIDECAR}" ]]; then
         exit 2
     fi
 fi
-"${ROOT}/.venv/bin/python" - \
+"${VENV_ROOT}/.venv/bin/python" - \
     "${GATE_REPORT}" "${current_commit}" \
     "${DATA}/episode_manifest.json" "${sidecar_manifest}" <<'PY'
 import hashlib
@@ -178,7 +185,7 @@ if [[ "${WANDB_MODE}" != "online" ]]; then
     echo "[object-memory-v28] W&B must run online" >&2
     exit 2
 fi
-if ! "${ROOT}/.venv/bin/python" -c "import wandb" >/dev/null 2>&1; then
+if ! "${VENV_ROOT}/.venv/bin/python" -c "import wandb" >/dev/null 2>&1; then
     echo "[object-memory-v28] wandb is not installed" >&2
     exit 2
 fi
@@ -251,7 +258,7 @@ fi
 mkdir -p "${OUT}" "${LOG_ROOT}" "${WANDB_DIR}"
 cd "${ROOT}"
 cmd=(
-    .venv/bin/torchrun
+    "${VENV_ROOT}/.venv/bin/torchrun"
     --nproc_per_node "${TORCHRUN_NPROC}"
     --nnodes "${NNODES}"
     --node_rank "${NODE_RANK}"
