@@ -75,6 +75,7 @@ WANDB_MODE="${WANDB_MODE:-online}"
 WANDB_PROJECT="${WANDB_PROJECT:-instruct-gs-world}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
 WANDB_RUN_ID="${WANDB_RUN_ID:-}"
+READOUT_GATE_REPORT="${READOUT_GATE_REPORT:-}"
 CONTRACT_WAIT_SECONDS="${CONTRACT_WAIT_SECONDS:-300}"
 
 if [[ "${STAGE}" == "representation" ]]; then
@@ -226,7 +227,12 @@ else
         exit 2
     fi
     if [[ "${STAGE}" == "posterior" && -z "${INIT_FROM}" ]]; then
-        echo "[object-memory-v28] posterior requires representation INIT_FROM" >&2
+        echo "[object-memory-v28] posterior requires joint-readout INIT_FROM" >&2
+        exit 2
+    fi
+    if [[ "${STAGE}" == "posterior" ]] \
+        && [[ -z "${READOUT_GATE_REPORT}" || ! -f "${READOUT_GATE_REPORT}" ]]; then
+        echo "[object-memory-v28] posterior requires READOUT_GATE_REPORT" >&2
         exit 2
     fi
     init_args=()
@@ -257,6 +263,10 @@ if [[ -n "${TEACHER_SIDECAR}" ]]; then
 else
     echo "[object-memory-v28] sidecar=disabled; disparity/visibility teacher losses off"
 fi
+readout_gate_args=()
+if [[ "${STAGE}" == "posterior" ]]; then
+    readout_gate_args=(--readout_gate_report "${READOUT_GATE_REPORT}")
+fi
 mkdir -p "${OUT}" "${LOG_ROOT}" "${WANDB_DIR}"
 cd "${ROOT}"
 cmd=(
@@ -285,6 +295,7 @@ cmd=(
     --lr_floor "${LR_FLOOR}"
     --core_lr "${CORE_LR}"
     --action_lr "${ACTION_LR}"
+    --readout_lr 2e-4
     --warmup_steps 0
     --warmup_fraction 0.05
     --weight_decay 1e-4
@@ -307,6 +318,7 @@ cmd=(
     --wandb_run_id "${WANDB_RUN_ID}"
     --wandb_dir "${WANDB_DIR}"
     "${sidecar_args[@]}"
+    "${readout_gate_args[@]}"
     "${init_args[@]}"
 )
 echo "[object-memory-v28] commit=${current_commit} node=${NODE_RANK}/${NNODES} stage=${STAGE}"
