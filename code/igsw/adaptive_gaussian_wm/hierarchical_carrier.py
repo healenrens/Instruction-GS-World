@@ -35,13 +35,13 @@ class HierarchicalGaussianCarrier(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         hidden = config.token_dim
-        self.children = config.gaussian_children
+        self.child_count = config.gaussian_children
         self.feature_dim = config.feature_dim
         self.covariance_floor = config.covariance_floor
         self.child_identity = nn.Parameter(
-            torch.randn(self.children, hidden) / hidden**0.5
+            torch.randn(self.child_count, hidden) / hidden**0.5
         )
-        self.register_buffer("child_seeds", _child_seeds(self.children))
+        self.register_buffer("child_seeds", _child_seeds(self.child_count))
         self.carrier_norm = nn.LayerNorm(hidden)
         self.carrier_body = nn.Sequential(
             nn.Linear(hidden, hidden),
@@ -85,7 +85,7 @@ class HierarchicalGaussianCarrier(nn.Module):
         offset = torch.einsum("bmij,bmlj->bmli", parent_cholesky, local.float())
         center = tokens.center[:, :, None].float() + offset
 
-        base_scale = self.children**-0.5
+        base_scale = self.child_count**-0.5
         diagonal = base_scale * torch.exp(0.35 * torch.tanh(raw[..., 2:4]))
         transform = _transform(diagonal, 0.2 * torch.tanh(raw[..., 4]))
         cholesky = parent_cholesky[:, :, None] @ transform.float()
@@ -101,7 +101,7 @@ class HierarchicalGaussianCarrier(nn.Module):
             _stable_logit(tokens.opacity)[:, :, None] + raw[..., 6:7].float()
         )
         activation = torch.sigmoid(
-            _stable_logit(tokens.activation / self.children)[:, :, None]
+            _stable_logit(tokens.activation / self.child_count)[:, :, None]
             + raw[..., 7:8].float()
         )
         if background_feature is None:
