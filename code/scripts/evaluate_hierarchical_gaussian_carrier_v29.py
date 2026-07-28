@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--evaluation_mode", choices=("isolated", "joint"), required=True)
-    parser.add_argument("--split", default="val")
+    parser.add_argument("--split", default="heldseed")
     parser.add_argument("--max_items", type=int, default=512)
     parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--workers", type=int, default=2)

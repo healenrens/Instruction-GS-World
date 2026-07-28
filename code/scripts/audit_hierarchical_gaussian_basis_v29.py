@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--split", default="val")
+    parser.add_argument("--split", default="heldseed")
     parser.add_argument("--max_items", type=int, default=128)
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--workers", type=int, default=2)
