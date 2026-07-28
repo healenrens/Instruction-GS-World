@@ -133,7 +133,7 @@ def gaussian_state_health(
     covariance = current.covariance.float()
     eigenvalues = torch.linalg.eigvalsh(covariance).clamp_min(1e-8)
     condition = eigenvalues[..., 1] / eigenvalues[..., 0]
-    difference = coordinates[:, :, None].float() - current.center[..., None].float()
+    difference = coordinates[:, :, None].float() - current.center[..., None, :].float()
     distance = mahalanobis_squared_from_precision(
         precision_2d(covariance),
         difference,

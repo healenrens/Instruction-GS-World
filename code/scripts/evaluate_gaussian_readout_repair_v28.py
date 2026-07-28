@@ -179,7 +179,7 @@ def mixture_health(
     state = first_query(state)
     covariance = state.covariance.float()
     eigenvalues = torch.linalg.eigvalsh(covariance).clamp_min(1e-8)
-    difference = coordinates[:, :, None].float() - state.center[..., None].float()
+    difference = coordinates[:, :, None].float() - state.center[..., None, :].float()
     distance = mahalanobis_squared_from_precision(
         precision_2d(covariance), difference
     )
