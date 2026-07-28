@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Server-only integrity and causal verifier for Object Memory JEPA v29."""
+"""Server-only integrity and causal verifier for Object Memory JEPA v30."""
 from __future__ import annotations
 
 import argparse
@@ -14,7 +14,6 @@ import sys
 
 import torch
 from torch.utils.data._utils.collate import default_collate
-
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
@@ -122,7 +121,7 @@ def build_batch(args):
     require(len(dataset) >= 1, "dataset has no verification sample")
     require(
         hasattr(dataset, "teacher_sidecar"),
-        "v29 requires the dense episode backend",
+        "v30 requires the dense episode backend",
     )
     if dataset.teacher_sidecar is not None:
         dataset.teacher_sidecar.verify_hashes()
@@ -437,9 +436,9 @@ def main() -> None:
     require(os.path.isabs(args.output), "--output must be absolute")
     if args.teacher_sidecar:
         require(os.path.isabs(args.teacher_sidecar), "--teacher_sidecar must be absolute")
-    require(torch.cuda.is_available(), "v29 verifier requires CUDA")
+    require(torch.cuda.is_available(), "v30 verifier requires CUDA")
     local_gpus = torch.cuda.device_count()
-    require(local_gpus > 0, "v29 verifier requires at least one visible CUDA GPU")
+    require(local_gpus > 0, "v30 verifier requires at least one visible CUDA GPU")
     if args.expected_local_gpus != "auto":
         require(
             args.expected_local_gpus.isdigit()
@@ -456,8 +455,8 @@ def main() -> None:
     dataset, cpu_batch = build_batch(args)
     device = torch.device("cuda:0")
     config = AdaptiveGaussianWMConfig.object_memory_full(dataset.feature_dim)
-    require(config.condition_dim == 0, "v29 unexpectedly enables language")
-    require(not config.rgb_supervision, "v29 unexpectedly enables RGB loss")
+    require(config.condition_dim == 0, "v30 unexpectedly enables language")
+    require(not config.rgb_supervision, "v30 unexpectedly enables RGB loss")
     model = AdaptiveGaussianObjectWorldModel(config).to(device).eval()
     checkpoint = verify_checkpoint(args.checkpoint, model)
     batch = to_device(cpu_batch, device)
@@ -474,6 +473,8 @@ def main() -> None:
         "architecture": "object_memory_v1",
         "checkpoint_version": CHECKPOINT_VERSION,
         "checkpoint_contract": "rolling_recovery_v1",
+        "readout_backend": "dense_object_assignment",
+        "gaussian_children": config.gaussian_children,
         "git_commit": commit,
         "data": os.path.abspath(args.data),
         "data_manifest_sha256": data_sha256,
@@ -494,7 +495,6 @@ def main() -> None:
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, sort_keys=True)
     print(json.dumps(report, sort_keys=True))
-
 
 if __name__ == "__main__":
     main()

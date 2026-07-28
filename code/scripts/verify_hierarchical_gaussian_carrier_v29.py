@@ -210,6 +210,7 @@ def main() -> None:
         AdaptiveGaussianWMConfig.object_memory_full(dataset.feature_dim),
         gaussian_children=selected,
         hierarchical_gaussian_carrier=True,
+        dense_object_readout=False,
     )
     device = torch.device("cuda:0")
     model = AdaptiveGaussianObjectWorldModel(config).to(device)

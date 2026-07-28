@@ -1,4 +1,4 @@
-"""Strict training and launch contracts for Object Memory JEPA v29."""
+"""Strict training and launch contracts for Object Memory JEPA v30."""
 from __future__ import annotations
 
 import json
@@ -8,10 +8,10 @@ import subprocess
 import torch
 
 from .checkpointing import CHECKPOINT_VERSION
-from .carrier_contracts import (
-    validate_basis_gate,
-    validate_carrier_preflight,
-    validate_readout_gate,
+from .dense_readout_contracts import (
+    file_sha256,
+    validate_dense_held_gate,
+    validate_dense_preflight,
 )
 from .loss_weights import AdaptiveGaussianLossWeights
 
@@ -46,11 +46,15 @@ def add_v28_arguments(parser) -> None:
     parser.add_argument("--carrier_support_weight", type=float, default=0.0)
     parser.add_argument("--carrier_compact_weight", type=float, default=0.0)
     parser.add_argument(
-        "--gaussian_children", type=int, choices=(1, 2, 4, 8), default=4
+        "--gaussian_children", type=int, choices=(1, 2, 4, 8), default=1
     )
     parser.add_argument("--basis_gate_report", default="")
     parser.add_argument("--carrier_preflight_report", default="")
+    parser.add_argument("--dense_preflight_report", default="")
     parser.add_argument("--readout_gate_report", default="")
+    parser.add_argument("--dense_preflight_report_sha256", default="")
+    parser.add_argument("--readout_gate_report_sha256", default="")
+    parser.add_argument("--gate_report_sha256", default="")
     parser.add_argument(
         "--target_global_batch",
         type=int,
@@ -67,7 +71,7 @@ def resolve_v28_gradient_accumulation(args, world_size: int) -> None:
     if not is_v28(args):
         return
     if world_size <= 0 or args.target_global_batch <= 0:
-        raise ValueError("v29 world size and target global batch must be positive")
+        raise ValueError("v30 world size and target global batch must be positive")
     if args.grad_accum == 0:
         samples_per_micro_step = args.batch * world_size
         args.grad_accum = max(
@@ -96,22 +100,29 @@ def validate_v28_arguments(args, world_size: int) -> None:
     if args.posterior_dynamics_gate or args.posterior_core_training:
         raise ValueError("object_memory_v1 uses training_stage, not legacy modes")
     if min(args.core_lr, args.action_lr, args.readout_lr) <= 0.0:
-        raise ValueError("v29 learning rates must be positive")
+        raise ValueError("v30 learning rates must be positive")
     if min(
         args.current_readout_weight,
         args.readout_regularization_weight,
         args.carrier_support_weight,
         args.carrier_compact_weight,
     ) < 0.0:
-        raise ValueError("v29 carrier weights must be non-negative")
-    if args.gaussian_children <= 1:
-        raise ValueError("v29 requires a hierarchical Gaussian carrier")
+        raise ValueError("v30 readout weights must be non-negative")
+    if args.gaussian_children != 1:
+        raise ValueError("v30 dense readout requires gaussian_children=1")
+    if (
+        args.basis_gate_report
+        or args.carrier_preflight_report
+        or args.carrier_support_weight != 0.0
+        or args.carrier_compact_weight != 0.0
+    ):
+        raise ValueError("v30 forbids hierarchical Gaussian carrier inputs")
     if args.grad_accum <= 0:
-        raise ValueError("v29 gradient accumulation did not resolve")
+        raise ValueError("v30 gradient accumulation did not resolve")
     if args.lr != args.core_lr or abs(args.lr_floor / args.core_lr - 0.1) > 1e-9:
-        raise ValueError("v29 legacy LR fields must mirror core LR and its 0.1 floor")
+        raise ValueError("v30 legacy LR fields must mirror core LR and its 0.1 floor")
     if args.warmup_steps != 0 or abs(args.warmup_fraction - 0.05) > 1e-9:
-        raise ValueError("v29 warmup is fixed at five percent")
+        raise ValueError("v30 warmup is fixed at five percent")
     if args.training_stage in ("representation", "readout"):
         if args.representation_steps <= 0 or args.joint_steps != 0:
             raise ValueError(
@@ -132,6 +143,7 @@ def validate_v28_arguments(args, world_size: int) -> None:
         or args.carrier_compact_weight != 0.0
         or args.basis_gate_report
         or args.carrier_preflight_report
+        or args.dense_preflight_report
     ):
         raise ValueError("readout scope and anchor belong to readout stage")
     if args.training_stage == "posterior" and not (args.init_from or args.resume):
@@ -149,24 +161,17 @@ def validate_v28_arguments(args, world_size: int) -> None:
         raise ValueError("readout gate is only valid for joint readout or posterior")
     if not args.validate_only:
         if args.batch not in (2, 4, 8):
-            raise ValueError("v29 per-rank batch must be 2, 4, or 8")
+            raise ValueError("v30 per-rank batch must be 2, 4, or 8")
         if not args.gate_report:
-            raise ValueError("v29 training requires --gate_report")
+            raise ValueError("v30 training requires --gate_report")
         if (
             args.training_stage == "readout"
             and args.readout_scope == "isolated"
             and not args.resume
-            and not args.basis_gate_report
-        ):
-            raise ValueError("isolated carrier training requires --basis_gate_report")
-        if (
-            args.training_stage == "readout"
-            and args.readout_scope == "isolated"
-            and not args.resume
-            and not args.carrier_preflight_report
+            and not args.dense_preflight_report
         ):
             raise ValueError(
-                "isolated carrier training requires --carrier_preflight_report"
+                "isolated dense training requires --dense_preflight_report"
             )
 
 
@@ -190,12 +195,13 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         text=True,
     )
     if worktree.strip():
-        raise ValueError("v29 training requires a clean worktree")
+        raise ValueError("v30 training requires a clean worktree")
     expected = {
         "status": "passed",
         "architecture": ARCHITECTURE,
         "checkpoint_version": CHECKPOINT_VERSION,
         "checkpoint_contract": "rolling_recovery_v1",
+        "readout_backend": "dense_object_assignment",
         "git_commit": current_commit,
         "data_manifest_sha256": dataset.data_sha256,
         "teacher_sidecar_sha256": getattr(
@@ -208,7 +214,16 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         if report.get(name) != value
     }
     if mismatch:
-        raise ValueError(f"v29 verifier gate differs: {mismatch}")
+        raise ValueError(f"v30 verifier gate differs: {mismatch}")
+    args.gate_report_sha256 = file_sha256(args.gate_report)
+    args.dense_preflight_report_sha256 = (
+        file_sha256(args.dense_preflight_report)
+        if args.dense_preflight_report
+        else ""
+    )
+    args.readout_gate_report_sha256 = (
+        file_sha256(args.readout_gate_report) if args.readout_gate_report else ""
+    )
     return report
 
 
@@ -229,11 +244,11 @@ def validate_v28_initialization(checkpoint: dict, args) -> None:
         return
     version = int(checkpoint.get("checkpoint_version", 0))
     if version > CHECKPOINT_VERSION:
-        raise ValueError("cannot initialize v29 from a newer checkpoint")
+        raise ValueError("cannot initialize v30 from a newer checkpoint")
     if args.training_stage == "representation":
         if version != 27:
             raise ValueError(
-                "representation init_from accepts v27 only; resume v29 strictly"
+                "representation init_from accepts v27 only; resume v30 strictly"
             )
         return
     if checkpoint.get("config", {}).get("architecture") != ARCHITECTURE:
@@ -248,10 +263,9 @@ def validate_v28_initialization(checkpoint: dict, args) -> None:
                 or saved.get("training_stage") != "representation"
             ):
                 raise ValueError(
-                    "isolated carrier must start from v28/v29 representation"
+                    "isolated dense readout requires a representation checkpoint"
                 )
-            validate_basis_gate(args, args.init_from)
-            validate_carrier_preflight(args, args.init_from)
+            validate_dense_preflight(args, args.init_from)
         else:
             if (
                 version != CHECKPOINT_VERSION
@@ -262,7 +276,7 @@ def validate_v28_initialization(checkpoint: dict, args) -> None:
                 or not _stage_complete(checkpoint)
             ):
                 raise ValueError("joint readout must start from completed isolation")
-            validate_readout_gate(args, args.init_from, "isolated")
+            validate_dense_held_gate(args, args.init_from, "isolated")
         return
     if (
         version != CHECKPOINT_VERSION
@@ -272,7 +286,7 @@ def validate_v28_initialization(checkpoint: dict, args) -> None:
         or not _stage_complete(checkpoint)
     ):
         raise ValueError("posterior must start from completed joint readout repair")
-    validate_readout_gate(args, args.init_from, "joint")
+    validate_dense_held_gate(args, args.init_from, "joint")
 
 
 def _action_modules(model) -> tuple:
@@ -302,11 +316,10 @@ def configure_v28_stage(model, args) -> None:
     if args.training_stage == "readout" and args.readout_scope == "isolated":
         model.requires_grad_(False)
     if args.training_stage == "readout":
-        if model.gaussian_readout.hierarchical is None:
-            model.gaussian_readout.requires_grad_(True)
-        else:
-            model.gaussian_readout.requires_grad_(False)
-            model.gaussian_readout.hierarchical.requires_grad_(True)
+        if model.dense_readout is None:
+            raise ValueError("v30 readout stage requires dense_object_readout")
+        model.gaussian_readout.requires_grad_(False)
+        model.dense_readout.requires_grad_(True)
 
 
 def build_optimizer(model, args) -> torch.optim.AdamW:
@@ -324,7 +337,7 @@ def build_optimizer(model, args) -> torch.optim.AdamW:
         "dynamics.routing_query.",
         "dynamics.action_",
     )
-    readout_prefixes = ("gaussian_readout.",)
+    readout_prefixes = ("dense_readout.",)
     core = []
     action = []
     readout = []
@@ -352,7 +365,7 @@ def build_optimizer(model, args) -> torch.optim.AdamW:
             }
         )
     if not groups:
-        raise ValueError("v29 optimizer has no trainable parameters")
+        raise ValueError("v30 optimizer has no trainable parameters")
     return torch.optim.AdamW(groups, weight_decay=args.weight_decay)
 
 
@@ -415,7 +428,7 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "checkpoint_contract": "rolling_recovery_v1",
         "architecture": args.architecture,
         "training_stage": args.training_stage,
-        "diagnostics_contract": "object_memory_training_v5",
+        "diagnostics_contract": "object_memory_training_v6_dense_readout",
         "language_condition": "off",
         "rgb_supervision": "off",
         "latent_action_shape": [4, 32],
@@ -429,6 +442,7 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "carrier_support_weight": args.carrier_support_weight,
         "carrier_compact_weight": args.carrier_compact_weight,
         "gaussian_children": args.gaussian_children,
+        "readout_backend": "dense_object_assignment",
         "basis_gate_report": (
             os.path.abspath(args.basis_gate_report)
             if args.basis_gate_report
@@ -439,11 +453,18 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
             if args.carrier_preflight_report
             else ""
         ),
+        "dense_preflight_report": (
+            os.path.abspath(args.dense_preflight_report)
+            if args.dense_preflight_report
+            else ""
+        ),
+        "dense_preflight_report_sha256": args.dense_preflight_report_sha256,
         "readout_gate_report": (
             os.path.abspath(args.readout_gate_report)
             if args.readout_gate_report
             else ""
         ),
+        "readout_gate_report_sha256": args.readout_gate_report_sha256,
         "gpu_policy": "auto",
         "target_global_batch": args.target_global_batch,
         "effective_global_batch": args.effective_global_batch,
@@ -453,5 +474,6 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
             [] if args.teacher_sidecar else ["relative_disparity", "visibility"]
         ),
         "gate_report": os.path.abspath(args.gate_report) if args.gate_report else "",
+        "gate_report_sha256": args.gate_report_sha256,
         "gate_git_commit": gate.get("git_commit", ""),
     }

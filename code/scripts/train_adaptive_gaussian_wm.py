@@ -278,6 +278,8 @@ def main() -> None:
     model = AdaptiveGaussianObjectWorldModel(config).to(device)
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model"], strict=True)
+        if is_v28(args):
+            args.init_from = checkpoint["args"].get("init_from", "")
     elif args.init_from:
         init_checkpoint = torch.load(
             args.init_from,
