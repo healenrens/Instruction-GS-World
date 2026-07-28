@@ -1,7 +1,6 @@
-"""Strict training and launch contracts for Object Memory JEPA v28."""
+"""Strict training and launch contracts for Object Memory JEPA v29."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -9,12 +8,16 @@ import subprocess
 import torch
 
 from .checkpointing import CHECKPOINT_VERSION
+from .carrier_contracts import (
+    validate_basis_gate,
+    validate_carrier_preflight,
+    validate_readout_gate,
+)
 from .loss_weights import AdaptiveGaussianLossWeights
 
 
 ARCHITECTURE = "object_memory_v1"
 DEFAULT_TARGET_GLOBAL_BATCH = 256
-READOUT_GATE_CONTRACT = "gaussian_readout_held_v1"
 
 
 def add_v28_arguments(parser) -> None:
@@ -40,6 +43,13 @@ def add_v28_arguments(parser) -> None:
     parser.add_argument(
         "--readout_regularization_weight", type=float, default=0.0
     )
+    parser.add_argument("--carrier_support_weight", type=float, default=0.0)
+    parser.add_argument("--carrier_compact_weight", type=float, default=0.0)
+    parser.add_argument(
+        "--gaussian_children", type=int, choices=(1, 2, 4, 8), default=4
+    )
+    parser.add_argument("--basis_gate_report", default="")
+    parser.add_argument("--carrier_preflight_report", default="")
     parser.add_argument("--readout_gate_report", default="")
     parser.add_argument(
         "--target_global_batch",
@@ -57,7 +67,7 @@ def resolve_v28_gradient_accumulation(args, world_size: int) -> None:
     if not is_v28(args):
         return
     if world_size <= 0 or args.target_global_batch <= 0:
-        raise ValueError("v28 world size and target global batch must be positive")
+        raise ValueError("v29 world size and target global batch must be positive")
     if args.grad_accum == 0:
         samples_per_micro_step = args.batch * world_size
         args.grad_accum = max(
@@ -71,7 +81,7 @@ def resolve_v28_gradient_accumulation(args, world_size: int) -> None:
 def validate_v28_arguments(args, world_size: int) -> None:
     if not is_v28(args):
         if args.training_stage != "legacy" or args.teacher_sidecar:
-            raise ValueError("v28 stage and sidecar require object_memory_v1")
+            raise ValueError("staged training and sidecars require object_memory_v1")
         return
     if args.training_stage not in ("representation", "readout", "posterior"):
         raise ValueError("object_memory_v1 requires an explicit training stage")
@@ -86,18 +96,22 @@ def validate_v28_arguments(args, world_size: int) -> None:
     if args.posterior_dynamics_gate or args.posterior_core_training:
         raise ValueError("object_memory_v1 uses training_stage, not legacy modes")
     if min(args.core_lr, args.action_lr, args.readout_lr) <= 0.0:
-        raise ValueError("v28 learning rates must be positive")
+        raise ValueError("v29 learning rates must be positive")
     if min(
         args.current_readout_weight,
         args.readout_regularization_weight,
+        args.carrier_support_weight,
+        args.carrier_compact_weight,
     ) < 0.0:
-        raise ValueError("v28 readout weights must be non-negative")
+        raise ValueError("v29 carrier weights must be non-negative")
+    if args.gaussian_children <= 1:
+        raise ValueError("v29 requires a hierarchical Gaussian carrier")
     if args.grad_accum <= 0:
-        raise ValueError("v28 gradient accumulation did not resolve")
+        raise ValueError("v29 gradient accumulation did not resolve")
     if args.lr != args.core_lr or abs(args.lr_floor / args.core_lr - 0.1) > 1e-9:
-        raise ValueError("v28 legacy LR fields must mirror core LR and its 0.1 floor")
+        raise ValueError("v29 legacy LR fields must mirror core LR and its 0.1 floor")
     if args.warmup_steps != 0 or abs(args.warmup_fraction - 0.05) > 1e-9:
-        raise ValueError("v28 warmup is fixed at five percent")
+        raise ValueError("v29 warmup is fixed at five percent")
     if args.training_stage in ("representation", "readout"):
         if args.representation_steps <= 0 or args.joint_steps != 0:
             raise ValueError(
@@ -114,6 +128,10 @@ def validate_v28_arguments(args, world_size: int) -> None:
         args.readout_scope != "off"
         or args.current_readout_weight != 0.0
         or args.readout_regularization_weight != 0.0
+        or args.carrier_support_weight != 0.0
+        or args.carrier_compact_weight != 0.0
+        or args.basis_gate_report
+        or args.carrier_preflight_report
     ):
         raise ValueError("readout scope and anchor belong to readout stage")
     if args.training_stage == "posterior" and not (args.init_from or args.resume):
@@ -131,9 +149,25 @@ def validate_v28_arguments(args, world_size: int) -> None:
         raise ValueError("readout gate is only valid for joint readout or posterior")
     if not args.validate_only:
         if args.batch not in (2, 4, 8):
-            raise ValueError("v28 per-rank batch must be 2, 4, or 8")
+            raise ValueError("v29 per-rank batch must be 2, 4, or 8")
         if not args.gate_report:
-            raise ValueError("v28 training requires --gate_report")
+            raise ValueError("v29 training requires --gate_report")
+        if (
+            args.training_stage == "readout"
+            and args.readout_scope == "isolated"
+            and not args.resume
+            and not args.basis_gate_report
+        ):
+            raise ValueError("isolated carrier training requires --basis_gate_report")
+        if (
+            args.training_stage == "readout"
+            and args.readout_scope == "isolated"
+            and not args.resume
+            and not args.carrier_preflight_report
+        ):
+            raise ValueError(
+                "isolated carrier training requires --carrier_preflight_report"
+            )
 
 
 def validate_v28_gate(args, dataset, project_root: str) -> dict:
@@ -156,7 +190,7 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         text=True,
     )
     if worktree.strip():
-        raise ValueError("v28 training requires a clean worktree")
+        raise ValueError("v29 training requires a clean worktree")
     expected = {
         "status": "passed",
         "architecture": ARCHITECTURE,
@@ -174,16 +208,8 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         if report.get(name) != value
     }
     if mismatch:
-        raise ValueError(f"v28 verifier gate differs: {mismatch}")
+        raise ValueError(f"v29 verifier gate differs: {mismatch}")
     return report
-
-
-def _file_sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _stage_complete(checkpoint: dict) -> bool:
@@ -198,70 +224,55 @@ def _stage_complete(checkpoint: dict) -> bool:
     )
 
 
-def _validate_readout_gate(args, initialization_path: str, mode: str) -> None:
-    with open(args.readout_gate_report, encoding="utf-8") as handle:
-        report = json.load(handle)
-    with open(args.gate_report, encoding="utf-8") as handle:
-        base_gate = json.load(handle)
-    expected = {
-        "status": "passed",
-        "contract": READOUT_GATE_CONTRACT,
-        "evaluation_mode": mode,
-        "git_commit": base_gate.get("git_commit"),
-        "data_manifest_sha256": args.sequence_data_sha256,
-        "candidate_checkpoint_sha256": _file_sha256(initialization_path),
-    }
-    mismatch = {
-        name: {"gate": report.get(name), "current": value}
-        for name, value in expected.items()
-        if report.get(name) != value
-    }
-    if mismatch:
-        raise ValueError(f"held readout gate differs: {mismatch}")
-
-
 def validate_v28_initialization(checkpoint: dict, args) -> None:
     if not is_v28(args):
         return
     version = int(checkpoint.get("checkpoint_version", 0))
     if version > CHECKPOINT_VERSION:
-        raise ValueError("cannot initialize v28 from a newer checkpoint")
+        raise ValueError("cannot initialize v29 from a newer checkpoint")
     if args.training_stage == "representation":
         if version != 27:
             raise ValueError(
-                "representation init_from accepts v27 only; resume v28 strictly"
+                "representation init_from accepts v27 only; resume v29 strictly"
             )
         return
-    if version != CHECKPOINT_VERSION:
-        raise ValueError("readout/posterior stages require a v28 checkpoint")
     if checkpoint.get("config", {}).get("architecture") != ARCHITECTURE:
         raise ValueError("checkpoint initialization architecture differs")
     saved = checkpoint.get("args", {})
     if args.training_stage == "readout":
         if args.readout_scope == "isolated":
             if (
+                version not in (28, CHECKPOINT_VERSION)
+                or
                 checkpoint.get("phase") != "representation"
                 or saved.get("training_stage") != "representation"
             ):
-                raise ValueError("isolated readout must start from representation")
+                raise ValueError(
+                    "isolated carrier must start from v28/v29 representation"
+                )
+            validate_basis_gate(args, args.init_from)
+            validate_carrier_preflight(args, args.init_from)
         else:
             if (
+                version != CHECKPOINT_VERSION
+                or
                 checkpoint.get("phase") != "readout"
                 or saved.get("training_stage") != "readout"
                 or saved.get("readout_scope") != "isolated"
                 or not _stage_complete(checkpoint)
             ):
                 raise ValueError("joint readout must start from completed isolation")
-            _validate_readout_gate(args, args.init_from, "isolated")
+            validate_readout_gate(args, args.init_from, "isolated")
         return
     if (
-        checkpoint.get("phase") != "readout"
+        version != CHECKPOINT_VERSION
+        or checkpoint.get("phase") != "readout"
         or saved.get("training_stage") != "readout"
         or saved.get("readout_scope") != "joint"
         or not _stage_complete(checkpoint)
     ):
         raise ValueError("posterior must start from completed joint readout repair")
-    _validate_readout_gate(args, args.init_from, "joint")
+    validate_readout_gate(args, args.init_from, "joint")
 
 
 def _action_modules(model) -> tuple:
@@ -290,7 +301,12 @@ def configure_v28_stage(model, args) -> None:
         model.dynamics.factor_keys.requires_grad_(False)
     if args.training_stage == "readout" and args.readout_scope == "isolated":
         model.requires_grad_(False)
-        model.gaussian_readout.requires_grad_(True)
+    if args.training_stage == "readout":
+        if model.gaussian_readout.hierarchical is None:
+            model.gaussian_readout.requires_grad_(True)
+        else:
+            model.gaussian_readout.requires_grad_(False)
+            model.gaussian_readout.hierarchical.requires_grad_(True)
 
 
 def build_optimizer(model, args) -> torch.optim.AdamW:
@@ -336,7 +352,7 @@ def build_optimizer(model, args) -> torch.optim.AdamW:
             }
         )
     if not groups:
-        raise ValueError("v28 optimizer has no trainable parameters")
+        raise ValueError("v29 optimizer has no trainable parameters")
     return torch.optim.AdamW(groups, weight_decay=args.weight_decay)
 
 
@@ -354,6 +370,8 @@ def v28_loss_weights(args) -> AdaptiveGaussianLossWeights | None:
         rgb=0.0,
         current_readout=0.0,
         readout_regularization=0.0,
+        carrier_support=0.0,
+        carrier_compact=0.0,
     )
     if args.training_stage == "representation":
         return AdaptiveGaussianLossWeights(
@@ -374,6 +392,8 @@ def v28_loss_weights(args) -> AdaptiveGaussianLossWeights | None:
         common.update(
             current_readout=args.current_readout_weight,
             readout_regularization=args.readout_regularization_weight,
+            carrier_support=args.carrier_support_weight,
+            carrier_compact=args.carrier_compact_weight,
         )
         return AdaptiveGaussianLossWeights(
             action=0.0,
@@ -395,7 +415,7 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "checkpoint_contract": "rolling_recovery_v1",
         "architecture": args.architecture,
         "training_stage": args.training_stage,
-        "diagnostics_contract": "object_memory_training_v4",
+        "diagnostics_contract": "object_memory_training_v5",
         "language_condition": "off",
         "rgb_supervision": "off",
         "latent_action_shape": [4, 32],
@@ -406,6 +426,19 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "readout_scope": args.readout_scope,
         "current_readout_weight": args.current_readout_weight,
         "readout_regularization_weight": args.readout_regularization_weight,
+        "carrier_support_weight": args.carrier_support_weight,
+        "carrier_compact_weight": args.carrier_compact_weight,
+        "gaussian_children": args.gaussian_children,
+        "basis_gate_report": (
+            os.path.abspath(args.basis_gate_report)
+            if args.basis_gate_report
+            else ""
+        ),
+        "carrier_preflight_report": (
+            os.path.abspath(args.carrier_preflight_report)
+            if args.carrier_preflight_report
+            else ""
+        ),
         "readout_gate_report": (
             os.path.abspath(args.readout_gate_report)
             if args.readout_gate_report

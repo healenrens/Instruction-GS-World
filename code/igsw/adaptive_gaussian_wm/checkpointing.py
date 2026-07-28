@@ -9,7 +9,7 @@ import torch
 import torch.distributed as dist
 
 
-CHECKPOINT_VERSION = 28
+CHECKPOINT_VERSION = 29
 
 
 def collect_rng_states(context) -> list[dict]:
@@ -61,6 +61,7 @@ def save_checkpoint(
     state = {
         "checkpoint_version": CHECKPOINT_VERSION,
         "parallelism": "ddp_full_state_dict",
+        "git_commit": getattr(args, "git_commit", ""),
         "model": {
             name: value.detach().cpu()
             for name, value in model.state_dict().items()
@@ -100,6 +101,7 @@ def save_checkpoint(
         "phase_step": phase_step,
         "global_step": global_step,
         "world_size": len(rng_states),
+        "git_commit": getattr(args, "git_commit", ""),
         "size_bytes": size_bytes,
     }
     manifest_path = os.path.join(os.path.dirname(path), "checkpoint_manifest.json")
@@ -142,6 +144,8 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         )
     if checkpoint.get("parallelism") != "ddp_full_state_dict":
         raise ValueError("resume requires a DDP full-state-dict checkpoint")
+    if checkpoint.get("git_commit") != getattr(args, "git_commit", ""):
+        raise ValueError("resume checkpoint git commit differs")
     required_sections = (
         "model",
         "optimizer",
@@ -188,6 +192,11 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "readout_scope",
         "current_readout_weight",
         "readout_regularization_weight",
+        "carrier_support_weight",
+        "carrier_compact_weight",
+        "gaussian_children",
+        "basis_gate_report",
+        "carrier_preflight_report",
         "target_global_batch",
         "warmup_steps",
         "warmup_fraction",

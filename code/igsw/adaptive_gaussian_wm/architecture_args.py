@@ -45,6 +45,11 @@ def apply_architecture_args(
     args,
 ) -> AdaptiveGaussianWMConfig:
     overrides = {}
+    if args.architecture == "object_memory_v1":
+        overrides.update(
+            gaussian_children=args.gaussian_children,
+            hierarchical_gaussian_carrier=args.gaussian_children > 1,
+        )
     if args.aggregation_mode != "auto":
         overrides["aggregation_mode"] = args.aggregation_mode
     if args.density_mode != "auto":

@@ -17,6 +17,9 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
 from igsw.adaptive_gaussian_wm import AdaptiveGaussianObjectWorldModel  # noqa: E402
+from igsw.adaptive_gaussian_wm.carrier_contracts import (  # noqa: E402
+    READOUT_GATE_CONTRACT,
+)
 from igsw.adaptive_gaussian_wm.config import AdaptiveGaussianWMConfig  # noqa: E402
 from igsw.adaptive_gaussian_wm.decoder import GaussianReadoutState  # noqa: E402
 from igsw.adaptive_gaussian_wm.gaussian_math import (  # noqa: E402
@@ -40,10 +43,7 @@ from igsw.adaptive_gaussian_wm.sequence_dataset import (  # noqa: E402
     CausalVisualSequenceDataset,
 )
 from igsw.adaptive_gaussian_wm.train_runtime import move_to_device  # noqa: E402
-from igsw.adaptive_gaussian_wm.v28_training import (  # noqa: E402
-    ARCHITECTURE,
-    READOUT_GATE_CONTRACT,
-)
+from igsw.adaptive_gaussian_wm.v28_training import ARCHITECTURE  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -142,7 +142,9 @@ def per_sample_object_error(output: dict) -> torch.Tensor:
     ).clamp_min(1.0)
 
 
-def current_intervention_state(model, output: dict, mode: str) -> GaussianReadoutState:
+def current_intervention_state(
+    model, batch: dict, output: dict, mode: str
+) -> GaussianReadoutState:
     tokens = output["history_token_states"][-1]
     slots = output["history_slot_states"][-1]
     if mode == "shuffle":
@@ -160,7 +162,7 @@ def current_intervention_state(model, output: dict, mode: str) -> GaussianReadou
         raise ValueError(f"unknown readout intervention: {mode}")
     state, _ = decode_gaussian_readout(
         model,
-        {},
+        batch,
         tokens,
         slots,
         predicted_slots[:, None],
@@ -169,8 +171,6 @@ def current_intervention_state(model, output: dict, mode: str) -> GaussianReadou
         predicted_relative_disparity=predicted_disparity[:, None],
     )
     return state
-
-
 def mixture_health(
     state: GaussianReadoutState,
     coordinates: torch.Tensor,
@@ -244,8 +244,8 @@ def evaluate_batch(model, batch: dict) -> dict[str, torch.Tensor]:
     tokens = output["history_token_states"][-1].reconstructed_features[:, None]
     valid_coverage = torch.ones_like(current_valid, dtype=current.dtype)
     scene = current_target.mean(dim=2, keepdim=True).expand_as(current_target)
-    shuffled_state = current_intervention_state(model, output, "shuffle")
-    zero_state = current_intervention_state(model, output, "zero")
+    shuffled_state = current_intervention_state(model, batch, output, "shuffle")
+    zero_state = current_intervention_state(model, batch, output, "zero")
     shuffled, shuffled_coverage = model.gaussian_readout.splat_features(
         shuffled_state, current_coordinates
     )

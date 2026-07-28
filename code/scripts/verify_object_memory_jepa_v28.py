@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Server-only integrity and causal verifier for Object Memory JEPA v28."""
+"""Server-only integrity and causal verifier for Object Memory JEPA v29."""
 from __future__ import annotations
 
 import argparse
@@ -122,7 +122,7 @@ def build_batch(args):
     require(len(dataset) >= 1, "dataset has no verification sample")
     require(
         hasattr(dataset, "teacher_sidecar"),
-        "v28 requires the dense episode backend",
+        "v29 requires the dense episode backend",
     )
     if dataset.teacher_sidecar is not None:
         dataset.teacher_sidecar.verify_hashes()
@@ -189,7 +189,7 @@ def verify_checkpoint(path: str, model) -> dict:
     )
     require(
         checkpoint.get("checkpoint_version") == CHECKPOINT_VERSION,
-        "checkpoint is not version 28",
+        "checkpoint is not version 29",
     )
     require(
         checkpoint.get("config", {}).get("architecture") == "object_memory_v1",
@@ -437,9 +437,9 @@ def main() -> None:
     require(os.path.isabs(args.output), "--output must be absolute")
     if args.teacher_sidecar:
         require(os.path.isabs(args.teacher_sidecar), "--teacher_sidecar must be absolute")
-    require(torch.cuda.is_available(), "v28 verifier requires CUDA")
+    require(torch.cuda.is_available(), "v29 verifier requires CUDA")
     local_gpus = torch.cuda.device_count()
-    require(local_gpus > 0, "v28 verifier requires at least one visible CUDA GPU")
+    require(local_gpus > 0, "v29 verifier requires at least one visible CUDA GPU")
     if args.expected_local_gpus != "auto":
         require(
             args.expected_local_gpus.isdigit()
@@ -456,8 +456,8 @@ def main() -> None:
     dataset, cpu_batch = build_batch(args)
     device = torch.device("cuda:0")
     config = AdaptiveGaussianWMConfig.object_memory_full(dataset.feature_dim)
-    require(config.condition_dim == 0, "v28 unexpectedly enables language")
-    require(not config.rgb_supervision, "v28 unexpectedly enables RGB loss")
+    require(config.condition_dim == 0, "v29 unexpectedly enables language")
+    require(not config.rgb_supervision, "v29 unexpectedly enables RGB loss")
     model = AdaptiveGaussianObjectWorldModel(config).to(device).eval()
     checkpoint = verify_checkpoint(args.checkpoint, model)
     batch = to_device(cpu_batch, device)

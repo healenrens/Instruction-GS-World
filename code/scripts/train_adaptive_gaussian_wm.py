@@ -216,6 +216,7 @@ def main() -> None:
     args.teacher_sidecar_sha256 = getattr(dataset, "teacher_sidecar_sha256", "")
     assert_same_paths(dataset.paths, context, dataset.contract_label)
     gate_report = validate_v28_gate(args, dataset, PROJECT_ROOT)
+    args.git_commit = gate_report.get("git_commit", "")
     if args.validate_only:
         if context.is_main:
             sample = dataset[0]
