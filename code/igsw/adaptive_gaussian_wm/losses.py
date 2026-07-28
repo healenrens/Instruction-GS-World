@@ -12,7 +12,6 @@ from .change_objectives import (
     dense_feature_loss,
     scale_invariant_object_change_loss,
 )
-from .decoder import feature_loss_coverage
 from .gpstoken import GPSTokenState
 from .jepa_losses import (
     masked_history_loss,
@@ -355,9 +354,7 @@ def adaptive_world_model_loss(
         output["rendered_future_features"],
         batch["future_features"],
         batch["future_valid"],
-        feature_loss_coverage(
-            output["gaussian_readout"], output["render_coverage"]
-        ),
+        output["feature_loss_coverage"],
     )
     rgb, rgb_delta, rgb_object, rgb_parts = rgb_loss_bundle(
         model, batch, output, feature

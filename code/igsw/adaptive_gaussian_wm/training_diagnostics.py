@@ -9,7 +9,7 @@ from .change_objectives import (
     scale_invariant_object_change_loss,
 )
 from .diagnostic_statistics import correlation_moments, ratio_moments
-from .decoder import feature_loss_coverage
+from .dense_readout_diagnostics import dense_object_readout_diagnostics
 from .jepa_losses import object_change_loss, object_latent_loss, weighted_mean
 from .readout_diagnostics import gaussian_readout_diagnostics
 
@@ -311,9 +311,7 @@ def _horizon_diagnostics(
     output: dict,
     persistence: tuple[torch.Tensor, ...],
 ) -> dict[str, torch.Tensor]:
-    loss_coverage = feature_loss_coverage(
-        output["gaussian_readout"], output["render_coverage"]
-    )
+    loss_coverage = output["feature_loss_coverage"]
     result: dict[str, torch.Tensor] = {}
     slots, features, centers = persistence
     for index in range(output["target_future_slots"].shape[1]):
@@ -390,9 +388,7 @@ def object_memory_training_diagnostics(
     if model.config.architecture != "object_memory_v1":
         return {}
     persistence = _persistence_tensors(output)
-    loss_coverage = feature_loss_coverage(
-        output["gaussian_readout"], output["render_coverage"]
-    )
+    loss_coverage = output["feature_loss_coverage"]
     baseline = _object_prediction_terms(model, *persistence, output)
     dense_baseline = dense_feature_loss(
         batch["history_features"][:, -1:].expand_as(batch["future_features"]),
@@ -455,5 +451,8 @@ def object_memory_training_diagnostics(
     result.update(_lifecycle_diagnostics(output))
     result.update(_token_diagnostics(output, batch))
     result.update(_horizon_diagnostics(model, batch, output, persistence))
-    result.update(gaussian_readout_diagnostics(model, batch, output))
+    if model.config.dense_object_readout:
+        result.update(dense_object_readout_diagnostics(model, batch, output))
+    else:
+        result.update(gaussian_readout_diagnostics(model, batch, output))
     return result

@@ -101,6 +101,8 @@ class AdaptiveGaussianWMConfig:
     gaussian_feature_residual: bool = False
     gaussian_children: int = 1
     hierarchical_gaussian_carrier: bool = False
+    dense_object_readout: bool = False
+    dense_readout_dim: int = 256
 
     def __post_init__(self) -> None:
         positive = {
@@ -122,6 +124,7 @@ class AdaptiveGaussianWMConfig:
             "min_active_tokens": self.min_active_tokens,
             "memory_relation_dim": self.memory_relation_dim,
             "gaussian_children": self.gaussian_children,
+            "dense_readout_dim": self.dense_readout_dim,
         }
         for name, value in positive.items():
             if value <= 0:
@@ -147,6 +150,10 @@ class AdaptiveGaussianWMConfig:
         if self.hierarchical_gaussian_carrier != (self.gaussian_children > 1):
             raise ValueError(
                 "hierarchical_gaussian_carrier must match gaussian_children > 1"
+            )
+        if self.dense_object_readout and self.hierarchical_gaussian_carrier:
+            raise ValueError(
+                "dense and hierarchical Gaussian readouts are mutually exclusive"
             )
         if self.memory_motion_scale <= 0.0:
             raise ValueError("memory_motion_scale must be positive")
@@ -419,8 +426,10 @@ class AdaptiveGaussianWMConfig:
             continuous_effect_action=True,
             factorized_dynamics=True,
             gaussian_feature_residual=True,
-            gaussian_children=4,
-            hierarchical_gaussian_carrier=True,
+            gaussian_children=1,
+            hierarchical_gaussian_carrier=False,
+            dense_object_readout=True,
+            dense_readout_dim=256,
         )
 
     @classmethod

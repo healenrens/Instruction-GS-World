@@ -8,9 +8,11 @@ from .action_embedding import residual_action_dropout
 from .conditioning import LanguageConditionProjector
 from .config import AdaptiveGaussianWMConfig
 from .decoder import GaussianReadout
+from .dense_object_readout import DenseObjectReadout
 from .dynamics import JointObjectLatentDynamics
 from .dynamics_runtime import factorized_result_fields, run_object_dynamics
 from .factorized_dynamics import FactorizedObjectDynamics
+from .feature_readout_runtime import decode_feature_readouts
 from .gpstoken import LearnableGPSTokenAllocator
 from .latent_action import LatentActionModel
 from .language_effect import LanguageEffectAlignment
@@ -18,7 +20,6 @@ from .model_phases import joint_phase_flags, select_dynamics_actions
 from .object_memory import ObjectMemoryTransition
 from .object_slots import ObjectSlotAggregator
 from .observed_action import posterior_from_targets
-from .readout_runtime import decode_gaussian_readout, residual_future_features
 from .rgb_supervision import residual_future_rgb, render_current_rgb, render_future_rgb
 from .scale import signed_gap_scale
 from .sequence_encoding import encode_visual_sequence
@@ -54,6 +55,9 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             else JointObjectLatentDynamics(config)
         )
         self.gaussian_readout = GaussianReadout(config)
+        self.dense_readout = (
+            DenseObjectReadout(config) if config.dense_object_readout else None
+        )
         self.language_condition = (
             LanguageConditionProjector(config)
             if config.condition_dim > 0
@@ -293,48 +297,16 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         )
         current_tokens = history["token_states"][-1]
         current_slot_state = history["slot_states"][-1]
-        readout, readout_context = decode_gaussian_readout(
+        readout_fields, readout_context = decode_feature_readouts(
             self,
             batch,
             current_tokens,
             current_slot_state,
-            future_output.future_slots,
+            future_output,
             predicted_future_centers,
-            predicted_relative_scale=getattr(
-                future_output, "future_relative_scale", None
-            ),
-            predicted_relative_disparity=getattr(
-                future_output, "future_relative_disparity", None
-            ),
         )
-        future_count = future_output.future_slots.shape[1]
-        current_readout, _ = decode_gaussian_readout(
-            self,
-            batch,
-            current_tokens,
-            current_slot_state,
-            current_slot_state.slots[:, None].expand(
-                -1, future_count, -1, -1
-            ),
-            current_slot_state.center[:, None].expand(
-                -1, future_count, -1, -1
-            ),
-            readout_context.micro_rgb,
-        )
-        direct_rendered, coverage = self.gaussian_readout.splat_features(
-            readout,
-            batch["future_coordinates"],
-        )
-        residual_reference_features, residual_reference_coverage = (
-            self.gaussian_readout.splat_features(
-                current_readout, batch["future_coordinates"]
-            )
-        )
-        rendered = residual_future_features(
-            direct_rendered,
-            residual_reference_features,
-            batch,
-        )
+        readout = readout_fields["gaussian_readout"]
+        current_readout = readout_fields["current_gaussian_readout"]
         rendered_rgb = None
         rgb_coverage = None
         rendered_current_rgb = None
@@ -436,12 +408,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             "dynamics_actions": actions,
             "prior_context": prior_context,
             "history_mask": history_mask,
-            "gaussian_readout": readout,
-            "current_gaussian_readout": current_readout,
-            "rendered_future_features": rendered,
-            "residual_reference_features": residual_reference_features,
-            "residual_reference_coverage": residual_reference_coverage,
-            "render_coverage": coverage,
+            **readout_fields,
             "rendered_future_rgb": rendered_rgb,
             "residual_reference_rgb": residual_reference_rgb,
             "rgb_render_coverage": rgb_coverage,

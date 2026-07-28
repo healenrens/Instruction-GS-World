@@ -4,7 +4,7 @@ from __future__ import annotations
 import torch
 
 from .dynamics_runtime import run_object_dynamics
-from .readout_runtime import decode_gaussian_readout
+from .feature_readout_runtime import decode_inference_features
 from .scale import signed_gap_scale
 
 
@@ -130,28 +130,13 @@ def predict_prior_features(
             history_relations=history.get("relations"),
             history_existence=history.get("existence"),
         )
-        predicted_centers = (
-            prediction.future_centers
-            if prediction.future_centers is not None
-            else model.object_aggregator.decode_center(prediction.future_slots)
+        features.append(
+            decode_inference_features(
+                model,
+                batch,
+                current_tokens,
+                current_slots,
+                prediction,
+            )
         )
-        readout, _ = decode_gaussian_readout(
-            model,
-            batch,
-            current_tokens,
-            current_slots,
-            prediction.future_slots,
-            predicted_centers,
-            predicted_relative_scale=getattr(
-                prediction, "future_relative_scale", None
-            ),
-            predicted_relative_disparity=getattr(
-                prediction, "future_relative_disparity", None
-            ),
-        )
-        rendered = model.gaussian_readout.splat_features(
-            readout,
-            batch["future_coordinates"],
-        )[0]
-        features.append(rendered)
     return torch.stack(features)

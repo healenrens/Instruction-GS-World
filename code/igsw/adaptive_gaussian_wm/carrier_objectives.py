@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import torch
 
+from .dense_readout_objective import dense_readout_objective
 from .gaussian_math import mahalanobis_squared_from_precision, precision_2d
 from .readout_repair import current_readout_objective, first_query
 
@@ -102,9 +103,14 @@ def carrier_loss_bundle(
     compact = reference * 0.0
     parts = {}
     if weights.current_readout > 0.0:
-        current, regularization, parts = current_readout_objective(
-            model, batch, output
-        )
+        if model.config.dense_object_readout:
+            current, regularization, parts = dense_readout_objective(
+                batch, output
+            )
+        else:
+            current, regularization, parts = current_readout_objective(
+                model, batch, output
+            )
     if weights.carrier_support > 0.0 or weights.carrier_compact > 0.0:
         if not model.config.hierarchical_gaussian_carrier:
             raise ValueError("carrier losses require hierarchical configuration")
