@@ -5,7 +5,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .config import AdaptiveGaussianWMConfig
 from .gaussian_math import mahalanobis_squared_from_precision, precision_2d
@@ -46,6 +45,14 @@ class GaussianReadout(nn.Module):
         self.attribute_head = nn.Linear(hidden, 8)
         nn.init.zeros_(self.attribute_head.weight)
         nn.init.zeros_(self.attribute_head.bias)
+        self.feature_residual_head = (
+            nn.Linear(hidden, config.feature_dim)
+            if config.gaussian_feature_residual
+            else None
+        )
+        if self.feature_residual_head is not None:
+            nn.init.zeros_(self.feature_residual_head.weight)
+            nn.init.zeros_(self.feature_residual_head.bias)
 
     def forward(
         self,
@@ -109,6 +116,10 @@ class GaussianReadout(nn.Module):
             + predicted_feature_per_micro
             - current_feature_per_micro[:, None].detach()
         )
+        if self.feature_residual_head is not None:
+            feature = feature + torch.tanh(
+                self.feature_residual_head(hidden).float()
+            )
         raw = self.attribute_head(hidden)
 
         center_transport = raw.new_zeros(*raw.shape[:-1], 2)

@@ -16,3 +16,5 @@ class AdaptiveGaussianLossWeights:
     action_specificity: float = 0.0
     geometry: float = 0.0
     rgb: float = 1.0
+    current_readout: float = 0.0
+    readout_regularization: float = 0.0

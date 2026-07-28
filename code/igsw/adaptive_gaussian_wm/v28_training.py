@@ -1,6 +1,7 @@
 """Strict training and launch contracts for Object Memory JEPA v28."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -13,6 +14,7 @@ from .loss_weights import AdaptiveGaussianLossWeights
 
 ARCHITECTURE = "object_memory_v1"
 DEFAULT_TARGET_GLOBAL_BATCH = 256
+READOUT_GATE_CONTRACT = "gaussian_readout_held_v1"
 
 
 def add_v28_arguments(parser) -> None:
@@ -23,11 +25,22 @@ def add_v28_arguments(parser) -> None:
     )
     parser.add_argument(
         "--training_stage",
-        choices=("legacy", "representation", "posterior"),
+        choices=("legacy", "representation", "readout", "posterior"),
         default="legacy",
     )
     parser.add_argument("--core_lr", type=float, default=2e-4)
     parser.add_argument("--action_lr", type=float, default=2e-4)
+    parser.add_argument("--readout_lr", type=float, default=2e-4)
+    parser.add_argument(
+        "--readout_scope",
+        choices=("off", "isolated", "joint"),
+        default="off",
+    )
+    parser.add_argument("--current_readout_weight", type=float, default=0.0)
+    parser.add_argument(
+        "--readout_regularization_weight", type=float, default=0.0
+    )
+    parser.add_argument("--readout_gate_report", default="")
     parser.add_argument(
         "--target_global_batch",
         type=int,
@@ -60,7 +73,7 @@ def validate_v28_arguments(args, world_size: int) -> None:
         if args.training_stage != "legacy" or args.teacher_sidecar:
             raise ValueError("v28 stage and sidecar require object_memory_v1")
         return
-    if args.training_stage not in ("representation", "posterior"):
+    if args.training_stage not in ("representation", "readout", "posterior"):
         raise ValueError("object_memory_v1 requires an explicit training stage")
     if args.profile != "full" or args.data_format != "sequence":
         raise ValueError("object_memory_v1 requires full sequence training")
@@ -72,21 +85,50 @@ def validate_v28_arguments(args, world_size: int) -> None:
         raise ValueError("object_memory_v1 forbids canonical action overrides")
     if args.posterior_dynamics_gate or args.posterior_core_training:
         raise ValueError("object_memory_v1 uses training_stage, not legacy modes")
-    if args.core_lr <= 0.0 or args.action_lr <= 0.0:
+    if min(args.core_lr, args.action_lr, args.readout_lr) <= 0.0:
         raise ValueError("v28 learning rates must be positive")
+    if min(
+        args.current_readout_weight,
+        args.readout_regularization_weight,
+    ) < 0.0:
+        raise ValueError("v28 readout weights must be non-negative")
     if args.grad_accum <= 0:
         raise ValueError("v28 gradient accumulation did not resolve")
     if args.lr != args.core_lr or abs(args.lr_floor / args.core_lr - 0.1) > 1e-9:
         raise ValueError("v28 legacy LR fields must mirror core LR and its 0.1 floor")
     if args.warmup_steps != 0 or abs(args.warmup_fraction - 0.05) > 1e-9:
         raise ValueError("v28 warmup is fixed at five percent")
-    if args.training_stage == "representation":
+    if args.training_stage in ("representation", "readout"):
         if args.representation_steps <= 0 or args.joint_steps != 0:
-            raise ValueError("representation stage must only set representation_steps")
+            raise ValueError(
+                "representation/readout stage must only set representation_steps"
+            )
     elif args.representation_steps != 0 or args.joint_steps <= 0:
         raise ValueError("posterior stage must only set joint_steps")
+    if args.training_stage == "readout":
+        if args.readout_scope == "off" or args.current_readout_weight <= 0.0:
+            raise ValueError("readout stage requires a scope and current anchor")
+        if not (args.init_from or args.resume):
+            raise ValueError("readout stage requires checkpoint initialization")
+    elif (
+        args.readout_scope != "off"
+        or args.current_readout_weight != 0.0
+        or args.readout_regularization_weight != 0.0
+    ):
+        raise ValueError("readout scope and anchor belong to readout stage")
     if args.training_stage == "posterior" and not (args.init_from or args.resume):
-        raise ValueError("posterior stage requires representation init or strict resume")
+        raise ValueError("posterior stage requires readout init or strict resume")
+    needs_readout_gate = (
+        args.training_stage == "posterior"
+        or (
+            args.training_stage == "readout"
+            and args.readout_scope == "joint"
+        )
+    )
+    if needs_readout_gate and not (args.readout_gate_report or args.resume):
+        raise ValueError("this stage requires a passed held readout gate")
+    if args.readout_gate_report and not needs_readout_gate:
+        raise ValueError("readout gate is only valid for joint readout or posterior")
     if not args.validate_only:
         if args.batch not in (2, 4, 8):
             raise ValueError("v28 per-rank batch must be 2, 4, or 8")
@@ -136,6 +178,48 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
     return report
 
 
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _stage_complete(checkpoint: dict) -> bool:
+    saved = checkpoint.get("args", {})
+    expected = (
+        saved.get("representation_steps")
+        if checkpoint.get("phase") in ("representation", "readout")
+        else saved.get("joint_steps")
+    )
+    return expected is not None and int(checkpoint.get("phase_step", -1)) == int(
+        expected
+    )
+
+
+def _validate_readout_gate(args, initialization_path: str, mode: str) -> None:
+    with open(args.readout_gate_report, encoding="utf-8") as handle:
+        report = json.load(handle)
+    with open(args.gate_report, encoding="utf-8") as handle:
+        base_gate = json.load(handle)
+    expected = {
+        "status": "passed",
+        "contract": READOUT_GATE_CONTRACT,
+        "evaluation_mode": mode,
+        "git_commit": base_gate.get("git_commit"),
+        "data_manifest_sha256": args.sequence_data_sha256,
+        "candidate_checkpoint_sha256": _file_sha256(initialization_path),
+    }
+    mismatch = {
+        name: {"gate": report.get(name), "current": value}
+        for name, value in expected.items()
+        if report.get(name) != value
+    }
+    if mismatch:
+        raise ValueError(f"held readout gate differs: {mismatch}")
+
+
 def validate_v28_initialization(checkpoint: dict, args) -> None:
     if not is_v28(args):
         return
@@ -149,18 +233,35 @@ def validate_v28_initialization(checkpoint: dict, args) -> None:
             )
         return
     if version != CHECKPOINT_VERSION:
-        raise ValueError("posterior stage requires a v28 representation checkpoint")
+        raise ValueError("readout/posterior stages require a v28 checkpoint")
     if checkpoint.get("config", {}).get("architecture") != ARCHITECTURE:
-        raise ValueError("posterior initialization architecture differs")
-    if checkpoint.get("phase") != "representation":
-        raise ValueError("posterior initialization must come from representation")
+        raise ValueError("checkpoint initialization architecture differs")
     saved = checkpoint.get("args", {})
-    if saved.get("training_stage") != "representation":
-        raise ValueError("posterior initialization has no representation contract")
-    if int(checkpoint.get("phase_step", -1)) != int(
-        saved.get("representation_steps", -2)
+    if args.training_stage == "readout":
+        if args.readout_scope == "isolated":
+            if (
+                checkpoint.get("phase") != "representation"
+                or saved.get("training_stage") != "representation"
+            ):
+                raise ValueError("isolated readout must start from representation")
+        else:
+            if (
+                checkpoint.get("phase") != "readout"
+                or saved.get("training_stage") != "readout"
+                or saved.get("readout_scope") != "isolated"
+                or not _stage_complete(checkpoint)
+            ):
+                raise ValueError("joint readout must start from completed isolation")
+            _validate_readout_gate(args, args.init_from, "isolated")
+        return
+    if (
+        checkpoint.get("phase") != "readout"
+        or saved.get("training_stage") != "readout"
+        or saved.get("readout_scope") != "joint"
+        or not _stage_complete(checkpoint)
     ):
-        raise ValueError("representation checkpoint is not stage-complete")
+        raise ValueError("posterior must start from completed joint readout repair")
+    _validate_readout_gate(args, args.init_from, "joint")
 
 
 def _action_modules(model) -> tuple:
@@ -183,10 +284,13 @@ def configure_v28_stage(model, args) -> None:
     model.latent_actions.prior.requires_grad_(False)
     for parameter in model.latent_actions.prior_condition_parameters():
         parameter.requires_grad_(False)
-    if args.training_stage == "representation":
+    if args.training_stage in ("representation", "readout"):
         for module in _action_modules(model):
             module.requires_grad_(False)
         model.dynamics.factor_keys.requires_grad_(False)
+    if args.training_stage == "readout" and args.readout_scope == "isolated":
+        model.requires_grad_(False)
+        model.gaussian_readout.requires_grad_(True)
 
 
 def build_optimizer(model, args) -> torch.optim.AdamW:
@@ -204,12 +308,17 @@ def build_optimizer(model, args) -> torch.optim.AdamW:
         "dynamics.routing_query.",
         "dynamics.action_",
     )
+    readout_prefixes = ("gaussian_readout.",)
     core = []
     action = []
+    readout = []
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        target = action if name.startswith(action_prefixes) else core
+        if args.training_stage == "readout" and name.startswith(readout_prefixes):
+            target = readout
+        else:
+            target = action if name.startswith(action_prefixes) else core
         target.append(parameter)
     groups = []
     if core:
@@ -217,6 +326,14 @@ def build_optimizer(model, args) -> torch.optim.AdamW:
     if action:
         groups.append(
             {"params": action, "lr": args.action_lr, "group_name": "action"}
+        )
+    if readout:
+        groups.append(
+            {
+                "params": readout,
+                "lr": args.readout_lr,
+                "group_name": "readout",
+            }
         )
     if not groups:
         raise ValueError("v28 optimizer has no trainable parameters")
@@ -235,8 +352,29 @@ def v28_loss_weights(args) -> AdaptiveGaussianLossWeights | None:
         slot=0.2,
         geometry=0.25,
         rgb=0.0,
+        current_readout=0.0,
+        readout_regularization=0.0,
     )
     if args.training_stage == "representation":
+        return AdaptiveGaussianLossWeights(
+            action=0.0,
+            action_specificity=0.0,
+            **common,
+        )
+    if args.training_stage == "readout":
+        if args.readout_scope == "isolated":
+            common.update(
+                future=0.0,
+                history=0.0,
+                feature=0.0,
+                allocator=0.0,
+                slot=0.0,
+                geometry=0.0,
+            )
+        common.update(
+            current_readout=args.current_readout_weight,
+            readout_regularization=args.readout_regularization_weight,
+        )
         return AdaptiveGaussianLossWeights(
             action=0.0,
             action_specificity=0.0,
@@ -257,13 +395,22 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "checkpoint_contract": "rolling_recovery_v1",
         "architecture": args.architecture,
         "training_stage": args.training_stage,
-        "diagnostics_contract": "object_memory_training_v3",
+        "diagnostics_contract": "object_memory_training_v4",
         "language_condition": "off",
         "rgb_supervision": "off",
         "latent_action_shape": [4, 32],
         "data_manifest_sha256": dataset.data_sha256,
         "core_lr": args.core_lr,
         "action_lr": args.action_lr,
+        "readout_lr": args.readout_lr,
+        "readout_scope": args.readout_scope,
+        "current_readout_weight": args.current_readout_weight,
+        "readout_regularization_weight": args.readout_regularization_weight,
+        "readout_gate_report": (
+            os.path.abspath(args.readout_gate_report)
+            if args.readout_gate_report
+            else ""
+        ),
         "gpu_policy": "auto",
         "target_global_batch": args.target_global_batch,
         "effective_global_batch": args.effective_global_batch,

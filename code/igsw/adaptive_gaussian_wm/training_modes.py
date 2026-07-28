@@ -45,9 +45,13 @@ def configure_posterior_core_training(model) -> None:
         parameter.requires_grad_(False)
 
 
-def update_target_for_training(model, posterior_dynamics_gate: bool) -> None:
+def update_target_for_training(
+    model,
+    posterior_dynamics_gate: bool,
+    freeze_target: bool = False,
+) -> None:
     """Keep the EMA teacher fixed while validating a frozen observation space."""
-    if not posterior_dynamics_gate:
+    if not posterior_dynamics_gate and not freeze_target:
         model.update_target()
 
 

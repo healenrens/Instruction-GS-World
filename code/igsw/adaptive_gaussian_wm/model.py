@@ -64,7 +64,6 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             if config.language_effect_weight > 0.0
             else None
         )
-
     def train(self, mode: bool = True):
         super().train(mode)
         self.target_allocator.eval()
@@ -438,6 +437,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             "prior_context": prior_context,
             "history_mask": history_mask,
             "gaussian_readout": readout,
+            "current_gaussian_readout": current_readout,
             "rendered_future_features": rendered,
             "residual_reference_features": residual_reference_features,
             "residual_reference_coverage": residual_reference_coverage,

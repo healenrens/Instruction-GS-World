@@ -5,6 +5,26 @@ import torch
 
 
 @torch.no_grad()
+def optimizer_group_grad_norms(
+    optimizer: torch.optim.Optimizer,
+) -> dict[str, torch.Tensor]:
+    """Report pre-clipping gradient norms for each named optimizer group."""
+    result = {}
+    for index, group in enumerate(optimizer.param_groups):
+        gradients = [
+            parameter.grad.detach().float().norm(2)
+            for parameter in group["params"]
+            if parameter.grad is not None
+        ]
+        if not gradients:
+            continue
+        norm = torch.stack(gradients).square().sum().sqrt()
+        name = group.get("group_name", str(index))
+        result[f"grad_norm_{name}"] = norm
+    return result
+
+
+@torch.no_grad()
 def clip_finite_grad_norm_(
     named_parameters,
     max_norm: float,

@@ -271,6 +271,8 @@ def verify_representation_backward(model, batch: dict) -> dict:
         "token_count_vs_spatial_complexity_correlation",
         "horizon_0_object_gain_over_persistence",
         "readout_current_micro_splat_feature",
+        "readout_current_conditioned_splat_feature",
+        "readout_current_conditioned_effective_components",
         "readout_comparable_teacher_relative_gain_over_persistence",
         "readout_dynamic_model_relative_gain_over_persistence",
     }

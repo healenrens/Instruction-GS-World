@@ -98,6 +98,7 @@ class AdaptiveGaussianWMConfig:
     memory_relation_dim: int = 64
     continuous_effect_action: bool = False
     factorized_dynamics: bool = False
+    gaussian_feature_residual: bool = False
 
     def __post_init__(self) -> None:
         positive = {
@@ -408,6 +409,7 @@ class AdaptiveGaussianWMConfig:
             hard_token_gate=True,
             continuous_effect_action=True,
             factorized_dynamics=True,
+            gaussian_feature_residual=True,
         )
 
     @classmethod

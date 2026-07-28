@@ -6,9 +6,13 @@ import math
 import torch
 
 from .change_objectives import dense_feature_loss
-from .decoder import GaussianReadoutState
 from .diagnostic_statistics import ratio_moments
 from .readout_runtime import residual_future_features
+from .readout_repair import (
+    direct_current_state,
+    first_query,
+    gaussian_state_health,
+)
 
 
 def _current_targets(
@@ -33,14 +37,7 @@ def _scene_mean_baseline(
 
 def _current_micro_splat(model, batch: dict, output: dict):
     tokens = output["history_token_states"][-1]
-    state = GaussianReadoutState(
-        feature=tokens.decoded_features[:, None].detach(),
-        center=tokens.center[:, None].detach(),
-        covariance=tokens.covariance[:, None].detach(),
-        depth_order=tokens.depth_order[:, None].detach(),
-        opacity=tokens.opacity[:, None].detach(),
-        activation=tokens.activation[:, None].detach(),
-    )
+    state = direct_current_state(tokens)
     return model.gaussian_readout.splat_features(
         state,
         batch["history_coordinates"][:, -1:],
@@ -72,7 +69,7 @@ def _branch_readout(
     )
 
 
-def _teacher_future_readout(model, batch: dict, output: dict):
+def teacher_future_readout(model, batch: dict, output: dict):
     """Render future-conditioned EMA states from an EMA history reference."""
     current_tokens = output["target_history_token_states"][-1]
     current_slots = output["target_history_slot_states"][-1]
@@ -197,12 +194,25 @@ def gaussian_readout_diagnostics(
     current_target = batch["history_features"][:, -1:].detach().float()
     current_valid = batch["history_valid"][:, -1:]
     micro_splat, micro_coverage = _current_micro_splat(model, batch, output)
+    conditioned_state = first_query(output["current_gaussian_readout"])
+    conditioned_splat, conditioned_coverage = (
+        model.gaussian_readout.splat_features(
+            conditioned_state,
+            batch["history_coordinates"][:, -1:],
+        )
+    )
     scene_mean = _scene_mean_baseline(batch, current_target)
     token_reconstruction = output["history_token_states"][
         -1
     ].reconstructed_features.detach().float()[:, None]
     micro_loss = dense_feature_loss(
         micro_splat, current_target, current_valid, micro_coverage
+    )
+    conditioned_loss = dense_feature_loss(
+        conditioned_splat,
+        current_target,
+        current_valid,
+        conditioned_coverage,
     )
     token_loss = dense_feature_loss(
         token_reconstruction, current_target, current_valid, micro_coverage
@@ -223,13 +233,20 @@ def gaussian_readout_diagnostics(
     )
     result = {
         "readout_current_micro_splat_feature": micro_loss,
+        "readout_current_conditioned_splat_feature": conditioned_loss,
         "readout_current_token_feature": token_loss,
         "readout_current_scene_mean_feature": scene_loss,
         "readout_current_micro_splat_gain_over_scene_mean": (
             scene_loss - micro_loss
         ),
+        "readout_current_conditioned_gain_over_scene_mean": (
+            scene_loss - conditioned_loss
+        ),
         "readout_current_micro_splat_gap_to_token_reconstruction": (
             micro_loss - token_loss
+        ),
+        "readout_current_conditioned_gap_to_token_reconstruction": (
+            conditioned_loss - token_loss
         ),
         "readout_online_residual_basis_feature": online_basis_loss,
     }
@@ -240,8 +257,23 @@ def gaussian_readout_diagnostics(
             scene_loss,
         )
     )
+    result.update(
+        ratio_moments(
+            "readout_current_conditioned_relative_gain_over_scene_mean",
+            scene_loss - conditioned_loss,
+            scene_loss,
+        )
+    )
+    result.update(
+        gaussian_state_health(
+            conditioned_state,
+            batch["history_coordinates"][:, -1:],
+            current_valid,
+            "readout_current_conditioned",
+        )
+    )
 
-    teacher, teacher_coverage = _teacher_future_readout(model, batch, output)
+    teacher, teacher_coverage = teacher_future_readout(model, batch, output)
     model_prediction = output["rendered_future_features"].detach().float()
     target = batch["future_features"].detach().float()
     persistence = batch["history_features"][:, -1:].detach().float().expand_as(
@@ -302,15 +334,14 @@ def gaussian_readout_diagnostics(
     )
     for name, coverage in (
         ("current_micro_splat", micro_coverage.detach().float()),
+        ("current_conditioned", conditioned_coverage.detach().float()),
         ("model", model_coverage),
         ("teacher", teacher_coverage.detach().float()),
         ("common", common_coverage),
     ):
-        valid_mask = (
-            current_valid
-            if name == "current_micro_splat"
-            else batch["future_valid"]
-        )
+        valid_mask = current_valid if name.startswith("current_") else batch[
+            "future_valid"
+        ]
         result.update(
             ratio_moments(
                 f"readout_{name}_coverage_fraction",

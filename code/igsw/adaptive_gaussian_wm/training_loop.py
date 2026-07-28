@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from .checkpointing import checkpoint_target, collect_rng_states, save_checkpoint
 from .diagnostic_statistics import finalize_diagnostic_metrics
-from .gradient_health import clip_finite_grad_norm_
+from .gradient_health import clip_finite_grad_norm_, optimizer_group_grad_norms
 from .train_runtime import (
     cuda_memory_metrics,
     move_to_device,
@@ -53,8 +53,9 @@ def train_phase(
     started = time.time()
     optimizer.zero_grad(set_to_none=True)
     while step < phase_steps:
+        action_free_phase = phase in ("representation", "readout")
         sampler.set_epoch(
-            args.seed + epoch + (100000 if phase != "representation" else 0)
+            args.seed + epoch + (0 if action_free_phase else 100000)
         )
         accumulated: dict[str, torch.Tensor] = {}
         micro_count = 0
@@ -77,7 +78,7 @@ def train_phase(
                 else nullcontext()
             )
             with sync_context, amp_context():
-                if phase == "representation":
+                if action_free_phase:
                     model_phase = (
                         "object_memory_representation_loss"
                         if args.architecture == "object_memory_v1"
@@ -114,6 +115,11 @@ def train_phase(
                 ) + value.detach()
             if not synchronize:
                 continue
+            group_grad_norms = (
+                optimizer_group_grad_norms(optimizer)
+                if collect_diagnostics
+                else {}
+            )
             grad_norm = clip_finite_grad_norm_(
                 model.named_parameters(),
                 5.0,
@@ -121,7 +127,14 @@ def train_phase(
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
-            update_target_for_training(model, args.posterior_dynamics_gate)
+            update_target_for_training(
+                model,
+                args.posterior_dynamics_gate,
+                freeze_target=(
+                    args.training_stage == "readout"
+                    and args.readout_scope == "isolated"
+                ),
+            )
             step += 1
             global_step += 1
             metrics = finalize_diagnostic_metrics(
@@ -133,6 +146,10 @@ def train_phase(
                     context.world_size,
                 )
             )
+            if group_grad_norms:
+                metrics.update(
+                    reduce_metrics(group_grad_norms, context.world_size)
+                )
             accumulated = {}
             micro_count = 0
             if context.is_main and (

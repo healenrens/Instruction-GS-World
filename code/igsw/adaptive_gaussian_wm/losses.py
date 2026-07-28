@@ -23,6 +23,7 @@ from .loss_weights import AdaptiveGaussianLossWeights
 from .object_memory_objectives import object_memory_geometry_loss
 from .object_slots import ObjectSlotState
 from .rgb_objective import rgb_loss_bundle
+from .readout_repair import current_readout_objective
 from .training_diagnostics import object_memory_training_diagnostics
 from .zero_action_margin import observed_zero_action_margin_loss
 
@@ -359,6 +360,15 @@ def adaptive_world_model_loss(
         model, batch, output, feature
     )
     geometry, geometry_parts = object_memory_geometry_loss(output, batch)
+    current_readout = feature * 0.0
+    readout_regularization = feature * 0.0
+    readout_parts = {}
+    if weights.current_readout > 0.0:
+        (
+            current_readout,
+            readout_regularization,
+            readout_parts,
+        ) = current_readout_objective(model, batch, output)
     zero_margin, zero_margin_parts = observed_zero_action_margin_loss(model, batch, output)
     language_effect = feature * 0.0
     language_effect_parts = {}
@@ -420,6 +430,8 @@ def adaptive_world_model_loss(
         + weights.action * action
         + weights.action_specificity * action_specificity
         + weights.geometry * geometry
+        + weights.current_readout * current_readout
+        + weights.readout_regularization * readout_regularization
         + weights.rgb * model.config.rgb_loss_weight * rgb
         + model.config.zero_action_margin_weight * zero_margin
         + model.config.language_effect_weight * language_effect
@@ -444,6 +456,8 @@ def adaptive_world_model_loss(
             "allocator": allocator,
             "slot": slot,
             "geometry": geometry,
+            "current_readout": current_readout,
+            "readout_regularization": readout_regularization,
             "rgb_future": rgb,
             "rgb_change_future": rgb_delta,
             "rgb_object_future": rgb_object,
@@ -454,6 +468,7 @@ def adaptive_world_model_loss(
     parts.update(action_parts)
     parts.update(action_specificity_parts)
     parts.update(geometry_parts)
+    parts.update(readout_parts)
     if collect_diagnostics:
         parts.update(
             object_memory_training_diagnostics(

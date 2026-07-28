@@ -364,7 +364,7 @@ def main() -> None:
     global_step = 0
     if checkpoint is not None:
         global_step = int(checkpoint["global_step"])
-        if checkpoint["phase"] == "representation":
+        if checkpoint["phase"] in ("representation", "readout"):
             representation_step = int(checkpoint["phase_step"])
         else:
             representation_step = args.representation_steps
@@ -389,6 +389,8 @@ def main() -> None:
             f"posterior_gate={args.posterior_dynamics_gate} "
             f"posterior_core={args.posterior_core_training} "
             f"posterior_update_scope={args.posterior_update_scope} "
+            f"readout_scope={args.readout_scope} "
+            f"current_readout_weight={args.current_readout_weight} "
             f"action_dim={config.action_dim} "
             f"canonical_center_gate={config.canonical_center_gate} "
             f"action_residual_dim={config.action_residual_dim} "
@@ -431,7 +433,7 @@ def main() -> None:
         },
     )
     representation_step, global_step = train_phase(
-        "representation",
+        "readout" if args.training_stage == "readout" else "representation",
         args.representation_steps,
         representation_step,
         global_step,
