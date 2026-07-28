@@ -31,6 +31,17 @@ def residual_future_features(
     return current.expand_as(future_render) + future_render - current_render
 
 
+def current_background_feature(
+    batch: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Return the exact current-frame background used by GPSToken."""
+    feature = batch["history_features"][:, -1].float()
+    valid = batch["history_valid"][:, -1].to(feature.dtype)
+    return (feature * valid[..., None]).sum(dim=1) / valid.sum(
+        dim=1, keepdim=True
+    ).clamp_min(1.0)
+
+
 def object_rgb_from_micro(
     micro_rgb: torch.Tensor,
     assignment: torch.Tensor,
@@ -79,6 +90,8 @@ def decode_gaussian_readout(
         current_slots.assignment,
         predicted_features=predicted_features,
         current_object_features=current_slots.feature,
+        current_object_slots=current_slots.slots,
+        current_background_feature=current_background_feature(batch),
         predicted_centers=predicted_centers,
         current_object_centers=current_slots.center,
         predicted_relative_scale=predicted_relative_scale,

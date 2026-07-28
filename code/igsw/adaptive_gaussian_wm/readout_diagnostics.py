@@ -6,8 +6,9 @@ import math
 import torch
 
 from .change_objectives import dense_feature_loss
+from .decoder import feature_loss_coverage
 from .diagnostic_statistics import ratio_moments
-from .readout_runtime import residual_future_features
+from .readout_runtime import current_background_feature, residual_future_features
 from .readout_repair import (
     direct_current_state,
     first_query,
@@ -46,6 +47,7 @@ def _current_micro_splat(model, batch: dict, output: dict):
 
 def _branch_readout(
     model,
+    batch: dict,
     current_tokens,
     current_slots,
     predicted_slots: torch.Tensor,
@@ -60,6 +62,8 @@ def _branch_readout(
         current_slots.assignment.detach(),
         predicted_features=predicted_features.detach(),
         current_object_features=current_slots.feature.detach(),
+        current_object_slots=current_slots.slots.detach(),
+        current_background_feature=current_background_feature(batch),
         predicted_centers=predicted_centers.detach(),
         current_object_centers=current_slots.center.detach(),
         predicted_relative_scale=predicted_relative_scale.detach(),
@@ -76,6 +80,7 @@ def teacher_future_readout(model, batch: dict, output: dict):
     future_count = output["target_future_slots"].shape[1]
     teacher_state = _branch_readout(
         model,
+        batch,
         current_tokens,
         current_slots,
         output["target_future_slots"],
@@ -86,6 +91,7 @@ def teacher_future_readout(model, batch: dict, output: dict):
     )
     reference_state = _branch_readout(
         model,
+        batch,
         current_tokens,
         current_slots,
         current_slots.slots[:, None].expand(-1, future_count, -1, -1),
@@ -201,24 +207,36 @@ def gaussian_readout_diagnostics(
             batch["history_coordinates"][:, -1:],
         )
     )
+    conditioned_loss_coverage = feature_loss_coverage(
+        conditioned_state, conditioned_coverage
+    )
     scene_mean = _scene_mean_baseline(batch, current_target)
     token_reconstruction = output["history_token_states"][
         -1
     ].reconstructed_features.detach().float()[:, None]
     micro_loss = dense_feature_loss(
-        micro_splat, current_target, current_valid, micro_coverage
+        micro_splat,
+        current_target,
+        current_valid,
+        torch.ones_like(micro_coverage),
     )
     conditioned_loss = dense_feature_loss(
         conditioned_splat,
         current_target,
         current_valid,
-        conditioned_coverage,
+        conditioned_loss_coverage,
     )
     token_loss = dense_feature_loss(
-        token_reconstruction, current_target, current_valid, micro_coverage
+        token_reconstruction,
+        current_target,
+        current_valid,
+        torch.ones_like(micro_coverage),
     )
     scene_loss = dense_feature_loss(
-        scene_mean, current_target, current_valid, micro_coverage
+        scene_mean,
+        current_target,
+        current_valid,
+        torch.ones_like(micro_coverage),
     )
     online_reference = output["residual_reference_features"].detach().float()
     online_reference_coverage = output[
@@ -229,7 +247,10 @@ def gaussian_readout_diagnostics(
         online_reference,
         online_target,
         online_valid,
-        online_reference_coverage,
+        feature_loss_coverage(
+            output["current_gaussian_readout"],
+            online_reference_coverage,
+        ),
     )
     result = {
         "readout_current_micro_splat_feature": micro_loss,
@@ -280,8 +301,17 @@ def gaussian_readout_diagnostics(
         target
     )
     model_coverage = torch.minimum(
-        output["render_coverage"].detach().float(),
-        online_reference_coverage,
+        feature_loss_coverage(
+            output["gaussian_readout"],
+            output["render_coverage"],
+        ).detach().float(),
+        feature_loss_coverage(
+            output["current_gaussian_readout"],
+            online_reference_coverage,
+        ).detach().float(),
+    )
+    teacher_coverage = feature_loss_coverage(
+        output["gaussian_readout"], teacher_coverage
     )
     common_coverage = torch.minimum(
         model_coverage,

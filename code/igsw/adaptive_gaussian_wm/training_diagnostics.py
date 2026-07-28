@@ -9,6 +9,7 @@ from .change_objectives import (
     scale_invariant_object_change_loss,
 )
 from .diagnostic_statistics import correlation_moments, ratio_moments
+from .decoder import feature_loss_coverage
 from .jepa_losses import object_change_loss, object_latent_loss, weighted_mean
 from .readout_diagnostics import gaussian_readout_diagnostics
 
@@ -310,6 +311,9 @@ def _horizon_diagnostics(
     output: dict,
     persistence: tuple[torch.Tensor, ...],
 ) -> dict[str, torch.Tensor]:
+    loss_coverage = feature_loss_coverage(
+        output["gaussian_readout"], output["render_coverage"]
+    )
     result: dict[str, torch.Tensor] = {}
     slots, features, centers = persistence
     for index in range(output["target_future_slots"].shape[1]):
@@ -339,7 +343,7 @@ def _horizon_diagnostics(
             output["rendered_future_features"][:, index : index + 1].detach(),
             batch["future_features"][:, index : index + 1],
             batch["future_valid"][:, index : index + 1],
-            output["render_coverage"][:, index : index + 1],
+            loss_coverage[:, index : index + 1],
         )
         copy_dense = dense_feature_loss(
             batch["history_features"][:, -1:].expand_as(
@@ -347,7 +351,7 @@ def _horizon_diagnostics(
             ),
             batch["future_features"][:, index : index + 1],
             batch["future_valid"][:, index : index + 1],
-            output["render_coverage"][:, index : index + 1],
+            loss_coverage[:, index : index + 1],
         )
         prefix = f"horizon_{index}"
         result.update(
@@ -386,12 +390,15 @@ def object_memory_training_diagnostics(
     if model.config.architecture != "object_memory_v1":
         return {}
     persistence = _persistence_tensors(output)
+    loss_coverage = feature_loss_coverage(
+        output["gaussian_readout"], output["render_coverage"]
+    )
     baseline = _object_prediction_terms(model, *persistence, output)
     dense_baseline = dense_feature_loss(
         batch["history_features"][:, -1:].expand_as(batch["future_features"]),
         batch["future_features"],
         batch["future_valid"],
-        output["render_coverage"],
+        loss_coverage,
     )
     predicted_core = future_parts["future"] + 0.5 * future_parts["feature"]
     baseline_core = baseline["total"] + 0.5 * dense_baseline

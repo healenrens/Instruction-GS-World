@@ -9,6 +9,7 @@ import torch.nn as nn
 from .config import AdaptiveGaussianWMConfig
 from .gaussian_math import mahalanobis_squared_from_precision, precision_2d
 from .gpstoken import GPSTokenState
+from .hierarchical_carrier import HierarchicalGaussianCarrier
 
 
 def _stable_logit(value: torch.Tensor) -> torch.Tensor:
@@ -24,6 +25,17 @@ class GaussianReadoutState:
     opacity: torch.Tensor
     activation: torch.Tensor
     rgb: torch.Tensor | None = None
+    background_feature: torch.Tensor | None = None
+
+
+def feature_loss_coverage(
+    readout: GaussianReadoutState,
+    coverage: torch.Tensor,
+) -> torch.Tensor:
+    """Score explicit-background carriers on every valid feature patch."""
+    if readout.background_feature is not None:
+        return torch.ones_like(coverage)
+    return coverage
 
 
 class GaussianReadout(nn.Module):
@@ -34,6 +46,11 @@ class GaussianReadout(nn.Module):
         hidden = config.token_dim
         self.feature_dim = config.feature_dim
         self.covariance_floor = config.covariance_floor
+        self.hierarchical = (
+            HierarchicalGaussianCarrier(config)
+            if config.hierarchical_gaussian_carrier
+            else None
+        )
         self.current_input = nn.Linear(config.token_dim, hidden)
         self.object_input = nn.Linear(config.object_dim, hidden)
         self.fusion = nn.Sequential(
@@ -62,6 +79,8 @@ class GaussianReadout(nn.Module):
         *,
         predicted_features: torch.Tensor,
         current_object_features: torch.Tensor,
+        current_object_slots: torch.Tensor | None = None,
+        current_background_feature: torch.Tensor | None = None,
         predicted_centers: torch.Tensor | None = None,
         current_object_centers: torch.Tensor | None = None,
         predicted_relative_scale: torch.Tensor | None = None,
@@ -87,6 +106,25 @@ class GaussianReadout(nn.Module):
             raise ValueError(
                 "current_object_features must have shape [B,K,C]"
             )
+        if self.hierarchical is not None:
+            if current_object_slots is None:
+                raise ValueError(
+                    "hierarchical carrier requires current_object_slots"
+                )
+            values = self.hierarchical.forward_tensors(
+                predicted_slots,
+                current_tokens,
+                current_object_assignment,
+                current_object_slots,
+                background_feature=current_background_feature,
+                predicted_centers=predicted_centers,
+                current_centers=current_object_centers,
+                predicted_scale=predicted_relative_scale,
+                current_scale=current_relative_scale,
+                predicted_disparity=predicted_relative_disparity,
+                current_disparity=current_relative_disparity,
+            )
+            return GaussianReadoutState(**values)
         object_per_micro = torch.einsum(
             "bmk,bqkd->bqmd",
             current_object_assignment,
@@ -279,6 +317,18 @@ class GaussianReadout(nn.Module):
             opacity=opacity,
             activation=activation,
             rgb=rgb,
+            background_feature=None,
+        )
+
+    def current_carrier(
+        self,
+        tokens: GPSTokenState,
+        background_feature: torch.Tensor | None = None,
+    ) -> GaussianReadoutState:
+        if self.hierarchical is None:
+            raise ValueError("current_carrier requires hierarchical configuration")
+        return GaussianReadoutState(
+            **self.hierarchical.current_tensors(tokens, background_feature)
         )
 
     @staticmethod
@@ -310,4 +360,15 @@ class GaussianReadout(nn.Module):
             normalized,
             readout.feature.float(),
         )
+        if readout.background_feature is not None:
+            expected = (*features.shape[:2], features.shape[-1])
+            if readout.background_feature.shape != expected:
+                raise ValueError(
+                    f"background_feature must have shape {expected}"
+                )
+            alpha = coverage.clamp(0.0, 1.0)[..., None]
+            features = (
+                alpha * features
+                + (1.0 - alpha) * readout.background_feature[:, :, None].float()
+            )
         return features, coverage

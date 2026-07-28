@@ -6,7 +6,7 @@ import math
 import torch
 
 from .change_objectives import dense_feature_loss
-from .decoder import GaussianReadoutState
+from .decoder import GaussianReadoutState, feature_loss_coverage
 from .gaussian_math import mahalanobis_squared_from_precision, precision_2d
 
 
@@ -20,6 +20,11 @@ def first_query(state: GaussianReadoutState) -> GaussianReadoutState:
         opacity=state.opacity[:, :1],
         activation=state.activation[:, :1],
         rgb=None if state.rgb is None else state.rgb[:, :1],
+        background_feature=(
+            None
+            if state.background_feature is None
+            else state.background_feature[:, :1]
+        ),
     )
 
 
@@ -32,6 +37,7 @@ def direct_current_state(tokens) -> GaussianReadoutState:
         depth_order=tokens.depth_order[:, None],
         opacity=tokens.opacity[:, None],
         activation=tokens.activation[:, None],
+        background_feature=None,
     )
 
 
@@ -41,31 +47,39 @@ def current_readout_regularization(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Keep the learned correction local while permitting held-set gains."""
     current = first_query(state)
-    base_covariance = tokens.covariance.float()
+    micro_count = tokens.latent.shape[1]
+    if current.feature.shape[2] % micro_count:
+        raise ValueError("readout component count must divide by GPSToken count")
+    children = current.feature.shape[2] // micro_count
+
+    def expand(value: torch.Tensor) -> torch.Tensor:
+        return value.repeat_interleave(children, dim=1).float()
+
+    base_covariance = expand(tokens.covariance)
     readout_covariance = current.covariance[:, 0].float()
     base_eigenvalues = torch.linalg.eigvalsh(base_covariance).clamp_min(1e-6)
     readout_eigenvalues = torch.linalg.eigvalsh(
         readout_covariance
     ).clamp_min(1e-6)
     feature = (
-        current.feature[:, 0].float() - tokens.decoded_features.float()
+        current.feature[:, 0].float() - expand(tokens.decoded_features)
     ).square().mean()
     center = (
-        current.center[:, 0].float() - tokens.center.float()
+        current.center[:, 0].float() - expand(tokens.center)
     ).square().mean() / 0.25**2
     covariance = (
         readout_eigenvalues.log() - base_eigenvalues.log()
     ).square().mean()
     depth = (
-        current.depth_order[:, 0].float() - tokens.depth_order.float()
+        current.depth_order[:, 0].float() - expand(tokens.depth_order)
     ).square().mean()
     opacity = (
         torch.logit(current.opacity[:, 0].float(), eps=1e-4)
-        - torch.logit(tokens.opacity.float(), eps=1e-4)
+        - torch.logit(expand(tokens.opacity), eps=1e-4)
     ).square().mean()
     activation = (
         torch.logit(current.activation[:, 0].float(), eps=1e-4)
-        - torch.logit(tokens.activation.float(), eps=1e-4)
+        - torch.logit(expand(tokens.activation), eps=1e-4)
     ).square().mean()
     total = (
         0.1 * feature
@@ -99,12 +113,15 @@ def current_readout_objective(
         state,
         coordinates,
     )
-    reconstruction = dense_feature_loss(prediction, target, valid, coverage)
+    loss_coverage = feature_loss_coverage(state, coverage)
+    reconstruction = dense_feature_loss(prediction, target, valid, loss_coverage)
     valid_weight = valid.float()
-    coverage_penalty = (
-        (torch.relu(0.05 - coverage.float()) / 0.05).square()
-        * valid_weight
-    ).sum() / valid_weight.sum().clamp_min(1.0)
+    coverage_penalty = reconstruction * 0.0
+    if state.background_feature is None:
+        coverage_penalty = (
+            (torch.relu(0.05 - coverage.float()) / 0.05).square()
+            * valid_weight
+        ).sum() / valid_weight.sum().clamp_min(1.0)
     anchor = reconstruction + 0.1 * coverage_penalty
     regularization, parts = current_readout_regularization(
         state,

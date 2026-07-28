@@ -47,6 +47,7 @@ _DIAGNOSTIC_PREFIXES = (
     "token_count_",
     "horizon_",
     "readout_",
+    "carrier_",
 )
 
 

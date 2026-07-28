@@ -12,6 +12,7 @@ from .change_objectives import (
     dense_feature_loss,
     scale_invariant_object_change_loss,
 )
+from .decoder import feature_loss_coverage
 from .gpstoken import GPSTokenState
 from .jepa_losses import (
     masked_history_loss,
@@ -23,7 +24,7 @@ from .loss_weights import AdaptiveGaussianLossWeights
 from .object_memory_objectives import object_memory_geometry_loss
 from .object_slots import ObjectSlotState
 from .rgb_objective import rgb_loss_bundle
-from .readout_repair import current_readout_objective
+from .carrier_objectives import carrier_loss_bundle
 from .training_diagnostics import object_memory_training_diagnostics
 from .zero_action_margin import observed_zero_action_margin_loss
 
@@ -354,21 +355,21 @@ def adaptive_world_model_loss(
         output["rendered_future_features"],
         batch["future_features"],
         batch["future_valid"],
-        output["render_coverage"],
+        feature_loss_coverage(
+            output["gaussian_readout"], output["render_coverage"]
+        ),
     )
     rgb, rgb_delta, rgb_object, rgb_parts = rgb_loss_bundle(
         model, batch, output, feature
     )
     geometry, geometry_parts = object_memory_geometry_loss(output, batch)
-    current_readout = feature * 0.0
-    readout_regularization = feature * 0.0
-    readout_parts = {}
-    if weights.current_readout > 0.0:
-        (
-            current_readout,
-            readout_regularization,
-            readout_parts,
-        ) = current_readout_objective(model, batch, output)
+    (
+        current_readout,
+        readout_regularization,
+        carrier_support,
+        carrier_compact,
+        readout_parts,
+    ) = carrier_loss_bundle(model, batch, output, feature, weights)
     zero_margin, zero_margin_parts = observed_zero_action_margin_loss(model, batch, output)
     language_effect = feature * 0.0
     language_effect_parts = {}
@@ -432,6 +433,8 @@ def adaptive_world_model_loss(
         + weights.geometry * geometry
         + weights.current_readout * current_readout
         + weights.readout_regularization * readout_regularization
+        + weights.carrier_support * carrier_support
+        + weights.carrier_compact * carrier_compact
         + weights.rgb * model.config.rgb_loss_weight * rgb
         + model.config.zero_action_margin_weight * zero_margin
         + model.config.language_effect_weight * language_effect
@@ -458,6 +461,8 @@ def adaptive_world_model_loss(
             "geometry": geometry,
             "current_readout": current_readout,
             "readout_regularization": readout_regularization,
+            "carrier_support": carrier_support,
+            "carrier_compact": carrier_compact,
             "rgb_future": rgb,
             "rgb_change_future": rgb_delta,
             "rgb_object_future": rgb_object,

@@ -18,3 +18,5 @@ class AdaptiveGaussianLossWeights:
     rgb: float = 1.0
     current_readout: float = 0.0
     readout_regularization: float = 0.0
+    carrier_support: float = 0.0
+    carrier_compact: float = 0.0

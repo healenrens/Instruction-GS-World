@@ -99,6 +99,8 @@ class AdaptiveGaussianWMConfig:
     continuous_effect_action: bool = False
     factorized_dynamics: bool = False
     gaussian_feature_residual: bool = False
+    gaussian_children: int = 1
+    hierarchical_gaussian_carrier: bool = False
 
     def __post_init__(self) -> None:
         positive = {
@@ -119,6 +121,7 @@ class AdaptiveGaussianWMConfig:
             "flow_source_components": self.flow_source_components,
             "min_active_tokens": self.min_active_tokens,
             "memory_relation_dim": self.memory_relation_dim,
+            "gaussian_children": self.gaussian_children,
         }
         for name, value in positive.items():
             if value <= 0:
@@ -139,6 +142,12 @@ class AdaptiveGaussianWMConfig:
             raise ValueError("token_spatial_precision_floor must be non-negative")
         if self.min_active_tokens > self.max_micro_tokens:
             raise ValueError("min_active_tokens cannot exceed max_micro_tokens")
+        if self.gaussian_children not in (1, 2, 4, 8):
+            raise ValueError("gaussian_children must be one of 1, 2, 4, or 8")
+        if self.hierarchical_gaussian_carrier != (self.gaussian_children > 1):
+            raise ValueError(
+                "hierarchical_gaussian_carrier must match gaussian_children > 1"
+            )
         if self.memory_motion_scale <= 0.0:
             raise ValueError("memory_motion_scale must be positive")
         if self.prior_effect_weight < 0.0:
@@ -410,6 +419,8 @@ class AdaptiveGaussianWMConfig:
             continuous_effect_action=True,
             factorized_dynamics=True,
             gaussian_feature_residual=True,
+            gaussian_children=4,
+            hierarchical_gaussian_carrier=True,
         )
 
     @classmethod
