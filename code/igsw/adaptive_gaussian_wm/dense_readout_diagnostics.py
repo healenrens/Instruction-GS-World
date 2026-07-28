@@ -11,6 +11,61 @@ from .diagnostic_statistics import ratio_moments
 from .readout_repair import direct_current_state
 
 
+DENSE_READOUT_REQUIRED_DIAGNOSTICS = frozenset(
+    {
+        "readout_current_dense_feature",
+        "readout_current_token_feature",
+        "readout_current_gaussian_feature",
+        "readout_current_scene_mean_feature",
+        "readout_current_dense_gap_to_token",
+        "readout_current_dense_gain_over_gaussian",
+        "readout_future_dense_feature",
+        "readout_future_persistence_feature",
+        "readout_future_dense_gain_over_persistence",
+        "readout_dynamic_dense_feature",
+        "readout_dynamic_persistence_feature",
+        "readout_dynamic_dense_gain_over_persistence",
+        "readout_static_dense_feature",
+        "readout_static_persistence_feature",
+        "readout_static_dense_gain_over_persistence",
+        "readout_dense_effective_tokens",
+        "readout_dense_coverage_fraction",
+        "readout_dense_future_assignment_js",
+        "readout_dense_future_feature_residual_rms",
+        "readout_dense_future_assignment_residual_rms",
+        "readout_dense_future_background_residual_rms",
+    }
+)
+
+
+def validate_dense_readout_diagnostic_contract(metrics: dict[str, float]) -> None:
+    """Reject incomplete or numerically invalid dense-readout diagnostics."""
+    missing = DENSE_READOUT_REQUIRED_DIAGNOSTICS.difference(metrics)
+    if missing:
+        raise ValueError(f"missing dense readout diagnostics: {sorted(missing)}")
+    nonfinite = {
+        name
+        for name in DENSE_READOUT_REQUIRED_DIAGNOSTICS
+        if not math.isfinite(metrics[name])
+    }
+    if nonfinite:
+        raise ValueError(f"non-finite dense readout diagnostics: {sorted(nonfinite)}")
+    coverage = metrics["readout_dense_coverage_fraction"]
+    if not 0.0 <= coverage <= 1.0:
+        raise ValueError(f"dense readout coverage is outside [0, 1]: {coverage}")
+    if metrics["readout_dense_effective_tokens"] <= 0.0:
+        raise ValueError("dense readout effective-token count must be positive")
+    nonnegative = {
+        "readout_dense_future_assignment_js",
+        "readout_dense_future_feature_residual_rms",
+        "readout_dense_future_assignment_residual_rms",
+        "readout_dense_future_background_residual_rms",
+    }
+    invalid = {name for name in nonnegative if metrics[name] < -1e-6}
+    if invalid:
+        raise ValueError(f"negative dense readout diagnostics: {sorted(invalid)}")
+
+
 def _feature_loss(
     prediction: torch.Tensor,
     target: torch.Tensor,

@@ -30,6 +30,7 @@ from igsw.adaptive_gaussian_wm.dynamics_runtime import (  # noqa: E402
 from igsw.adaptive_gaussian_wm.diagnostic_statistics import (  # noqa: E402
     finalize_diagnostic_metrics,
 )
+from igsw.adaptive_gaussian_wm import dense_readout_diagnostics as dense_diag  # noqa
 from igsw.adaptive_gaussian_wm.object_memory_objectives import (  # noqa: E402
     object_memory_geometry_loss,
 )
@@ -188,7 +189,7 @@ def verify_checkpoint(path: str, model) -> dict:
     )
     require(
         checkpoint.get("checkpoint_version") == CHECKPOINT_VERSION,
-        "checkpoint is not version 29",
+        f"checkpoint is not version {CHECKPOINT_VERSION}",
     )
     require(
         checkpoint.get("config", {}).get("architecture") == "object_memory_v1",
@@ -269,18 +270,14 @@ def verify_representation_backward(model, batch: dict) -> dict:
         "memory_target_disappearance_rate",
         "token_count_vs_spatial_complexity_correlation",
         "horizon_0_object_gain_over_persistence",
-        "readout_current_micro_splat_feature",
-        "readout_current_conditioned_splat_feature",
-        "readout_current_conditioned_effective_components",
-        "readout_comparable_teacher_relative_gain_over_persistence",
-        "readout_dynamic_model_relative_gain_over_persistence",
-    }
+    } | dense_diag.DENSE_READOUT_REQUIRED_DIAGNOSTICS
     missing_diagnostics = required_diagnostics.difference(diagnostic_metrics)
     require(not missing_diagnostics, f"missing diagnostics: {missing_diagnostics}")
     require(
         all(math.isfinite(diagnostic_metrics[name]) for name in required_diagnostics),
         "representation diagnostic is not finite",
     )
+    dense_diag.validate_dense_readout_diagnostic_contract(diagnostic_metrics)
     gradients = [
         (name, parameter.grad)
         for name, parameter in model.named_parameters()
@@ -457,6 +454,7 @@ def main() -> None:
     config = AdaptiveGaussianWMConfig.object_memory_full(dataset.feature_dim)
     require(config.condition_dim == 0, "v30 unexpectedly enables language")
     require(not config.rgb_supervision, "v30 unexpectedly enables RGB loss")
+    require(config.dense_object_readout, "v30 did not enable dense object readout")
     model = AdaptiveGaussianObjectWorldModel(config).to(device).eval()
     checkpoint = verify_checkpoint(args.checkpoint, model)
     batch = to_device(cpu_batch, device)
