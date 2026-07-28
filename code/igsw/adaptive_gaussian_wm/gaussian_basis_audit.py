@@ -7,11 +7,48 @@ import torch
 import torch.nn.functional as F
 
 
+_COVARIANCE_FLOOR = 1e-4
+_COMPONENT_MASS_FLOOR = 1e-6
+
+
 def _seeds(count: int, device: torch.device) -> torch.Tensor:
     if count == 1:
         return torch.zeros(1, 2, device=device)
     angle = 2.0 * math.pi * torch.arange(count, device=device) / count
     return 0.7 * torch.stack((angle.cos(), angle.sin()), dim=-1)
+
+
+def _stabilize_covariance(covariance: torch.Tensor) -> torch.Tensor:
+    symmetric = 0.5 * (covariance.float() + covariance.float().transpose(-1, -2))
+    eigenvalues, eigenvectors = torch.linalg.eigh(symmetric)
+    eigenvalues = eigenvalues.clamp_min(_COVARIANCE_FLOOR)
+    return (
+        eigenvectors
+        @ torch.diag_embed(eigenvalues)
+        @ eigenvectors.transpose(-1, -2)
+    )
+
+
+def _log_joint(
+    coordinates: torch.Tensor,
+    mean: torch.Tensor,
+    covariance: torch.Tensor,
+    mixture: torch.Tensor,
+) -> torch.Tensor:
+    cholesky = torch.linalg.cholesky(_stabilize_covariance(covariance))
+    difference = coordinates[:, None, None].float() - mean[:, :, :, None]
+    whitened = torch.linalg.solve_triangular(
+        cholesky,
+        difference.transpose(-1, -2),
+        upper=False,
+    )
+    distance = whitened.square().sum(dim=-2)
+    log_determinant = 2.0 * torch.log(
+        cholesky.diagonal(dim1=-2, dim2=-1)
+    ).sum(dim=-1)
+    return mixture.clamp_min(1e-8).log().unsqueeze(-1) - 0.5 * (
+        distance + log_determinant.unsqueeze(-1)
+    )
 
 
 def _moments(
@@ -27,7 +64,9 @@ def _moments(
         difference,
     )
     identity = torch.eye(2, device=coordinates.device)
-    return mean, covariance + 1e-4 * identity
+    return mean, _stabilize_covariance(
+        covariance + _COVARIANCE_FLOOR * identity
+    )
 
 
 def fit_gaussian_basis(
@@ -52,45 +91,37 @@ def fit_gaussian_basis(
     mixture = target.new_full(
         (*target.shape[:2], children), 1.0 / children
     )
-    identity = torch.eye(2, device=target.device)
     for _ in range(iterations):
-        precision = torch.linalg.inv(covariance)
-        difference = coordinates[:, None, None].float() - mean[:, :, :, None]
-        distance = torch.einsum(
-            "bmlni,bmlij,bmlnj->bmln",
-            difference,
-            precision,
-            difference,
-        )
-        log_determinant = torch.logdet(covariance).unsqueeze(-1)
-        log_joint = (
-            mixture.clamp_min(1e-8).log().unsqueeze(-1)
-            - 0.5 * (distance + log_determinant)
+        log_joint = _log_joint(
+            coordinates.float(), mean, covariance, mixture
         )
         posterior = log_joint.softmax(dim=2) * distribution[:, :, None]
-        child_mass = posterior.sum(dim=-1).clamp_min(1e-6)
-        mixture = child_mass / child_mass.sum(dim=2, keepdim=True)
-        mean = torch.einsum(
+        child_mass = posterior.sum(dim=-1)
+        safe_mass = child_mass.clamp_min(_COMPONENT_MASS_FLOOR)
+        mixture = child_mass + _COMPONENT_MASS_FLOOR
+        mixture = mixture / mixture.sum(dim=2, keepdim=True)
+        updated_mean = torch.einsum(
             "bmln,bnd->bmld", posterior, coordinates.float()
-        ) / child_mass[..., None]
-        difference = coordinates[:, None, None].float() - mean[:, :, :, None]
-        covariance = torch.einsum(
+        ) / safe_mass[..., None]
+        difference = coordinates[:, None, None].float() - updated_mean[:, :, :, None]
+        updated_covariance = torch.einsum(
             "bmln,bmlni,bmlnj->bmlij",
             posterior,
             difference,
             difference,
-        ) / child_mass[..., None, None]
-        covariance = covariance + 1e-4 * identity
+        ) / safe_mass[..., None, None]
+        updated_covariance = _stabilize_covariance(updated_covariance)
+        populated = child_mass > _COMPONENT_MASS_FLOOR
+        mean = torch.where(populated[..., None], updated_mean, mean)
+        covariance = torch.where(
+            populated[..., None, None], updated_covariance, covariance
+        )
 
-    precision = torch.linalg.inv(covariance)
-    difference = coordinates[:, None, None].float() - mean[:, :, :, None]
-    distance = torch.einsum(
-        "bmlni,bmlij,bmlnj->bmln", difference, precision, difference
+    log_density = torch.logsumexp(
+        _log_joint(coordinates.float(), mean, covariance, mixture), dim=2
     )
-    normalizer = covariance.det().clamp_min(1e-8).sqrt().unsqueeze(-1)
-    density = mixture[..., None] * torch.exp(-0.5 * distance) / normalizer
-    density = density.sum(dim=2) * valid[:, None].float()
-    density = density / density.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+    log_density = log_density.masked_fill(~valid[:, None], -torch.inf)
+    density = log_density.softmax(dim=-1) * valid[:, None].float()
     return density * parent_mass
 
 
@@ -132,11 +163,12 @@ def sample_support_error(
     )
     target_parent = target / target.sum(dim=1, keepdim=True).clamp_min(1e-7)
     midpoint = 0.5 * (predicted_parent + target_parent)
+    safe_midpoint = midpoint.clamp_min(1e-7)
     divergence = 0.5 * (
-        target_parent.clamp_min(1e-7)
-        * (target_parent.clamp_min(1e-7).log() - midpoint.log())
-        + predicted_parent.clamp_min(1e-7)
-        * (predicted_parent.clamp_min(1e-7).log() - midpoint.log())
+        target_parent
+        * (target_parent.clamp_min(1e-7).log() - safe_midpoint.log())
+        + predicted_parent
+        * (predicted_parent.clamp_min(1e-7).log() - safe_midpoint.log())
     ).sum(dim=1)
     foreground = valid.float() * target_coverage
     js = (divergence * foreground).sum(dim=1) / foreground.sum(dim=1).clamp_min(

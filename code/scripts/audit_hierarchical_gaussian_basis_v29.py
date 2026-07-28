@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
 import hashlib
 import json
 import math
@@ -94,15 +93,14 @@ def main() -> None:
     device = torch.device("cuda:0")
     checkpoint, model = load_model(args.checkpoint, device)
     rows: dict[str, list[torch.Tensor]] = {}
-    amp = (
-        torch.autocast("cuda", dtype=torch.bfloat16)
-        if torch.cuda.is_bf16_supported()
-        else nullcontext()
-    )
-    with torch.no_grad(), amp:
+    use_bf16 = torch.cuda.is_bf16_supported()
+    with torch.no_grad():
         for cpu_batch in loader:
             batch = move_to_device(cpu_batch, device)
-            history = model.encode_history(batch)
+            with torch.autocast(
+                "cuda", dtype=torch.bfloat16, enabled=use_bf16
+            ):
+                history = model.encode_history(batch)
             values = audit_batch(
                 history["token_states"][-1],
                 batch["history_features"][:, -1],
@@ -111,27 +109,46 @@ def main() -> None:
             )
             for name, value in values.items():
                 rows.setdefault(name, []).append(value.detach().float().cpu())
-    metrics = {
+    raw_metrics = {
         name: float(torch.cat(parts).mean()) for name, parts in rows.items()
     }
-    single_gap = max(metrics["feature_1"] - metrics["token"], 0.0)
+    nonfinite_metrics = sorted(
+        name for name, value in raw_metrics.items() if not math.isfinite(value)
+    )
+    metrics = {
+        name: value if math.isfinite(value) else None
+        for name, value in raw_metrics.items()
+    }
+    finite_single_gap = math.isfinite(raw_metrics["feature_1"]) and math.isfinite(
+        raw_metrics["token"]
+    )
+    single_gap = (
+        max(raw_metrics["feature_1"] - raw_metrics["token"], 0.0)
+        if finite_single_gap
+        else None
+    )
     recovery = {}
     for children in (2, 4, 8):
-        if single_gap <= 1e-8:
+        feature = raw_metrics[f"feature_{children}"]
+        if single_gap is None or not math.isfinite(feature):
+            recovery[str(children)] = None
+        elif single_gap <= 1e-8:
             recovery[str(children)] = 1.0
         else:
             recovery[str(children)] = 1.0 - max(
-                metrics[f"feature_{children}"] - metrics["token"], 0.0
+                feature - raw_metrics["token"], 0.0
             ) / single_gap
     eligible = [
         children
         for children in (2, 4, 8)
-        if recovery[str(children)] >= args.minimum_gap_recovery
+        if recovery[str(children)] is not None
+        and recovery[str(children)] >= args.minimum_gap_recovery
     ]
     selected = min(eligible) if eligible else 0
     checks = {
         "nonempty_held_set": len(dataset) > 0,
-        "single_gaussian_gap_is_finite": math.isfinite(single_gap),
+        "all_metrics_are_finite": not nonfinite_metrics,
+        "single_gaussian_gap_is_finite": single_gap is not None,
         "child_basis_recovers_required_gap": bool(eligible),
     }
     report = {
@@ -150,11 +167,12 @@ def main() -> None:
         "single_gaussian_gap": single_gap,
         "gap_recovery": recovery,
         "metrics": metrics,
+        "nonfinite_metrics": nonfinite_metrics,
         "checks": checks,
     }
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2, sort_keys=True)
+        json.dump(report, handle, allow_nan=False, indent=2, sort_keys=True)
         handle.write("\n")
     print(json.dumps(report, sort_keys=True))
     if report["status"] != "passed":
