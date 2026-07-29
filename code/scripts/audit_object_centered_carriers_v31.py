@@ -112,6 +112,7 @@ def action_free_prediction(model, batch: dict, history: dict):
     future_scale = signed_gap_scale(batch["future_times"], model.config.gap_reference)
     actions = torch.zeros(
         batch["history_features"].shape[0],
+        future_scale.shape[1],
         model.config.action_tokens,
         model.config.action_dim,
         device=batch["history_features"].device,
