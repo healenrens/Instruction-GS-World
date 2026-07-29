@@ -69,7 +69,8 @@ TEACHER_SIDECAR="${TEACHER_SIDECAR:-}"
 WANDB_MODE="${WANDB_MODE:-online}"
 WANDB_PROJECT="${WANDB_PROJECT:-instruct-gs-world}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
-WANDB_RUN_ID="${WANDB_RUN_ID:-}"
+REQUESTED_WANDB_RUN_ID="${WANDB_RUN_ID:-}"
+unset WANDB_RUN_ID
 
 if [[ "${NPROC_PER_NODE}" == "auto" ]]; then
     TORCHRUN_NPROC=gpu
@@ -144,8 +145,9 @@ if [[ -n "${RESUME}" ]]; then
         echo "[dense-v30] RESUME must belong to OUT" >&2
         exit 2
     fi
-    if [[ -z "${WANDB_RUN_ID}" && -s "${OUT}/wandb_run_id.txt" ]]; then
-        WANDB_RUN_ID="$(<"${OUT}/wandb_run_id.txt")"
+    if [[ -z "${REQUESTED_WANDB_RUN_ID}" \
+        && -s "${OUT}/wandb_run_id.txt" ]]; then
+        REQUESTED_WANDB_RUN_ID="$(<"${OUT}/wandb_run_id.txt")"
     fi
     init_args=(--resume "$(readlink -f "${RESUME}")")
 else
@@ -200,7 +202,7 @@ cmd=(
     --wandb_mode "${WANDB_MODE}" --wandb_project "${WANDB_PROJECT}"
     --wandb_entity "${WANDB_ENTITY}" --wandb_name "${WANDB_NAME}"
     --wandb_group "${WANDB_GROUP}" --wandb_tags "${WANDB_TAGS}"
-    --wandb_run_id "${WANDB_RUN_ID}" --wandb_dir "${WANDB_DIR}"
+    --wandb_run_id "${REQUESTED_WANDB_RUN_ID}" --wandb_dir "${WANDB_DIR}"
     "${sidecar_args[@]}" "${init_args[@]}"
 )
 echo "[dense-v30] commit=$(git rev-parse HEAD) scope=${SCOPE} nproc=${TORCHRUN_NPROC}"
