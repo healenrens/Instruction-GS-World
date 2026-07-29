@@ -81,7 +81,7 @@ def _group_priors(groups: FrameGroups, group_ids: torch.Tensor) -> torch.Tensor:
     return mass / mass.sum().clamp_min(1e-6)
 
 
-def _geometric_gates(
+def geometric_object_gates(
     geometry: ResidualFieldGeometry,
     coordinates: torch.Tensor,
     target_object_centers: torch.Tensor | None = None,
@@ -135,13 +135,14 @@ def _global_design(
     )
 
 
-def _object_design(
+def object_residual_design(
     geometry: ResidualFieldGeometry,
     coordinates: torch.Tensor,
     gates: torch.Tensor,
     local_budget: int,
     target_object_centers: torch.Tensor | None = None,
     object_scale_ratio: torch.Tensor | None = None,
+    gate_local_residuals: bool = True,
 ) -> torch.Tensor:
     count = min(local_budget, geometry.carrier_group.shape[0])
     object_count = geometry.object_centers.shape[0]
@@ -176,7 +177,10 @@ def _object_design(
             geometry.relative_center[indices],
             geometry.relative_covariance[indices],
         )
-        local_columns[:, indices] = gates[:, root_index : root_index + 1] * basis
+        envelope = (
+            gates[:, root_index : root_index + 1] if gate_local_residuals else 1.0
+        )
+        local_columns[:, indices] = envelope * basis
     return torch.cat((gates.float(), local_columns), dim=1)
 
 
@@ -367,7 +371,7 @@ def fit_residual_fields(
         relative_center=empty,
         relative_covariance=empty_covariance,
     )
-    geometric_gates = _geometric_gates(base_geometry, coordinates)
+    geometric_gates = geometric_object_gates(base_geometry, coordinates)
     oracle_root = ridge_solution(oracle_gates, features, valid, ridge)
     geometric_root = ridge_solution(geometric_gates, features, valid, ridge)
     group_coordinates = _group_coordinates(groups, coordinates)
@@ -413,13 +417,13 @@ def fit_residual_fields(
             ridge,
         )
         oracle_solution = ridge_solution(
-            _object_design(geometry, coordinates, oracle_gates, budget),
+            object_residual_design(geometry, coordinates, oracle_gates, budget),
             features,
             valid,
             ridge,
         )
         geometric_solution = ridge_solution(
-            _object_design(geometry, coordinates, geometric_gates, budget),
+            object_residual_design(geometry, coordinates, geometric_gates, budget),
             features,
             valid,
             ridge,
@@ -467,13 +471,13 @@ def render_geometric_residual_field(
     object_scale_ratio: torch.Tensor | None = None,
     object_feature_delta: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    gates = _geometric_gates(
+    gates = geometric_object_gates(
         fit.geometry,
         coordinates,
         target_object_centers,
         object_scale_ratio,
     )
-    design = _object_design(
+    design = object_residual_design(
         fit.geometry,
         coordinates,
         gates,

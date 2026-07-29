@@ -8,7 +8,7 @@ import torch
 METHODS = ("global", "oracle", "geometric")
 
 
-def _cluster_ratio(
+def cluster_ratio(
     numerator: torch.Tensor,
     denominator: torch.Tensor,
     clusters: torch.Tensor,
@@ -35,7 +35,7 @@ def _cluster_ratio(
     }
 
 
-def _cluster_gap_recovery(
+def cluster_gap_recovery(
     root: torch.Tensor,
     prediction: torch.Tensor,
     token: torch.Tensor,
@@ -96,7 +96,7 @@ def summarize_residual_field_audit(
     ratios = {}
     for method in METHODS:
         for budget in budgets:
-            ratios[f"current_{method}_gap_recovery_b{budget}"] = _cluster_gap_recovery(
+            ratios[f"current_{method}_gap_recovery_b{budget}"] = cluster_gap_recovery(
                 rows[f"current_{method}_root"],
                 rows[f"current_{method}_b{budget}"],
                 rows["current_token"],
@@ -104,7 +104,7 @@ def summarize_residual_field_audit(
                 bootstrap_samples,
                 generator,
             )
-            ratios[f"future_{method}_gap_recovery_b{budget}"] = _cluster_gap_recovery(
+            ratios[f"future_{method}_gap_recovery_b{budget}"] = cluster_gap_recovery(
                 rows[f"future_{method}_root"],
                 rows[f"future_{method}_b{budget}"],
                 rows["future_token"],
@@ -112,14 +112,14 @@ def summarize_residual_field_audit(
                 bootstrap_samples,
                 generator,
             )
-        ratios[f"current_{method}_max_to_token"] = _cluster_ratio(
+        ratios[f"current_{method}_max_to_token"] = cluster_ratio(
             rows[f"current_{method}_b{maximum}"],
             rows["current_token"].clamp_min(1e-8),
             current_clusters,
             bootstrap_samples,
             generator,
         )
-        ratios[f"future_{method}_max_to_token"] = _cluster_ratio(
+        ratios[f"future_{method}_max_to_token"] = cluster_ratio(
             rows[f"future_{method}_b{maximum}"],
             rows["future_token"].clamp_min(1e-8),
             future_clusters,
@@ -129,7 +129,7 @@ def summarize_residual_field_audit(
     headroom = (
         rows["future_persistence"] - rows[f"future_geometric_b{maximum}"]
     ).clamp_min(1e-8)
-    ratios["dynamics_recovered_geometric_headroom"] = _cluster_ratio(
+    ratios["dynamics_recovered_geometric_headroom"] = cluster_ratio(
         rows["future_persistence"] - rows["future_dynamics"],
         headroom,
         future_clusters,
@@ -201,9 +201,9 @@ def summarize_residual_field_audit(
     )
     if not all(checks[name] for name in execution_names):
         decision = "inconclusive"
-    elif not parity["global"]:
+    elif not parity["global"] and not parity["oracle"]:
         decision = "reject_signed_residual_basis"
-    elif not parity["oracle"]:
+    elif parity["global"] and not parity["oracle"]:
         decision = "reject_object_partition"
     elif not parity["geometric"]:
         decision = "repair_geometric_object_gate"
