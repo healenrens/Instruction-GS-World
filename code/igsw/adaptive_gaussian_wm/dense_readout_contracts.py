@@ -6,8 +6,14 @@ import hashlib
 import json
 
 
-DENSE_PREFLIGHT_CONTRACT = "dense_object_readout_preflight_v1"
+DENSE_PREFLIGHT_CONTRACT = "dense_object_readout_preflight_v2"
 DENSE_HELD_CONTRACT = "dense_object_readout_held_v1"
+GAUSSIAN_COMPATIBILITY_PARAMETERS = frozenset(
+    {
+        "gaussian_readout.feature_residual_head.weight",
+        "gaussian_readout.feature_residual_head.bias",
+    }
+)
 
 
 def file_sha256(path: str) -> str:
@@ -31,6 +37,55 @@ def _require(report: dict, expected: dict, label: str) -> None:
     }
     if mismatch:
         raise ValueError(f"{label} differs: {mismatch}")
+
+
+def validate_dense_warm_start(model, checkpoint: dict, report: dict) -> dict:
+    """Require an exact transition from the frozen parent into dense readout."""
+    if not model.config.dense_object_readout:
+        raise ValueError("dense warm start requires the dense readout backend")
+    source_config = checkpoint.get("config", {})
+    target_names = set(model.state_dict())
+    expected_missing = set()
+    if not source_config.get("dense_object_readout", False):
+        expected_missing = {
+            name for name in target_names if name.startswith("dense_readout.")
+        }
+    compatibility_missing = set()
+    source_gaussian_residual = source_config.get("gaussian_feature_residual", False)
+    if model.config.gaussian_feature_residual and not source_gaussian_residual:
+        compatibility_missing = GAUSSIAN_COMPATIBILITY_PARAMETERS & target_names
+        if compatibility_missing != GAUSSIAN_COMPATIBILITY_PARAMETERS:
+            raise ValueError("Gaussian compatibility parameters are incomplete")
+        expected_missing.update(compatibility_missing)
+    elif source_gaussian_residual and not model.config.gaussian_feature_residual:
+        raise ValueError("dense target removed source Gaussian repair parameters")
+    problems = {
+        "missing": {
+            "actual": sorted(report["missing"]),
+            "expected": sorted(expected_missing),
+        },
+        "unexpected": report["unexpected"],
+        "shape_mismatch": report["shape_mismatch"],
+        "transformed": report["transformed"],
+        "dropped": report["dropped"],
+    }
+    invalid = {
+        name: value
+        for name, value in problems.items()
+        if value and name != "missing"
+    }
+    if set(report["missing"]) != expected_missing:
+        invalid["missing"] = problems["missing"]
+    if invalid:
+        raise ValueError(f"dense warm start contract differs: {invalid}")
+    return {
+        "source_dense_object_readout": bool(
+            source_config.get("dense_object_readout", False)
+        ),
+        "source_gaussian_feature_residual": bool(source_gaussian_residual),
+        "expected_missing": sorted(expected_missing),
+        "zero_initialized_missing": sorted(compatibility_missing),
+    }
 
 
 def validate_dense_preflight(args, initialization_path: str) -> None:

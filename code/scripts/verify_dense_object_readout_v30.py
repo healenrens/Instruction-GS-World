@@ -25,6 +25,7 @@ from igsw.adaptive_gaussian_wm.checkpointing import (  # noqa: E402
 from igsw.adaptive_gaussian_wm.config import AdaptiveGaussianWMConfig  # noqa: E402
 from igsw.adaptive_gaussian_wm.dense_readout_contracts import (  # noqa: E402
     DENSE_PREFLIGHT_CONTRACT,
+    validate_dense_warm_start,
 )
 from igsw.adaptive_gaussian_wm.feature_readout_runtime import (  # noqa: E402
     decode_current_dense_readout,
@@ -96,6 +97,14 @@ def max_difference(left: torch.Tensor, right: torch.Tensor) -> float:
 def rms_difference(left: torch.Tensor, right: torch.Tensor) -> float:
     return float(
         torch.sqrt((left.float() - right.float()).square().mean().clamp_min(1e-12))
+    )
+
+
+def autocast_context():
+    return (
+        torch.autocast("cuda", dtype=torch.bfloat16)
+        if torch.cuda.is_bf16_supported()
+        else nullcontext()
     )
 
 
@@ -173,17 +182,30 @@ def main() -> None:
         "dense readout source must be a v28 or v30 checkpoint",
     )
     require(source.get("phase") == "representation", "source is not representation")
+    require(
+        source.get("config", {}).get("architecture") == ARCHITECTURE,
+        "source architecture is not object_memory_v1",
+    )
+    require(
+        source.get("args", {}).get("training_stage") == "representation",
+        "source training stage is not representation",
+    )
     config = AdaptiveGaussianWMConfig.object_memory_full(dataset.feature_dim)
     require(config.dense_object_readout, "v30 config did not enable dense readout")
     require(config.gaussian_children == 1, "v30 config enabled Gaussian children")
     device = torch.device("cuda:0")
     model = AdaptiveGaussianObjectWorldModel(config).to(device)
     warm_start = warm_start_model(model, source)
-    require(not warm_start["unexpected"], "warm start has unexpected parameters")
-    require(not warm_start["shape_mismatch"], "warm start has shape mismatches")
+    warm_start_contract = validate_dense_warm_start(model, source, warm_start)
+    model_state = model.state_dict()
+    nonzero_compatibility = [
+        name
+        for name in warm_start_contract["zero_initialized_missing"]
+        if bool(torch.count_nonzero(model_state[name]).item())
+    ]
     require(
-        all(name.startswith("dense_readout.") for name in warm_start["missing"]),
-        "warm start has missing parameters outside the new dense readout",
+        not nonzero_compatibility,
+        f"compatibility parameters are not zero: {nonzero_compatibility}",
     )
     if source_version < CHECKPOINT_VERSION:
         require(
@@ -210,12 +232,7 @@ def main() -> None:
         current_readout=1.0,
         readout_regularization=0.01,
     )
-    amp = (
-        torch.autocast("cuda", dtype=torch.bfloat16)
-        if torch.cuda.is_bf16_supported()
-        else nullcontext()
-    )
-    with amp:
+    with autocast_context():
         output = model(
             batch,
             phase="object_memory_representation_loss",
@@ -250,22 +267,30 @@ def main() -> None:
         all(bool(torch.isfinite(gradient).all()) for _, gradient in gradients),
         "dense preflight produced non-finite gradients",
     )
-    with torch.no_grad():
-        direct = direct_dense_state(model.eval(), batch, output)
-        changed = direct_dense_state(model, batch, output, slot_offset=0.1)
+    model.eval()
+    swapped = dict(batch)
+    swapped["future_features"] = batch["future_features"].roll(1, dims=2)
+    with torch.no_grad(), autocast_context():
+        reference_history = model.encode_history(batch)
+        reference_output = {
+            "history_token_states": reference_history["token_states"],
+            "history_slot_states": reference_history["slot_states"],
+        }
+        direct = direct_dense_state(model, batch, reference_output)
+        equivalent = decode_current_dense_readout(model, batch, reference_history)
+        changed = direct_dense_state(
+            model, batch, reference_output, slot_offset=0.1
+        )
+        swapped_history = model.encode_history(swapped)
+        swapped_current = decode_current_dense_readout(model, swapped, swapped_history)
     zero_difference = max_difference(
-        direct.feature, output["current_dense_readout"].feature
+        direct.feature, equivalent.feature
     )
     intervention = max(
         max_difference(changed.feature, direct.feature),
         max_difference(changed.assignment, direct.assignment),
     )
-    swapped = dict(batch)
-    swapped["future_features"] = batch["future_features"].roll(1, dims=2)
-    with torch.no_grad():
-        swapped_history = model.encode_history(swapped)
-        swapped_current = decode_current_dense_readout(model, swapped, swapped_history)
-    future_swap_difference = max_difference(direct.feature, swapped_current.feature)
+    future_swap_difference = max_difference(equivalent.feature, swapped_current.feature)
     require(zero_difference < 2e-3, "identical object state changed the readout")
     require(intervention > 1e-5, "dense readout ignores object intervention")
     require(
@@ -285,6 +310,7 @@ def main() -> None:
         "source_checkpoint_version": source_version,
         "base_gate_sha256": file_sha256(args.gate_report),
         "warm_start_missing": warm_start["missing"],
+        "warm_start_contract": warm_start_contract,
         "initial_token_reconstruction_max_difference": baseline_difference,
         "initial_token_reconstruction_rms_difference": baseline_rms,
         "identical_state_max_difference": zero_difference,
