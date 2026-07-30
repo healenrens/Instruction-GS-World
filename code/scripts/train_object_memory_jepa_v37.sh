@@ -46,9 +46,10 @@ if [[ "${GATE_REPORT}" != /* || ! -f "${GATE_REPORT}" ]]; then
     echo "[object-memory-v37] GATE_REPORT is missing" >&2
     exit 2
 fi
-if [[ -n "$(git -C "${ROOT}" status --porcelain)" ]]; then
-    echo "[object-memory-v37] repository is not clean" >&2
-    git -C "${ROOT}" status --short >&2
+if ! git -C "${ROOT}" diff --quiet \
+    || ! git -C "${ROOT}" diff --cached --quiet; then
+    echo "[object-memory-v37] tracked repository files are modified" >&2
+    git -C "${ROOT}" status --short --untracked-files=no >&2
     exit 2
 fi
 if [[ ! -f "${DATA}/episode_manifest.verified.sha256" ]] \

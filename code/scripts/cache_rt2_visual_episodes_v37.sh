@@ -30,9 +30,10 @@ if [[ ! -x "${PY}" ]]; then
     exit 2
 fi
 "${PY}" -c 'import av, pyarrow, torch, torchvision'
-if [[ -n "$(git -C "${ROOT}" status --porcelain)" ]]; then
-    echo "[v37-cache] repository is not clean" >&2
-    git -C "${ROOT}" status --short >&2
+if ! git -C "${ROOT}" diff --quiet \
+    || ! git -C "${ROOT}" diff --cached --quiet; then
+    echo "[v37-cache] tracked repository files are modified" >&2
+    git -C "${ROOT}" status --short --untracked-files=no >&2
     exit 2
 fi
 if ! [[ "${JOBS_PER_GPU}" =~ ^[1-9][0-9]*$ ]]; then

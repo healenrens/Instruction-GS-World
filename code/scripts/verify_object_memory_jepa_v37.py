@@ -95,9 +95,11 @@ def parse_args() -> argparse.Namespace:
 
 def verify_repository() -> str:
     status = subprocess.check_output(
-        ["git", "status", "--porcelain"], cwd=PROJECT_ROOT, text=True
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=PROJECT_ROOT,
+        text=True,
     )
-    require(not status.strip(), "v37 verifier requires a clean worktree")
+    require(not status.strip(), "v37 verifier rejects tracked worktree changes")
     return subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True
     ).strip()

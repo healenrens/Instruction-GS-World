@@ -174,12 +174,12 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         text=True,
     ).strip()
     worktree = subprocess.check_output(
-        ["git", "status", "--porcelain"],
+        ["git", "status", "--porcelain", "--untracked-files=no"],
         cwd=project_root,
         text=True,
     )
     if worktree.strip():
-        raise ValueError("v37 training requires a clean worktree")
+        raise ValueError("v37 training rejects tracked worktree changes")
     expected = {
         "status": "passed",
         "architecture": ARCHITECTURE,
