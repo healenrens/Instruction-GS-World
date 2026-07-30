@@ -1,10 +1,10 @@
 """Verify a complete dense visual-episode cache and sampling contract."""
+
 from __future__ import annotations
 
 import argparse
 import glob
 import hashlib
-import h5py
 import json
 import os
 import sys
@@ -21,12 +21,21 @@ from igsw.adaptive_gaussian_wm.episode_sequence_dataset import (  # noqa: E402
 from igsw.adaptive_gaussian_wm.episode_cache_contract import (  # noqa: E402
     file_sha256,
     validate_episode_cache_header,
+    validate_episode_payload,
 )
 from igsw.adaptive_gaussian_wm.group_balanced_sampler import (  # noqa: E402
     sqrt_coverage_targets,
 )
+from igsw.adaptive_gaussian_wm.robotwin_lerobot_source import (  # noqa: E402
+    HDF5_ROOT_SOURCE_KIND,
+    LEROBOT_SOURCE_KIND,
+    assign_episode_filenames,
+    discover_hdf5_episodes,
+    discover_lerobot_episodes,
+    source_files,
+    source_index_sha256,
+)
 from igsw.adaptive_gaussian_wm.sequence_contract import (  # noqa: E402
-    CONTROL_HZ,
     EPISODE_CACHE_VERSION,
     EPISODE_MANIFEST_NAME,
     EXPECTED_FRAME_COUNT,
@@ -37,7 +46,6 @@ from igsw.adaptive_gaussian_wm.sequence_contract import (  # noqa: E402
     parse_anchor_indices,
     parse_control_windows,
     temporal_layout,
-    stable_rt2_episode_split,
 )
 
 
@@ -52,9 +60,7 @@ def start_count(frame_count: int, window: int, stride: int) -> int:
 
 
 def sampling_summary(manifest: dict, anchors: tuple[int, ...]) -> dict:
-    windows = parse_control_windows(
-        manifest["sampling"]["window_lengths"]
-    )
+    windows = parse_control_windows(manifest["sampling"]["window_lengths"])
     stride = int(manifest["sampling"]["sample_stride"])
     split_windows = Counter()
     split_examples = Counter()
@@ -67,17 +73,15 @@ def sampling_summary(manifest: dict, anchors: tuple[int, ...]) -> dict:
         frame_count = int(episode["frame_count"])
         split_frames[split] += frame_count
         window_counts = {
-            window: start_count(frame_count, window, stride)
-            for window in windows
+            window: start_count(frame_count, window, stride) for window in windows
         }
         count = sum(window_counts.values())
         split_windows[split] += count
         split_examples[split] += count * len(anchors)
-        task_examples.setdefault(split, Counter())[group] += (
-            count * len(anchors)
-        )
+        task_examples.setdefault(split, Counter())[group] += count * len(anchors)
         task_episodes.setdefault(split, Counter())[group] += 1
     time_rows = set()
+    control_hz = float(manifest["control_hz"])
     for window in windows:
         controls = control_frame_indices(0, window, EXPECTED_FRAME_COUNT)
         for anchor in anchors:
@@ -90,7 +94,7 @@ def sampling_summary(manifest: dict, anchors: tuple[int, ...]) -> dict:
             relative = tuple(
                 round(float(value), 9)
                 for value in (
-                    (controls[future] - controls[anchor]).float() / CONTROL_HZ
+                    (controls[future] - controls[anchor]).float() / control_hz
                 )
             )
             time_rows.add(relative)
@@ -106,8 +110,7 @@ def sampling_summary(manifest: dict, anchors: tuple[int, ...]) -> dict:
             "coverage_target_max": max(targets),
             "coverage_target_total": sum(targets),
             "maximum_repeat_factor": max(
-                target / count
-                for target, count in zip(targets, counts.values())
+                target / count for target, count in zip(targets, counts.values())
             ),
             "episodes_min": min(episodes.values()),
             "episodes_max": max(episodes.values()),
@@ -119,9 +122,7 @@ def sampling_summary(manifest: dict, anchors: tuple[int, ...]) -> dict:
         "group_sampling_temperature": manifest["sampling"].get(
             "group_sampling_temperature"
         ),
-        "group_sampler_version": manifest["sampling"].get(
-            "group_sampler_version"
-        ),
+        "group_sampler_version": manifest["sampling"].get("group_sampler_version"),
         "anchors": list(anchors),
         "unique_future_time_rows": len(time_rows),
         "frames_by_split": dict(sorted(split_frames.items())),
@@ -134,10 +135,7 @@ def sampling_summary(manifest: dict, anchors: tuple[int, ...]) -> dict:
 def verify_files(data: str, manifest: dict) -> dict:
     entries = manifest["episodes"]
     expected = {entry["filename"] for entry in entries}
-    actual = {
-        os.path.basename(path)
-        for path in glob.glob(os.path.join(data, "*.pt"))
-    }
+    actual = {os.path.basename(path) for path in glob.glob(os.path.join(data, "*.pt"))}
     if actual != expected:
         raise ValueError(
             "episode cache file set differs: "
@@ -154,7 +152,7 @@ def verify_files(data: str, manifest: dict) -> dict:
             weights_only=False,
             mmap=True,
         )
-        CausalVisualEpisodeDataset._validate_cache(cache, path)
+        validate_episode_payload(cache, path, float(manifest["control_hz"]))
         validate_episode_cache_header(
             cache,
             path,
@@ -196,6 +194,7 @@ def verify_source_index(data: str, manifest: dict) -> dict:
             item["filename"],
             int(item["frame_count"]),
             item["split"],
+            float(item["control_hz"]),
         )
         for item in source
     }
@@ -204,6 +203,7 @@ def verify_source_index(data: str, manifest: dict) -> dict:
             item["filename"],
             int(item["frame_count"]),
             item["split"],
+            float(item["control_hz"]),
         )
         for item in manifest["episodes"]
     }
@@ -216,58 +216,50 @@ def verify_source_index(data: str, manifest: dict) -> dict:
         if item.get("sampling_group") != expected_group:
             raise ValueError("episode sampling group differs from source task")
     missing = [
-        item["hdf5"]
+        path
         for item in source
-        if not os.path.isfile(item["hdf5"])
+        for path in source_files(item)
+        if not os.path.isfile(path)
     ]
     if missing:
-        raise ValueError(f"source index contains missing HDF5 files: {missing[:3]}")
-    digest = hashlib.sha256()
-    for item in source:
-        digest.update(
-            (
-                f"{item['task']}\0{item['episode']}\0"
-                f"{item['frame_count']}\0{item['split']}\0"
-                f"{item['hdf5']}\0"
-            ).encode()
-        )
-    if digest.hexdigest() != manifest["source"]["index_sha256"]:
+        raise ValueError(f"source index contains missing files: {missing[:3]}")
+    digest = source_index_sha256(source)
+    if digest != manifest["source"]["index_sha256"]:
         raise ValueError("episode source index digest differs from manifest")
-    if manifest["source"]["kind"] == "robotwin_root":
+    source_contract = manifest["source"]
+    if source_contract["kind"] == LEROBOT_SOURCE_KIND:
         if manifest["split_contract"] != {
             "name": "rt2_task_md5_v1",
             "heldseed_fraction": RT2_HELDSEED_FRACTION,
             "heldtasks": list(RT2_HELDTASKS),
         }:
             raise ValueError("full RoboTwin source split contract differs")
-        root = manifest["source"]["path"]
-        discovered = set(
-            glob.glob(
-                os.path.join(root, "*", "demo_clean", "data", "episode*.hdf5")
+        discovered = assign_episode_filenames(
+            discover_lerobot_episodes(
+                source_contract["path"],
+                source_contract["variants"],
+                float(source_contract["expected_source_fps"]),
             )
         )
-        indexed_paths = {item["hdf5"] for item in source}
-        if discovered != indexed_paths:
-            raise ValueError(
-                "full RoboTwin root differs from source index: "
-                f"missing={len(discovered - indexed_paths)} "
-                f"extra={len(indexed_paths - discovered)}"
-            )
-        for item in source:
-            if item["split"] != stable_rt2_episode_split(
-                item["task"],
-                int(item["episode"]),
-            ):
-                raise ValueError("source index split differs from stable contract")
-            with h5py.File(item["hdf5"], "r") as handle:
-                frame_count = len(handle["observation/head_camera/rgb"])
-            if frame_count != int(item["frame_count"]):
-                raise ValueError("source index frame count differs from HDF5")
+        if discovered != source:
+            raise ValueError("LeRobot root metadata differs from source index")
+        if int(source_contract.get("source_frame_stride", 0)) != 1:
+            raise ValueError("LeRobot visual cache is not stride-1")
+    elif source_contract["kind"] == HDF5_ROOT_SOURCE_KIND:
+        discovered = assign_episode_filenames(
+            discover_hdf5_episodes(source_contract["path"])
+        )
+        if discovered != source:
+            raise ValueError("HDF5 root metadata differs from source index")
+    elif source_contract["kind"] != "window_plan":
+        raise ValueError(f"unsupported source kind: {source_contract['kind']}")
     return {
-        "source_kind": manifest["source"]["kind"],
-        "source_path": manifest["source"]["path"],
-        "source_index_sha256": digest.hexdigest(),
+        "source_kind": source_contract["kind"],
+        "source_path": source_contract["path"],
+        "source_index_sha256": digest,
         "tasks": len({item["task"] for item in source}),
+        "source_variants": sorted({item["source_variant"] for item in source}),
+        "control_hz": float(manifest["control_hz"]),
     }
 
 

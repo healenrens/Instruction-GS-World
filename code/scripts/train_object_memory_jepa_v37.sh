@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="${ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
-DATA="${DATA:-${RUNTIME_ROOT}/data/rt2_visual_episodes_dinov2l_native_v2}"
+DATA="${DATA:-${RUNTIME_ROOT}/data/rt2_visual_episodes_dinov2l_native_30hz_v3}"
 STAGE="${STAGE:-representation}"
 GATE_REPORT="${GATE_REPORT:-}"
 TEACHER_SIDECAR="${TEACHER_SIDECAR:-}"
@@ -116,7 +116,7 @@ LOG_ROOT="${LOG_ROOT:-${RUNTIME_ROOT}/logs/${RUN_NAME}}"
 WANDB_DIR="${WANDB_DIR:-${OUT}/wandb}"
 WANDB_NAME="${WANDB_NAME:-${RUN_NAME}}"
 WANDB_GROUP="${WANDB_GROUP:-object-memory-jepa-v37}"
-WANDB_TAGS="${WANDB_TAGS:-object-memory,jepa,full-dino,change-residual,no-language,no-rgb,v37,${STAGE}}"
+WANDB_TAGS="${WANDB_TAGS:-object-memory,jepa,full-dino,change-residual,30hz,no-language,no-rgb,v37,${STAGE}}"
 for path in "${OUT}" "${LOG_ROOT}" "${WANDB_DIR}"; do
     if [[ "${path}" != /* ]]; then
         echo "[object-memory-v37] output paths must be absolute: ${path}" >&2

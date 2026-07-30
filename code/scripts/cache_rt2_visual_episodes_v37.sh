@@ -4,15 +4,17 @@ set -euo pipefail
 ROOT="${ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
-SOURCE_ROOT="${SOURCE_ROOT:-/mnt/pfs/public/xuhaoming/Cosmos-3-Finetune/data/RoboTwin2}"
-OUT="${OUT:-${RUNTIME_ROOT}/data/rt2_visual_episodes_dinov2l_native_v2}"
-LOG_ROOT="${LOG_ROOT:-${RUNTIME_ROOT}/logs/rt2_visual_episodes_dinov2l_native_v2}"
+SOURCE_ROOT="${SOURCE_ROOT:-/mnt/pfs/public/fanyupeng/dataset/robotwin2_lerobot}"
+SOURCE_VARIANTS="${SOURCE_VARIANTS:-demo_clean,demo_randomized}"
+EXPECTED_SOURCE_FPS="${EXPECTED_SOURCE_FPS:-30}"
+OUT="${OUT:-${RUNTIME_ROOT}/data/rt2_visual_episodes_dinov2l_native_30hz_v3}"
+LOG_ROOT="${LOG_ROOT:-${RUNTIME_ROOT}/logs/rt2_visual_episodes_dinov2l_native_30hz_v3}"
 GPU_IDS="${GPU_IDS:-auto}"
 JOBS_PER_GPU="${JOBS_PER_GPU:-1}"
 FRAME_BATCH="${FRAME_BATCH:-13}"
 CPU_THREADS="${CPU_THREADS:-8}"
 JPEG_WORKERS="${JPEG_WORKERS:-2}"
-WINDOW_LENGTHS="${WINDOW_LENGTHS:-25,50,75,100}"
+WINDOW_LENGTHS="${WINDOW_LENGTHS:-45,90,135,180}"
 SAMPLE_STRIDE="${SAMPLE_STRIDE:-1}"
 OVERWRITE="${OVERWRITE:-0}"
 PY="${VENV_ROOT}/.venv/bin/python"
@@ -27,6 +29,7 @@ if [[ ! -x "${PY}" ]]; then
     echo "[v37-cache] missing Python environment: ${PY}" >&2
     exit 2
 fi
+"${PY}" -c 'import av, pyarrow, torch, torchvision'
 if [[ -n "$(git -C "${ROOT}" status --porcelain)" ]]; then
     echo "[v37-cache] repository is not clean" >&2
     git -C "${ROOT}" status --short >&2
@@ -72,6 +75,9 @@ cd "${ROOT}"
 commit="$(git rev-parse HEAD)"
 common=(
     --source_root "${SOURCE_ROOT}"
+    --source_format lerobot
+    --source_variants "${SOURCE_VARIANTS}"
+    --expected_source_fps "${EXPECTED_SOURCE_FPS}"
     --out "${OUT}"
     --model vit_large_patch14_dinov2.lvd142m
     --image_size 518
@@ -89,6 +95,12 @@ if [[ "${OVERWRITE}" == "1" ]]; then
 fi
 
 echo "[v37-cache] commit=${commit} gpus=${gpus[*]} out=${OUT}"
+"${PY}" code/scripts/verify_robotwin_lerobot_source_v37.py \
+    --source_root "${SOURCE_ROOT}" \
+    --source_variants "${SOURCE_VARIANTS}" \
+    --expected_source_fps "${EXPECTED_SOURCE_FPS}" \
+    --output "${LOG_ROOT}/source_preflight.json" \
+    2>&1 | tee "${LOG_ROOT}/source_preflight.log"
 "${PY}" code/scripts/cache_rt2_visual_episodes.py \
     "${common[@]}" --prepare_manifest \
     2>&1 | tee "${LOG_ROOT}/prepare_manifest.log"

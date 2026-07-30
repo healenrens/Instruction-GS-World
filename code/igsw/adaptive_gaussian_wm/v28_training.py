@@ -1,4 +1,5 @@
 """Strict training and launch contracts for Object Memory JEPA v37."""
+
 from __future__ import annotations
 
 import json
@@ -38,9 +39,7 @@ def add_v28_arguments(parser) -> None:
         default="off",
     )
     parser.add_argument("--current_readout_weight", type=float, default=0.0)
-    parser.add_argument(
-        "--readout_regularization_weight", type=float, default=0.0
-    )
+    parser.add_argument("--readout_regularization_weight", type=float, default=0.0)
     parser.add_argument("--carrier_support_weight", type=float, default=0.0)
     parser.add_argument("--carrier_compact_weight", type=float, default=0.0)
     parser.add_argument(
@@ -101,12 +100,15 @@ def validate_v28_arguments(args, world_size: int) -> None:
         raise ValueError("object_memory_v1 uses training_stage, not legacy modes")
     if min(args.core_lr, args.action_lr, args.readout_lr) <= 0.0:
         raise ValueError("v37 learning rates must be positive")
-    if min(
-        args.current_readout_weight,
-        args.readout_regularization_weight,
-        args.carrier_support_weight,
-        args.carrier_compact_weight,
-    ) < 0.0:
+    if (
+        min(
+            args.current_readout_weight,
+            args.readout_regularization_weight,
+            args.carrier_support_weight,
+            args.carrier_compact_weight,
+        )
+        < 0.0
+    ):
         raise ValueError("v37 readout weights must be non-negative")
     if args.gaussian_children != 1:
         raise ValueError("v37 change residual readout requires gaussian_children=1")
@@ -125,9 +127,7 @@ def validate_v28_arguments(args, world_size: int) -> None:
         raise ValueError("v37 warmup is fixed at five percent")
     if args.training_stage == "representation":
         if args.representation_steps <= 0 or args.joint_steps != 0:
-            raise ValueError(
-                "representation stage must only set representation_steps"
-            )
+            raise ValueError("representation stage must only set representation_steps")
     elif args.representation_steps != 0 or args.joint_steps <= 0:
         raise ValueError("posterior stage must only set joint_steps")
     if (
@@ -143,7 +143,9 @@ def validate_v28_arguments(args, world_size: int) -> None:
     ):
         raise ValueError("v37 has no separate readout stage or v30 readout gates")
     if args.training_stage == "posterior" and not (args.init_from or args.resume):
-        raise ValueError("posterior stage requires representation init or strict resume")
+        raise ValueError(
+            "posterior stage requires representation init or strict resume"
+        )
     if args.training_stage == "representation" and args.representation_gate_report:
         raise ValueError("representation training cannot consume its own held gate")
     if args.training_stage == "posterior" and not (
@@ -185,11 +187,10 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         "checkpoint_contract": "rolling_recovery_v1",
         "readout_backend": "change_only_object_residual",
         "feature_contract": "backbone_native_dinov2_l_1024",
+        "control_hz": float(dataset.control_hz),
         "git_commit": current_commit,
         "data_manifest_sha256": dataset.data_sha256,
-        "teacher_sidecar_sha256": getattr(
-            dataset, "teacher_sidecar_sha256", ""
-        ),
+        "teacher_sidecar_sha256": getattr(dataset, "teacher_sidecar_sha256", ""),
     }
     mismatch = {
         name: {"gate": report.get(name), "current": value}
@@ -200,9 +201,7 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         raise ValueError(f"v37 verifier gate differs: {mismatch}")
     args.gate_report_sha256 = file_sha256(args.gate_report)
     args.dense_preflight_report_sha256 = (
-        file_sha256(args.dense_preflight_report)
-        if args.dense_preflight_report
-        else ""
+        file_sha256(args.dense_preflight_report) if args.dense_preflight_report else ""
     )
     args.readout_gate_report_sha256 = (
         file_sha256(args.readout_gate_report) if args.readout_gate_report else ""
@@ -259,7 +258,9 @@ def validate_v28_initialization(checkpoint: dict, args) -> None:
     if version > CHECKPOINT_VERSION:
         raise ValueError("cannot initialize v37 from a newer checkpoint")
     if args.training_stage == "representation":
-        raise ValueError("v37 representation starts from scratch; use resume to continue")
+        raise ValueError(
+            "v37 representation starts from scratch; use resume to continue"
+        )
     if checkpoint.get("config", {}).get("architecture") != ARCHITECTURE:
         raise ValueError("checkpoint initialization architecture differs")
     saved = checkpoint.get("args", {})
@@ -325,9 +326,7 @@ def build_optimizer(model, args) -> torch.optim.AdamW:
     if core:
         groups.append({"params": core, "lr": args.core_lr, "group_name": "core"})
     if action:
-        groups.append(
-            {"params": action, "lr": args.action_lr, "group_name": "action"}
-        )
+        groups.append({"params": action, "lr": args.action_lr, "group_name": "action"})
     if not groups:
         raise ValueError("v37 optimizer has no trainable parameters")
     return torch.optim.AdamW(groups, weight_decay=args.weight_decay)
@@ -377,6 +376,7 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "latent_action_shape": [4, 32],
         "data_manifest_sha256": dataset.data_sha256,
         "feature_contract": "backbone_native_dinov2_l_1024",
+        "control_hz": float(dataset.control_hz),
         "core_lr": args.core_lr,
         "action_lr": args.action_lr,
         "readout_lr": args.readout_lr,
@@ -388,9 +388,7 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "gaussian_children": args.gaussian_children,
         "readout_backend": "change_only_object_residual",
         "basis_gate_report": (
-            os.path.abspath(args.basis_gate_report)
-            if args.basis_gate_report
-            else ""
+            os.path.abspath(args.basis_gate_report) if args.basis_gate_report else ""
         ),
         "carrier_preflight_report": (
             os.path.abspath(args.carrier_preflight_report)
@@ -414,9 +412,7 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
             if args.representation_gate_report
             else ""
         ),
-        "representation_gate_report_sha256": (
-            args.representation_gate_report_sha256
-        ),
+        "representation_gate_report_sha256": (args.representation_gate_report_sha256),
         "gpu_policy": "auto",
         "target_global_batch": args.target_global_batch,
         "effective_global_batch": args.effective_global_batch,

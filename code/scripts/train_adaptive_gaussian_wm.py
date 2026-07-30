@@ -1,4 +1,5 @@
 """DDP trainer for strict-causal DINO pairs and adaptive GPSToken Object-JEPA."""
+
 from __future__ import annotations
 import argparse
 import json
@@ -9,6 +10,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
@@ -26,7 +28,10 @@ from igsw.adaptive_gaussian_wm.architecture_args import (  # noqa: E402
     apply_architecture_args,
     build_config,
 )
-from igsw.adaptive_gaussian_wm.dataset_factory import add_dataset_arguments, build_training_dataset  # noqa: E402
+from igsw.adaptive_gaussian_wm.dataset_factory import (  # noqa: E402
+    add_dataset_arguments,
+    build_training_dataset,
+)
 from igsw.adaptive_gaussian_wm.group_balanced_sampler import (  # noqa: E402
     build_training_sampler,
 )
@@ -87,9 +92,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--amp", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--validate_only", action="store_true")
-    parser.add_argument("--language_condition", choices=("auto", "on", "off"), default="auto")
-    parser.add_argument("--rgb_supervision", choices=("auto", "on", "off"),
-                        default="auto")
+    parser.add_argument(
+        "--language_condition", choices=("auto", "on", "off"), default="auto"
+    )
+    parser.add_argument(
+        "--rgb_supervision", choices=("auto", "on", "off"), default="auto"
+    )
     parser.add_argument("--rgb_short_side", type=int, default=256)
     parser.add_argument("--rgb_pad_multiple", type=int, default=16)
     parser.add_argument("--rgb_render_chunk", type=int, default=8192)
@@ -102,7 +110,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zero_action_relative_margin", type=float, default=0.01)
     parser.add_argument("--posterior_dynamics_gate", action="store_true")
     parser.add_argument("--posterior_core_training", action="store_true")
-    parser.add_argument("--posterior_update_scope", choices=("full", "action_projection"), default="full")
+    parser.add_argument(
+        "--posterior_update_scope",
+        choices=("full", "action_projection"),
+        default="full",
+    )
     parser.add_argument("--canonical_activity_gate", action="store_true")
     parser.add_argument("--canonical_activity_power", type=float, default=0.5)
     parser.add_argument(
@@ -125,8 +137,12 @@ def parse_args() -> argparse.Namespace:
         choices=("global", "object_slot"),
         default="global",
     )
-    parser.add_argument("--canonical_center_gate", type=float,
-                        choices=(1.0, 0.5, 0.25, 0.1), default=1.0)
+    parser.add_argument(
+        "--canonical_center_gate",
+        type=float,
+        choices=(1.0, 0.5, 0.25, 0.1),
+        default=1.0,
+    )
     parser.add_argument(
         "--action_residual_dim",
         type=int,
@@ -154,6 +170,7 @@ def parse_args() -> argparse.Namespace:
     add_v28_arguments(parser)
     add_wandb_arguments(parser)
     return parser.parse_args()
+
 
 def main() -> None:
     args = parse_args()
@@ -231,9 +248,7 @@ def main() -> None:
                         "condition_dim": dataset.condition_dim,
                         "teacher_sidecar": bool(args.teacher_sidecar),
                         "rgb_shape": (
-                            list(sample["history_rgb"].shape)
-                            if rgb_enabled
-                            else None
+                            list(sample["history_rgb"].shape) if rgb_enabled else None
                         ),
                     },
                     sort_keys=True,
@@ -252,7 +267,9 @@ def main() -> None:
 
     checkpoint = None
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False, mmap=True)
+        checkpoint = torch.load(
+            args.resume, map_location="cpu", weights_only=False, mmap=True
+        )
         validate_resume(checkpoint, args, context.world_size)
         config = AdaptiveGaussianWMConfig(**checkpoint["config"])
         requested = apply_architecture_args(config, args)
@@ -284,7 +301,8 @@ def main() -> None:
         init_checkpoint = torch.load(
             args.init_from,
             map_location="cpu",
-            weights_only=False, mmap=True,
+            weights_only=False,
+            mmap=True,
         )
         validate_v28_initialization(init_checkpoint, args)
         warm_start_report = warm_start_model(model, init_checkpoint)
@@ -339,10 +357,7 @@ def main() -> None:
         if getattr(dataset, "balance_sampling", False)
         else 0
     )
-    if (
-        args.posterior_core_training
-        and args.joint_steps < balanced_updates
-    ):
+    if args.posterior_core_training and args.joint_steps < balanced_updates:
         raise ValueError(
             "posterior Core steps do not cover one balanced data epoch: "
             f"{args.joint_steps} < {balanced_updates}"
@@ -425,15 +440,14 @@ def main() -> None:
                 "condition_dim": dataset.condition_dim,
                 "contract": dataset.contract_label,
                 "sha256": args.sequence_data_sha256,
+                "control_hz": getattr(dataset, "control_hz", None),
                 "teacher_sidecar_sha256": args.teacher_sidecar_sha256,
             },
             "runtime": {
                 "checkpoint_version": CHECKPOINT_VERSION,
                 "parallelism": "ddp_full_state_dict",
                 "world_size": context.world_size,
-                "effective_batch": (
-                    args.batch * context.world_size * args.grad_accum
-                ),
+                "effective_batch": (args.batch * context.world_size * args.grad_accum),
                 "warmup_steps": warmup_steps,
                 "balanced_updates_per_epoch": balanced_updates,
                 **v28_runtime_metadata(args, dataset, gate_report),

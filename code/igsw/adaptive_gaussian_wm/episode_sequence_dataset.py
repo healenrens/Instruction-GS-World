@@ -1,4 +1,5 @@
 """Dense causal samples from memory-mapped, language-free episode caches."""
+
 from __future__ import annotations
 
 import bisect
@@ -12,9 +13,11 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torchvision.io import ImageReadMode, decode_jpeg
 
+from .episode_cache_contract import (
+    validate_episode_manifest,
+    validate_episode_payload,
+)
 from .sequence_contract import (
-    CONTROL_HZ,
-    EPISODE_CACHE_VERSION,
     EPISODE_MANIFEST_NAME,
     EXPECTED_FRAME_COUNT,
     GROUP_SAMPLER_VERSION,
@@ -70,7 +73,7 @@ class CausalVisualEpisodeDataset(Dataset):
         manifest_path = os.path.join(cache_root, EPISODE_MANIFEST_NAME)
         with open(manifest_path, encoding="utf-8") as handle:
             manifest = json.load(handle)
-        self._validate_manifest(manifest, manifest_path)
+        self.control_hz = validate_episode_manifest(manifest, manifest_path)
         self.data_sha256 = _file_sha256(manifest_path)
         self.history_frames = history_frames
         self.future_frames = future_frames
@@ -111,11 +114,7 @@ class CausalVisualEpisodeDataset(Dataset):
             "language-free dense causal visual episodes with backbone-native DINO"
         )
 
-        episodes = [
-            entry
-            for entry in manifest["episodes"]
-            if entry["split"] == split
-        ]
+        episodes = [entry for entry in manifest["episodes"] if entry["split"] == split]
         if not episodes:
             raise ValueError(f"no {split} episodes in {manifest_path}")
         records = []
@@ -146,9 +145,7 @@ class CausalVisualEpisodeDataset(Dataset):
                             frame_count=frame_count,
                             window=window,
                             regular_starts=regular_starts,
-                            include_tail=(
-                                last_start % self.sample_stride != 0
-                            ),
+                            include_tail=(last_start % self.sample_stride != 0),
                         )
                     )
         if not records:
@@ -169,9 +166,7 @@ class CausalVisualEpisodeDataset(Dataset):
             else:
                 raise ValueError("episode sampling group is not contiguous")
         self._full_length = total
-        self._selected_length = (
-            max_items if 0 < max_items < total else total
-        )
+        self._selected_length = max_items if 0 < max_items < total else total
         selected_groups = []
         for name, (start, end) in group_spans.items():
             if self._selected_length == self._full_length:
@@ -182,17 +177,11 @@ class CausalVisualEpisodeDataset(Dataset):
             else:
                 numerator = self._selected_length - 1
                 denominator = self._full_length - 1
-                selected_start = (
-                    start * numerator + denominator - 1
-                ) // denominator
-                selected_end = (
-                    end * numerator + denominator - 1
-                ) // denominator
+                selected_start = (start * numerator + denominator - 1) // denominator
+                selected_end = (end * numerator + denominator - 1) // denominator
             if selected_start < selected_end:
                 selected_groups.append((name, selected_start, selected_end))
-        self.sampling_group_names = tuple(
-            name for name, _, _ in selected_groups
-        )
+        self.sampling_group_names = tuple(name for name, _, _ in selected_groups)
         self.sampling_group_spans = tuple(
             (start, end) for _, start, end in selected_groups
         )
@@ -225,7 +214,7 @@ class CausalVisualEpisodeDataset(Dataset):
         ]
 
         first = self._load_cache(episode_paths[0])
-        self._validate_cache(first, episode_paths[0])
+        validate_episode_payload(first, episode_paths[0], self.control_hz)
         features = first["dino"]
         self.feature_dim = int(first["feature_dim"])
         if first.get("feature_contract") != self.feature_contract:
@@ -266,27 +255,6 @@ class CausalVisualEpisodeDataset(Dataset):
             self.paths.extend(self.teacher_sidecar.paths)
 
     @staticmethod
-    def _validate_manifest(manifest: dict, path: str) -> None:
-        if manifest.get("episode_cache_version") != EPISODE_CACHE_VERSION:
-            raise ValueError(f"episode manifest version mismatch: {path}")
-        if manifest.get("complete") is not True:
-            raise ValueError(f"episode cache is incomplete: {path}")
-        if abs(float(manifest.get("control_hz", 0.0)) - CONTROL_HZ) > 1e-9:
-            raise ValueError(f"episode manifest control frequency mismatch: {path}")
-        if int(manifest.get("sample_frame_count", 0)) != EXPECTED_FRAME_COUNT:
-            raise ValueError(f"episode manifest sample frame count mismatch: {path}")
-        if not isinstance(manifest.get("episodes"), list):
-            raise ValueError(f"episode manifest has no episode index: {path}")
-        sampling = manifest.get("sampling")
-        if not isinstance(sampling, dict):
-            raise ValueError(f"episode manifest has no sampling contract: {path}")
-        cache = manifest.get("cache")
-        if not isinstance(cache, dict) or cache.get("feature_contract") != (
-            "backbone_native"
-        ):
-            raise ValueError(f"episode manifest is not backbone-native DINO: {path}")
-
-    @staticmethod
     def _load_cache(path: str) -> dict:
         return torch.load(
             path,
@@ -294,56 +262,6 @@ class CausalVisualEpisodeDataset(Dataset):
             weights_only=False,
             mmap=True,
         )
-
-    @staticmethod
-    def _validate_cache(cache: dict, path: str) -> None:
-        if cache.get("episode_version") != EPISODE_CACHE_VERSION:
-            raise ValueError(f"visual episode version mismatch: {path}")
-        if cache.get("feature_contract") != "backbone_native":
-            raise ValueError(f"visual episode is not backbone-native DINO: {path}")
-        if abs(float(cache.get("control_hz", 0.0)) - CONTROL_HZ) > 1e-9:
-            raise ValueError(f"visual episode control frequency mismatch: {path}")
-        forbidden = {
-            "instruction",
-            "condition_feature",
-            "condition_tokens",
-            "task",
-            "task_index",
-            "language",
-        }
-        present = sorted(forbidden.intersection(cache))
-        if present:
-            raise ValueError(f"semantic fields leaked into episode cache: {present}")
-        features = cache.get("dino")
-        controls = cache.get("frame_control_indices")
-        if (
-            not torch.is_tensor(features)
-            or features.ndim != 4
-            or features.shape[-1] != int(cache.get("feature_dim", -1))
-            or not torch.is_tensor(controls)
-            or controls.shape != (len(features),)
-            or not torch.equal(
-                controls,
-                torch.arange(len(features), dtype=controls.dtype),
-            )
-        ):
-            raise ValueError(f"invalid episode feature/timestamp tensors: {path}")
-        rgb = cache.get("rgb")
-        if not isinstance(rgb, dict):
-            raise ValueError(f"invalid episode RGB metadata: {path}")
-        blob = rgb.get("jpeg_bytes")
-        offsets = rgb.get("jpeg_offsets")
-        if (
-            not torch.is_tensor(blob)
-            or blob.dtype != torch.uint8
-            or blob.ndim != 1
-            or not torch.is_tensor(offsets)
-            or offsets.shape != (len(features) + 1,)
-            or int(offsets[0]) != 0
-            or int(offsets[-1]) != len(blob)
-            or not bool((offsets[1:] > offsets[:-1]).all())
-        ):
-            raise ValueError(f"invalid packed episode JPEG storage: {path}")
 
     @staticmethod
     def _normalize(features: torch.Tensor) -> torch.Tensor:
@@ -357,9 +275,7 @@ class CausalVisualEpisodeDataset(Dataset):
             return index
         if self._selected_length == 1:
             return 0
-        return (
-            index * (self._full_length - 1)
-        ) // (self._selected_length - 1)
+        return (index * (self._full_length - 1)) // (self._selected_length - 1)
 
     def _locate(self, index: int) -> tuple[_EpisodeWindowRecord, int, int]:
         full_index = self._full_index(index)
@@ -417,7 +333,7 @@ class CausalVisualEpisodeDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         record, start, anchor = self._locate(index)
         cache = self._load_cache(record.path)
-        self._validate_cache(cache, record.path)
+        validate_episode_payload(cache, record.path, self.control_hz)
         if len(cache["dino"]) != record.frame_count:
             raise ValueError("episode frame count differs from manifest")
         sampled_controls = control_frame_indices(
@@ -432,9 +348,7 @@ class CausalVisualEpisodeDataset(Dataset):
             self.future_frames,
         )
         anchor_control = sampled_controls[anchor]
-        relative_seconds = (
-            sampled_controls - anchor_control
-        ).float() / float(CONTROL_HZ)
+        relative_seconds = (sampled_controls - anchor_control).float() / self.control_hz
         sampled_features = cache["dino"][sampled_controls]
         history = self._normalize(sampled_features[history_index]).flatten(1, 2)
         future = self._normalize(sampled_features[future_index]).flatten(1, 2)

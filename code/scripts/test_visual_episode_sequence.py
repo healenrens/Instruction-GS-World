@@ -1,4 +1,5 @@
 """CPU contract test for dense visual-episode sequence sampling."""
+
 from __future__ import annotations
 
 import json
@@ -27,9 +28,7 @@ from igsw.adaptive_gaussian_wm.sequence_dataset import (  # noqa: E402
 def packed_rgb(frames: torch.Tensor) -> dict:
     encoded = [encode_jpeg(frame, quality=95) for frame in frames]
     lengths = torch.tensor([len(value) for value in encoded], dtype=torch.long)
-    offsets = torch.cat(
-        (torch.zeros(1, dtype=torch.long), lengths.cumsum(dim=0))
-    )
+    offsets = torch.cat((torch.zeros(1, dtype=torch.long), lengths.cumsum(dim=0)))
     return {
         "jpeg_bytes": torch.cat(encoded),
         "jpeg_offsets": offsets,
@@ -70,7 +69,8 @@ def write_episode(root: str, split: str, index: int, frame_count: int) -> dict:
         "model": "synthetic",
         "image_size": 24,
         "feature_dim": 4,
-        "projection_seed": 17,
+        "feature_contract": "backbone_native",
+        "projection_seed": 0,
         "projection_sha256": "a" * 64,
         "visual_preprocess": "synthetic",
         "rgb": packed_rgb(rgb),
@@ -80,6 +80,7 @@ def write_episode(root: str, split: str, index: int, frame_count: int) -> dict:
         "filename": filename,
         "frame_count": frame_count,
         "split": split,
+        "control_hz": CONTROL_HZ,
         "sampling_group": f"group-{index}",
     }
 
@@ -92,9 +93,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as root:
         entries = [
             write_episode(root, split, index, 130)
-            for index, split in enumerate(
-                ("train", "train", "heldseed", "heldtask")
-            )
+            for index, split in enumerate(("train", "train", "heldseed", "heldtask"))
         ]
         manifest = {
             "episode_cache_version": EPISODE_CACHE_VERSION,
@@ -122,7 +121,8 @@ def main() -> None:
                 "model": "synthetic",
                 "image_size": 24,
                 "feature_dim": 4,
-                "projection_seed": 17,
+                "feature_contract": "backbone_native",
+                "projection_seed": 0,
                 "rgb_short_side": 16,
                 "rgb_pad_multiple": 16,
                 "jpeg_quality": 95,

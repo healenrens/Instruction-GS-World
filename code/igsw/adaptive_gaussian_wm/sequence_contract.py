@@ -1,4 +1,5 @@
 """Versioned visual-sequence and physical-time contract for RoboTwin clips."""
+
 from __future__ import annotations
 
 import math
@@ -8,14 +9,14 @@ import torch.nn.functional as F
 
 
 SEQUENCE_CACHE_VERSION = "rt2_visual_sequence_dino_v1"
-EPISODE_CACHE_VERSION = "rt2_visual_episode_dino_native_v2"
+EPISODE_CACHE_VERSION = "rt2_visual_episode_dino_native_v3"
 EPISODE_MANIFEST_NAME = "episode_manifest.json"
 EPISODE_VERIFIED_NAME = "episode_manifest.verified.sha256"
 GROUP_SAMPLER_VERSION = 2
 CONTROL_HZ = 250.0 / 15.0
 EXPECTED_FRAME_COUNT = 13
 DEFAULT_SEQUENCE_ANCHORS = (3, 5, 8)
-DEFAULT_EPISODE_WINDOWS = (25, 50, 75, 100)
+DEFAULT_EPISODE_WINDOWS = (45, 90, 135, 180)
 RT2_HELDSEED_FRACTION = 0.20
 RT2_HELDTASKS = ("handover_block", "place_object_basket", "stack_blocks_two")
 
@@ -26,11 +27,7 @@ def stable_rt2_episode_split(task: str, episode: int) -> str:
     import hashlib
 
     value = int(hashlib.md5(f"{task}:{episode}".encode()).hexdigest(), 16)
-    return (
-        "heldseed"
-        if value % 1000 < int(RT2_HELDSEED_FRACTION * 1000)
-        else "train"
-    )
+    return "heldseed" if value % 1000 < int(RT2_HELDSEED_FRACTION * 1000) else "train"
 
 
 def parse_anchor_indices(text: str) -> tuple[int, ...]:
@@ -42,9 +39,7 @@ def parse_anchor_indices(text: str) -> tuple[int, ...]:
 
 def parse_control_windows(values) -> tuple[int, ...]:
     if isinstance(values, str):
-        windows = tuple(
-            sorted({int(value) for value in values.split(",") if value})
-        )
+        windows = tuple(sorted({int(value) for value in values.split(",") if value}))
     else:
         windows = tuple(sorted({int(value) for value in values}))
     if not windows or windows[0] < EXPECTED_FRAME_COUNT - 1:
@@ -63,10 +58,7 @@ def control_frame_indices(
     if start < 0 or window < 1 or frame_count < 2:
         raise ValueError("invalid source timing metadata")
     denominator = frame_count - 1
-    offsets = [
-        (index * window) // denominator
-        for index in range(frame_count)
-    ]
+    offsets = [(index * window) // denominator for index in range(frame_count)]
     offsets[-1] = window
     return torch.tensor(offsets, dtype=torch.long) + start
 
@@ -92,10 +84,7 @@ def temporal_layout(
         span = end - start
         if span < count - 1:
             raise ValueError("temporal selection would contain duplicate frames")
-        values = [
-            start + (index * span) // (count - 1)
-            for index in range(count)
-        ]
+        values = [start + (index * span) // (count - 1) for index in range(count)]
         values[-1] = end
         result = torch.tensor(values, dtype=torch.long)
         if len(torch.unique(result)) != count:
@@ -130,11 +119,7 @@ def preprocess_vggt_rgb(
         start = (new_height - target_size) // 2
         resized = resized[:, :, start : start + target_size]
     return (
-        resized.round()
-        .clamp(0, 255)
-        .to(torch.uint8)
-        .permute(0, 2, 3, 1)
-        .contiguous()
+        resized.round().clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).contiguous()
     )
 
 

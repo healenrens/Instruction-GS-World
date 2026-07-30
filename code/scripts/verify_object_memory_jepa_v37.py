@@ -42,6 +42,12 @@ from igsw.adaptive_gaussian_wm.observed_action import (  # noqa: E402
 from igsw.adaptive_gaussian_wm.relative_geometry import (  # noqa: E402
     pairwise_relative_geometry,
 )
+from igsw.adaptive_gaussian_wm.robotwin_lerobot_source import (  # noqa: E402
+    LEROBOT_DEFAULT_ROOT,
+    LEROBOT_DEFAULT_VARIANTS,
+    LEROBOT_EXPECTED_FPS,
+    LEROBOT_SOURCE_KIND,
+)
 from igsw.adaptive_gaussian_wm.scale import signed_gap_scale  # noqa: E402
 from igsw.adaptive_gaussian_wm.sequence_contract import (  # noqa: E402
     EPISODE_CACHE_VERSION,
@@ -111,6 +117,7 @@ def verify_manifest(data: str) -> tuple[str, dict]:
     with open(manifest_path, encoding="utf-8") as handle:
         manifest = json.load(handle)
     cache = manifest.get("cache", {})
+    source = manifest.get("source", {})
     require(
         manifest.get("episode_cache_version") == EPISODE_CACHE_VERSION,
         "episode cache version is not v37 native DINO",
@@ -121,6 +128,22 @@ def verify_manifest(data: str) -> tuple[str, dict]:
     require(
         cache.get("model") == "vit_large_patch14_dinov2.lvd142m",
         "cache backbone is not DINOv2-L",
+    )
+    require(source.get("kind") == LEROBOT_SOURCE_KIND, "source is not LeRobot-v3")
+    require(
+        os.path.realpath(str(source.get("path", "")))
+        == os.path.realpath(LEROBOT_DEFAULT_ROOT),
+        "RoboTwin source root is not the authoritative fanyupeng dataset",
+    )
+    require(
+        tuple(source.get("variants", ())) == LEROBOT_DEFAULT_VARIANTS,
+        "cache does not contain both clean and randomized splits",
+    )
+    require(
+        float(source.get("expected_source_fps", 0.0)) == LEROBOT_EXPECTED_FPS
+        and int(source.get("source_frame_stride", 0)) == 1
+        and float(manifest.get("control_hz", 0.0)) == LEROBOT_EXPECTED_FPS,
+        "RoboTwin cache is not native stride-1 30 Hz",
     )
     return file_sha256(manifest_path), manifest
 
@@ -153,9 +176,7 @@ def verify_checkpoint(path: str, model) -> dict:
     if not path:
         return {"checkpoint": "not_provided"}
     require(os.path.isfile(path), "checkpoint is missing")
-    checkpoint = torch.load(
-        path, map_location="cpu", weights_only=False, mmap=True
-    )
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
     require(
         checkpoint.get("checkpoint_version") == CHECKPOINT_VERSION,
         f"checkpoint is not version {CHECKPOINT_VERSION}",
@@ -187,12 +208,8 @@ def representation_weights() -> AdaptiveGaussianLossWeights:
 
 def verify_causal_paths(model, batch: dict) -> dict[str, float]:
     history = model.encode_history(batch)
-    future_scale = signed_gap_scale(
-        batch["future_times"], model.config.gap_reference
-    )
-    history_scale = signed_gap_scale(
-        batch["history_times"], model.config.gap_reference
-    )
+    future_scale = signed_gap_scale(batch["future_times"], model.config.gap_reference)
+    history_scale = signed_gap_scale(batch["history_times"], model.config.gap_reference)
     prior = model.prior_context(history, future_scale, history_scale)
     _, target = model.encode_targets(batch)
     changed = dict(batch)
@@ -241,9 +258,7 @@ def verify_causal_paths(model, batch: dict) -> dict[str, float]:
 
 
 def verify_relative_geometry(device: torch.device) -> float:
-    center = torch.tensor(
-        [[[0.1, -0.2], [0.4, 0.3], [-0.5, 0.2]]], device=device
-    )
+    center = torch.tensor([[[0.1, -0.2], [0.4, 0.3], [-0.5, 0.2]]], device=device)
     scale = torch.tensor([[0.2, 0.4, 0.3]], device=device)
     disparity = torch.tensor([[0.1, -0.2, 0.5]], device=device)
     visible = torch.tensor([[1.0, 0.8, 0.5]], device=device)
@@ -275,9 +290,7 @@ def verify_parameters(model) -> dict:
         "parameter_tensors": len(parameters),
         "parameter_count": sum(parameter.numel() for _, parameter in parameters),
         "trainable_parameter_count": sum(
-            parameter.numel()
-            for _, parameter in parameters
-            if parameter.requires_grad
+            parameter.numel() for _, parameter in parameters if parameter.requires_grad
         ),
         "ema_target_trainable_tensors": len(target_trainable),
         "legacy_gaussian_parameter_tensors": len(legacy),
@@ -337,9 +350,7 @@ def verify_forward_backward(model, batch: dict) -> tuple[dict, dict]:
     missing_training = required_training.difference(training_metrics)
     require(not missing_training, f"missing W&B diagnostics: {missing_training}")
     nonfinite_training = {
-        name
-        for name in required_training
-        if not math.isfinite(training_metrics[name])
+        name for name in required_training if not math.isfinite(training_metrics[name])
     }
     require(not nonfinite_training, f"non-finite W&B diagnostics: {nonfinite_training}")
     zero_action_residual = float(
@@ -355,7 +366,9 @@ def verify_forward_backward(model, batch: dict) -> tuple[dict, dict]:
         current_memory,
         batch["future_times"][:, 0] - batch["history_times"][:, -1],
     )
-    occluded = replace(current_memory, activity=torch.zeros_like(current_memory.activity))
+    occluded = replace(
+        current_memory, activity=torch.zeros_like(current_memory.activity)
+    )
     corrected = model.object_memory.correct(
         predicted_memory, occluded, result["history_token_states"][-1]
     )
@@ -377,9 +390,13 @@ def verify_forward_backward(model, batch: dict) -> tuple[dict, dict]:
             if name.startswith(prefix):
                 counts[prefix.rstrip(".")] += 1
     require(not nonfinite, f"non-finite gradients: {nonfinite}")
-    require(all(value > 0 for value in counts.values()), f"missing core gradients: {counts}")
+    require(
+        all(value > 0 for value in counts.values()), f"missing core gradients: {counts}"
+    )
     background_gradient = model.object_aggregator.background_score.weight.grad
-    require(background_gradient is not None, "background assignment received no gradient")
+    require(
+        background_gradient is not None, "background assignment received no gradient"
+    )
     require(
         bool(torch.isfinite(background_gradient).all()),
         "background assignment gradient is not finite",
@@ -441,6 +458,7 @@ def main() -> None:
         "readout_backend": READOUT_BACKEND,
         "feature_contract": FEATURE_CONTRACT,
         "feature_dim": dataset.feature_dim,
+        "control_hz": float(dataset.control_hz),
         "git_commit": commit,
         "data": os.path.abspath(args.data),
         "data_manifest_sha256": manifest_sha256,
