@@ -9,7 +9,7 @@ import torch
 import torch.distributed as dist
 
 
-CHECKPOINT_VERSION = 30
+CHECKPOINT_VERSION = 37
 
 
 def collect_rng_states(context) -> list[dict]:
@@ -201,6 +201,8 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "dense_preflight_report_sha256",
         "readout_gate_report",
         "readout_gate_report_sha256",
+        "representation_gate_report",
+        "representation_gate_report_sha256",
         "gate_report",
         "gate_report_sha256",
         "target_global_batch",

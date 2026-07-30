@@ -66,6 +66,13 @@ def validate_data_model_contract(
     mismatches = {}
     if config.feature_dim != dataset.feature_dim:
         mismatches["feature_dim"] = (config.feature_dim, dataset.feature_dim)
+    if config.full_dino_features and getattr(dataset, "feature_contract", "") != (
+        "backbone_native"
+    ):
+        mismatches["feature_contract"] = (
+            "backbone_native",
+            getattr(dataset, "feature_contract", "<missing>"),
+        )
     if config.condition_dim != expected_condition_dim:
         mismatches["condition_dim"] = (
             config.condition_dim,

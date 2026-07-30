@@ -49,6 +49,9 @@ _DIAGNOSTIC_PREFIXES = (
     "readout_",
     "dense_readout_",
     "carrier_",
+    "change_",
+    "feature_change_",
+    "feature_static_",
 )
 
 

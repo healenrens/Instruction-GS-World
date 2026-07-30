@@ -23,9 +23,9 @@ from igsw.adaptive_gaussian_wm.episode_cache_contract import (  # noqa: E402
 )
 from igsw.adaptive_gaussian_wm.episode_cache_encoding import (  # noqa: E402
     decode_source_batch,
+    encoded_feature_sequence,
     packed_rgb_batch,
     pack_jpegs,
-    projected_sequence,
     projection_matrix,
 )
 from igsw.adaptive_gaussian_wm.sequence_contract import (  # noqa: E402
@@ -167,6 +167,7 @@ def manifest_payload(args, episodes: list[dict], complete: bool) -> dict:
             "model": args.model,
             "image_size": args.image_size,
             "feature_dim": args.feature_dim,
+            "feature_contract": args.feature_contract,
             "projection_seed": args.projection_seed,
             "rgb_short_side": args.rgb_short_side,
             "rgb_pad_multiple": args.rgb_pad_multiple,
@@ -264,7 +265,7 @@ def cache_episode(
     args,
     episode: dict,
     extractor: DinoFeatures,
-    projection: torch.Tensor,
+    projection: torch.Tensor | None,
     projection_hash: str,
     jpeg_executor: ThreadPoolExecutor | None,
 ) -> int:
@@ -284,6 +285,7 @@ def cache_episode(
                 "model": args.model,
                 "image_size": args.image_size,
                 "feature_dim": args.feature_dim,
+                "feature_contract": args.feature_contract,
                 "projection_seed": args.projection_seed,
                 "rgb_short_side": args.rgb_short_side,
                 "rgb_pad_multiple": args.rgb_pad_multiple,
@@ -304,7 +306,7 @@ def cache_episode(
             frames = decode_source_batch(source, start, end)
             processed = preprocess_vggt_rgb(frames, args.image_size)
             feature_batches.append(
-                projected_sequence(extractor, projection, processed)
+                encoded_feature_sequence(extractor, projection, processed)
             )
             packed, metadata = packed_rgb_batch(
                 processed,
@@ -333,6 +335,7 @@ def cache_episode(
         "model": args.model,
         "image_size": args.image_size,
         "feature_dim": args.feature_dim,
+        "feature_contract": args.feature_contract,
         "projection_seed": args.projection_seed,
         "projection_sha256": projection_hash,
         "visual_preprocess": "spatracker_vggt_crop_width518",
@@ -362,8 +365,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", required=True)
     parser.add_argument("--model", default="vit_large_patch14_dinov2.lvd142m")
     parser.add_argument("--image_size", type=int, default=518)
-    parser.add_argument("--feature_dim", type=int, default=32)
-    parser.add_argument("--projection_seed", type=int, default=17)
+    parser.add_argument("--feature_dim", type=int, default=1024)
+    parser.add_argument(
+        "--feature_contract",
+        choices=("backbone_native", "random_orthonormal_projection"),
+        default="backbone_native",
+    )
+    parser.add_argument("--projection_seed", type=int, default=0)
     parser.add_argument("--frame_batch", type=int, default=13)
     parser.add_argument("--cpu_threads", type=int, default=16)
     parser.add_argument("--jpeg_workers", type=int, default=4)
@@ -396,6 +404,13 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("invalid episode cache configuration")
     if args.source_root and args.limit:
         raise ValueError("full source-root caches forbid --limit")
+    if args.feature_contract == "backbone_native" and args.projection_seed != 0:
+        raise ValueError("backbone-native caches require projection_seed=0")
+    if (
+        args.feature_contract == "random_orthonormal_projection"
+        and args.projection_seed < 0
+    ):
+        raise ValueError("projection seed must be non-negative")
     parse_control_windows(args.window_lengths)
     return args
 
@@ -422,14 +437,27 @@ def main() -> None:
         os.environ.setdefault(key, value)
     torch.set_float32_matmul_precision("high")
     extractor = DinoFeatures(args.model, args.image_size).cuda().bfloat16().eval()
-    projection = projection_matrix(
-        extractor.embed_dim,
-        args.feature_dim,
-        args.projection_seed,
-    ).cuda()
-    projection_hash = hashlib.sha256(
-        projection.cpu().numpy().tobytes()
-    ).hexdigest()
+    if args.feature_contract == "backbone_native":
+        if args.feature_dim != extractor.embed_dim:
+            raise ValueError(
+                "backbone-native feature_dim must equal extractor embed_dim: "
+                f"{args.feature_dim} != {extractor.embed_dim}"
+            )
+        projection = None
+        transform = (
+            f"backbone_native_v1:{args.model}:{args.image_size}:"
+            f"{extractor.embed_dim}"
+        ).encode()
+        projection_hash = hashlib.sha256(transform).hexdigest()
+    else:
+        projection = projection_matrix(
+            extractor.embed_dim,
+            args.feature_dim,
+            args.projection_seed,
+        ).cuda()
+        projection_hash = hashlib.sha256(
+            projection.cpu().numpy().tobytes()
+        ).hexdigest()
     torch.set_num_threads(args.cpu_threads)
     started = time.time()
     written = 0

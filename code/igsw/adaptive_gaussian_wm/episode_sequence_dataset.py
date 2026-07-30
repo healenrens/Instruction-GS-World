@@ -106,7 +106,10 @@ class CausalVisualEpisodeDataset(Dataset):
             raise ValueError("episode task sampling temperature mismatch")
         self.condition_store = None
         self.condition_dim = 0
-        self.contract_label = "language-free dense causal visual episodes"
+        self.feature_contract = str(manifest["cache"].get("feature_contract", ""))
+        self.contract_label = (
+            "language-free dense causal visual episodes with backbone-native DINO"
+        )
 
         episodes = [
             entry
@@ -225,6 +228,8 @@ class CausalVisualEpisodeDataset(Dataset):
         self._validate_cache(first, episode_paths[0])
         features = first["dino"]
         self.feature_dim = int(first["feature_dim"])
+        if first.get("feature_contract") != self.feature_contract:
+            raise ValueError("episode feature contract differs from manifest")
         self.grid_height = int(features.shape[1])
         self.grid_width = int(features.shape[2])
         y, x = torch.meshgrid(
@@ -275,6 +280,11 @@ class CausalVisualEpisodeDataset(Dataset):
         sampling = manifest.get("sampling")
         if not isinstance(sampling, dict):
             raise ValueError(f"episode manifest has no sampling contract: {path}")
+        cache = manifest.get("cache")
+        if not isinstance(cache, dict) or cache.get("feature_contract") != (
+            "backbone_native"
+        ):
+            raise ValueError(f"episode manifest is not backbone-native DINO: {path}")
 
     @staticmethod
     def _load_cache(path: str) -> dict:
@@ -289,6 +299,8 @@ class CausalVisualEpisodeDataset(Dataset):
     def _validate_cache(cache: dict, path: str) -> None:
         if cache.get("episode_version") != EPISODE_CACHE_VERSION:
             raise ValueError(f"visual episode version mismatch: {path}")
+        if cache.get("feature_contract") != "backbone_native":
+            raise ValueError(f"visual episode is not backbone-native DINO: {path}")
         if abs(float(cache.get("control_hz", 0.0)) - CONTROL_HZ) > 1e-9:
             raise ValueError(f"visual episode control frequency mismatch: {path}")
         forbidden = {
@@ -335,7 +347,8 @@ class CausalVisualEpisodeDataset(Dataset):
 
     @staticmethod
     def _normalize(features: torch.Tensor) -> torch.Tensor:
-        return F.layer_norm(features.float(), (features.shape[-1],))
+        normalized = F.layer_norm(features.float(), (features.shape[-1],))
+        return normalized.to(features.dtype)
 
     def _full_index(self, index: int) -> int:
         if not 0 <= index < self._selected_length:

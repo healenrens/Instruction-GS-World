@@ -22,6 +22,9 @@ class ObjectMemoryState:
     slots: torch.Tensor
     tracking_slots: torch.Tensor
     assignment: torch.Tensor
+    background_assignment: torch.Tensor
+    potential_change: torch.Tensor
+    potential_change_logits: torch.Tensor
     activity: torch.Tensor
     center: torch.Tensor
     feature: torch.Tensor
@@ -112,6 +115,9 @@ class ObjectMemoryTransition(nn.Module):
             slots=observation.slots,
             tracking_slots=observation.tracking_slots,
             assignment=observation.assignment,
+            background_assignment=observation.background_assignment,
+            potential_change=observation.potential_change,
+            potential_change_logits=observation.potential_change_logits,
             activity=visibility,
             center=geometry.center,
             feature=observation.feature,
@@ -255,6 +261,9 @@ class ObjectMemoryTransition(nn.Module):
             slots=slots,
             tracking_slots=tracking,
             assignment=observation.assignment,
+            background_assignment=observation.background_assignment,
+            potential_change=observation.potential_change,
+            potential_change_logits=observation.potential_change_logits,
             activity=visibility,
             center=center,
             feature=feature,

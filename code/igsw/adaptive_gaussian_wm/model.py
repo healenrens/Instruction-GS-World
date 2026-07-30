@@ -7,6 +7,7 @@ import torch.nn as nn
 from .action_embedding import residual_action_dropout
 from .conditioning import LanguageConditionProjector
 from .config import AdaptiveGaussianWMConfig
+from .change_residual_readout import ChangeResidualReadout
 from .decoder import GaussianReadout
 from .dense_object_readout import DenseObjectReadout
 from .dynamics import JointObjectLatentDynamics
@@ -54,9 +55,14 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             if config.factorized_dynamics
             else JointObjectLatentDynamics(config)
         )
-        self.gaussian_readout = GaussianReadout(config)
+        self.gaussian_readout = (
+            None if config.change_residual_readout else GaussianReadout(config)
+        )
         self.dense_readout = (
             DenseObjectReadout(config) if config.dense_object_readout else None
+        )
+        self.change_readout = (
+            ChangeResidualReadout(config) if config.change_residual_readout else None
         )
         self.language_condition = (
             LanguageConditionProjector(config)

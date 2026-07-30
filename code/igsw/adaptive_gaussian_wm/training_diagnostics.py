@@ -8,6 +8,7 @@ from .change_objectives import (
     dense_feature_loss,
     scale_invariant_object_change_loss,
 )
+from .change_readout_diagnostics import change_residual_readout_diagnostics
 from .diagnostic_statistics import correlation_moments, ratio_moments
 from .dense_readout_diagnostics import dense_object_readout_diagnostics
 from .jepa_losses import object_change_loss, object_latent_loss, weighted_mean
@@ -451,7 +452,9 @@ def object_memory_training_diagnostics(
     result.update(_lifecycle_diagnostics(output))
     result.update(_token_diagnostics(output, batch))
     result.update(_horizon_diagnostics(model, batch, output, persistence))
-    if model.config.dense_object_readout:
+    if model.config.change_residual_readout:
+        result.update(change_residual_readout_diagnostics(batch, output))
+    elif model.config.dense_object_readout:
         result.update(dense_object_readout_diagnostics(model, batch, output))
     else:
         result.update(gaussian_readout_diagnostics(model, batch, output))

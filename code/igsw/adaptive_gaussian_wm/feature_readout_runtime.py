@@ -44,6 +44,37 @@ def _dense_state(
     )
 
 
+def _change_state(
+    model,
+    current_tokens,
+    current_slots,
+    predicted_slots: torch.Tensor,
+    predicted_centers: torch.Tensor,
+    coordinates: torch.Tensor,
+    valid: torch.Tensor,
+    *,
+    predicted_visibility: torch.Tensor | None,
+    predicted_scale: torch.Tensor | None,
+):
+    if model.change_readout is None:
+        raise ValueError("change residual readout is disabled")
+    return model.change_readout(
+        current_tokens,
+        current_slots.assignment,
+        current_slots.potential_change,
+        current_slots.slots,
+        predicted_slots,
+        coordinates,
+        valid,
+        current_centers=current_slots.center,
+        predicted_centers=predicted_centers,
+        current_activity=current_slots.activity,
+        predicted_visibility=predicted_visibility,
+        current_scale=getattr(current_slots, "relative_scale", None),
+        predicted_scale=predicted_scale,
+    )
+
+
 def decode_feature_readouts(
     model,
     batch: dict[str, torch.Tensor],
@@ -53,6 +84,78 @@ def decode_feature_readouts(
     predicted_future_centers: torch.Tensor,
 ) -> tuple[dict, object]:
     """Return feature predictions while retaining Gaussian diagnostic states."""
+    query_count = future_output.future_slots.shape[1]
+    current_slots_expanded = current_slots.slots[:, None].expand(
+        -1, query_count, -1, -1
+    )
+    current_centers_expanded = current_slots.center[:, None].expand(
+        -1, query_count, -1, -1
+    )
+    if model.change_readout is not None:
+        future_change = _change_state(
+            model,
+            current_tokens,
+            current_slots,
+            future_output.future_slots,
+            predicted_future_centers,
+            batch["future_coordinates"],
+            batch["future_valid"],
+            predicted_visibility=getattr(future_output, "future_visibility", None),
+            predicted_scale=getattr(future_output, "future_relative_scale", None),
+        )
+        reference_change = _change_state(
+            model,
+            current_tokens,
+            current_slots,
+            current_slots_expanded,
+            current_centers_expanded,
+            batch["future_coordinates"],
+            batch["future_valid"],
+            predicted_visibility=current_slots.activity[:, None].expand(
+                -1, query_count, -1
+            ),
+            predicted_scale=(
+                current_slots.relative_scale[:, None].expand(-1, query_count, -1)
+                if hasattr(current_slots, "relative_scale")
+                else None
+            ),
+        )
+        current_change = _change_state(
+            model,
+            current_tokens,
+            current_slots,
+            current_slots.slots[:, None],
+            current_slots.center[:, None],
+            batch["history_coordinates"][:, -1:],
+            batch["history_valid"][:, -1:],
+            predicted_visibility=current_slots.activity[:, None],
+            predicted_scale=(
+                current_slots.relative_scale[:, None]
+                if hasattr(current_slots, "relative_scale")
+                else None
+            ),
+        )
+        current_field = batch["history_features"][:, -1:].float()
+        residual = future_change.residual - reference_change.residual
+        fields = {
+            "gaussian_readout": None,
+            "current_gaussian_readout": None,
+            "rendered_future_features": current_field.expand_as(residual) + residual,
+            "residual_reference_features": current_field.expand_as(residual),
+            "residual_reference_coverage": reference_change.active_change_map,
+            "render_coverage": future_change.active_change_map,
+            "feature_loss_coverage": torch.ones_like(future_change.active_change_map),
+            "dense_future_readout": None,
+            "dense_reference_readout": None,
+            "current_dense_readout": None,
+            "change_future_readout": future_change,
+            "change_reference_readout": reference_change,
+            "current_change_readout": current_change,
+        }
+        return fields, None
+
+    if model.gaussian_readout is None:
+        raise ValueError("legacy feature readout is disabled")
     readout, context = decode_gaussian_readout(
         model,
         batch,
@@ -64,13 +167,6 @@ def decode_feature_readouts(
         predicted_relative_disparity=getattr(
             future_output, "future_relative_disparity", None
         ),
-    )
-    query_count = future_output.future_slots.shape[1]
-    current_slots_expanded = current_slots.slots[:, None].expand(
-        -1, query_count, -1, -1
-    )
-    current_centers_expanded = current_slots.center[:, None].expand(
-        -1, query_count, -1, -1
     )
     current_readout, _ = decode_gaussian_readout(
         model,
@@ -98,6 +194,9 @@ def decode_feature_readouts(
         "dense_future_readout": None,
         "dense_reference_readout": None,
         "current_dense_readout": None,
+        "change_future_readout": None,
+        "change_reference_readout": None,
+        "current_change_readout": None,
     }
     if model.dense_readout is None:
         return fields, context
@@ -187,6 +286,25 @@ def decode_current_dense_readout(model, batch: dict[str, torch.Tensor], history:
     )
 
 
+def decode_current_change_readout(model, batch: dict[str, torch.Tensor], history: dict):
+    """Return the current-only change carrier state without reading future fields."""
+    tokens = history["token_states"][-1]
+    slots = history["slot_states"][-1]
+    return _change_state(
+        model,
+        tokens,
+        slots,
+        slots.slots[:, None],
+        slots.center[:, None],
+        batch["history_coordinates"][:, -1:],
+        batch["history_valid"][:, -1:],
+        predicted_visibility=slots.activity[:, None],
+        predicted_scale=(
+            slots.relative_scale[:, None] if hasattr(slots, "relative_scale") else None
+        ),
+    )
+
+
 def decode_inference_features(
     model,
     batch: dict[str, torch.Tensor],
@@ -199,6 +317,38 @@ def decode_inference_features(
         if prediction.future_centers is not None
         else model.object_aggregator.decode_center(prediction.future_slots)
     )
+    if model.change_readout is not None:
+        future = _change_state(
+            model,
+            current_tokens,
+            current_slots,
+            prediction.future_slots,
+            predicted_centers,
+            batch["future_coordinates"],
+            batch["future_valid"],
+            predicted_visibility=getattr(prediction, "future_visibility", None),
+            predicted_scale=getattr(prediction, "future_relative_scale", None),
+        )
+        query_count = prediction.future_slots.shape[1]
+        reference = _change_state(
+            model,
+            current_tokens,
+            current_slots,
+            current_slots.slots[:, None].expand(-1, query_count, -1, -1),
+            current_slots.center[:, None].expand(-1, query_count, -1, -1),
+            batch["future_coordinates"],
+            batch["future_valid"],
+            predicted_visibility=current_slots.activity[:, None].expand(
+                -1, query_count, -1
+            ),
+            predicted_scale=(
+                current_slots.relative_scale[:, None].expand(-1, query_count, -1)
+                if hasattr(current_slots, "relative_scale")
+                else None
+            ),
+        )
+        current = batch["history_features"][:, -1:].float()
+        return current.expand_as(future.residual) + future.residual - reference.residual
     if model.dense_readout is not None:
         future = _dense_state(
             model,

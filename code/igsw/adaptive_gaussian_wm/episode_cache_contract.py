@@ -31,6 +31,7 @@ def validate_episode_cache_header(
         "model": cache_contract["model"],
         "image_size": int(cache_contract["image_size"]),
         "feature_dim": int(cache_contract["feature_dim"]),
+        "feature_contract": cache_contract["feature_contract"],
         "projection_seed": int(cache_contract["projection_seed"]),
     }
     mismatches = {

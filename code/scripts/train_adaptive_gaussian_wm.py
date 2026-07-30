@@ -22,9 +22,6 @@ from igsw.adaptive_gaussian_wm.checkpointing import (  # noqa: E402
     validate_resume,
     warm_start_model,
 )
-from igsw.adaptive_gaussian_wm.dense_readout_contracts import (  # noqa: E402
-    validate_dense_warm_start,
-)
 from igsw.adaptive_gaussian_wm.architecture_args import (  # noqa: E402
     apply_architecture_args,
     build_config,
@@ -291,10 +288,11 @@ def main() -> None:
         )
         validate_v28_initialization(init_checkpoint, args)
         warm_start_report = warm_start_model(model, init_checkpoint)
-        if is_v28(args) and args.training_stage in ("readout", "posterior"):
-            warm_start_report["dense_contract"] = validate_dense_warm_start(
-                model, init_checkpoint, warm_start_report
-            )
+        if is_v28(args) and any(
+            warm_start_report[name]
+            for name in ("missing", "unexpected", "shape_mismatch")
+        ):
+            raise ValueError("v37 warm start must load the complete model state")
         if context.is_main:
             report_path = os.path.join(args.out, "warm_start_report.json")
             with open(report_path, "w", encoding="utf-8") as handle:

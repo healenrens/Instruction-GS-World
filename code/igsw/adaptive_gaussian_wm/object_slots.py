@@ -16,6 +16,9 @@ class ObjectSlotState:
     slots: torch.Tensor
     tracking_slots: torch.Tensor
     assignment: torch.Tensor
+    background_assignment: torch.Tensor
+    potential_change: torch.Tensor
+    potential_change_logits: torch.Tensor
     activity: torch.Tensor
     center: torch.Tensor
     feature: torch.Tensor
@@ -225,6 +228,8 @@ class ObjectSlotAggregator(nn.Module):
             micro_count,
             self.initial_slots.shape[0],
         )
+        background_assignment = values.new_zeros(batch, micro_count)
+        potential_change_logits = values.new_full((batch, micro_count), 20.0)
         for _ in range(self.iterations):
             queries = self.query(self.norm_slots(slots))
             logits = torch.einsum("bmd,bkd->bmk", keys, queries) / dim**0.5
@@ -239,10 +244,16 @@ class ObjectSlotAggregator(nn.Module):
             if self.aggregation_mode == "competitive":
                 if self.background_score is not None:
                     background = self.background_score(values)
-                    assignment = torch.cat(
+                    full_assignment = torch.cat(
                         (logits, background),
                         dim=-1,
-                    ).softmax(dim=-1)[..., :-1]
+                    ).softmax(dim=-1)
+                    assignment = full_assignment[..., :-1]
+                    background_assignment = full_assignment[..., -1]
+                    potential_change_logits = (
+                        torch.logsumexp(logits.float(), dim=-1)
+                        - background.squeeze(-1).float()
+                    )
                 else:
                     assignment = logits.softmax(dim=-1)
                 update_assignment = assignment
@@ -308,10 +319,14 @@ class ObjectSlotAggregator(nn.Module):
         activity = learned_activity * (
             mass * self.initial_slots.shape[0]
         ).clamp_max(1.0)
+        potential_change = assignment.sum(dim=-1).clamp(0.0, 1.0)
         return ObjectSlotState(
             slots=slots,
             tracking_slots=tracking_slots,
             assignment=assignment,
+            background_assignment=background_assignment,
+            potential_change=potential_change,
+            potential_change_logits=potential_change_logits,
             activity=activity,
             center=center,
             feature=feature,

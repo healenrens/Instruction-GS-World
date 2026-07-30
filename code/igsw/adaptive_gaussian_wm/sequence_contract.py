@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 
 SEQUENCE_CACHE_VERSION = "rt2_visual_sequence_dino_v1"
-EPISODE_CACHE_VERSION = "rt2_visual_episode_dino_v1"
+EPISODE_CACHE_VERSION = "rt2_visual_episode_dino_native_v2"
 EPISODE_MANIFEST_NAME = "episode_manifest.json"
 EPISODE_VERIFIED_NAME = "episode_manifest.verified.sha256"
 GROUP_SAMPLER_VERSION = 2

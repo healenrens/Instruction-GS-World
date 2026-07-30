@@ -97,7 +97,6 @@ def sampling_summary(manifest: dict, anchors: tuple[int, ...]) -> dict:
     group_ranges = {}
     for split, counts in task_examples.items():
         episodes = task_episodes[split]
-        maximum = max(counts.values())
         targets = sqrt_coverage_targets(tuple(counts.values()))
         group_ranges[split] = {
             "task_groups": len(counts),
@@ -183,6 +182,8 @@ def verify_files(data: str, manifest: dict) -> dict:
         "bytes": bytes_total,
         "gib": bytes_total / 2**30,
         "projection_sha256": projection_hash,
+        "feature_contract": manifest["cache"]["feature_contract"],
+        "feature_dim": int(manifest["cache"]["feature_dim"]),
     }
 
 
@@ -332,6 +333,11 @@ def main() -> None:
         != GROUP_SAMPLER_VERSION
     ):
         raise ValueError("episode manifest is incomplete or incompatible")
+    if (
+        manifest.get("cache", {}).get("feature_contract") != "backbone_native"
+        or int(manifest.get("cache", {}).get("feature_dim", 0)) != 1024
+    ):
+        raise ValueError("v37 cache requires backbone-native DINOv2-L 1024D")
     anchors = parse_anchor_indices(args.anchors)
     report = {
         "status": "ok",

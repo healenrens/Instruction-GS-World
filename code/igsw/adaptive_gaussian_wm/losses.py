@@ -9,9 +9,9 @@ from .action_regularization import (
     effect_aligned_action_loss,
 )
 from .change_objectives import (
-    dense_feature_loss,
     scale_invariant_object_change_loss,
 )
+from .change_readout_objective import world_model_feature_loss
 from .gpstoken import GPSTokenState
 from .jepa_losses import (
     masked_history_loss,
@@ -168,7 +168,10 @@ def slot_regularization(
     tokens: GPSTokenState,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     assignment = state.assignment.clamp_min(1e-8)
-    entropy = -(assignment * assignment.log()).sum(dim=-1).mean()
+    full_assignment = torch.cat(
+        (assignment, state.background_assignment[..., None].clamp_min(1e-8)), dim=-1
+    )
+    entropy = -(full_assignment * full_assignment.log()).sum(dim=-1).mean()
     normalized = F.normalize(state.tracking_slots, dim=-1)
     similarity = torch.einsum("bkd,bjd->bkj", normalized, normalized)
     count = similarity.shape[-1]
@@ -205,9 +208,12 @@ def slot_regularization(
     compactness = (
         center_difference * token_weight
     ).sum() / token_weight.sum().clamp_min(1e-6)
+    conditional_assignment = assignment / state.potential_change[..., None].clamp_min(
+        1e-6
+    )
     reconstructed_token_feature = torch.einsum(
         "bmk,bkc->bmc",
-        state.assignment,
+        conditional_assignment,
         state.decoded_feature,
     )
     token_feature_reconstruction = _weighted_mean(
@@ -215,7 +221,7 @@ def slot_regularization(
             F.normalize(reconstructed_token_feature, dim=-1)
             - F.normalize(tokens.decoded_features.detach(), dim=-1)
         ).square(),
-        tokens.activation.squeeze(-1),
+        tokens.activation.squeeze(-1) * state.potential_change.detach(),
     )
     total = (
         0.5 * center_decode
@@ -350,12 +356,7 @@ def adaptive_world_model_loss(
         if weights.flow > 0.0
         else future * 0.0
     )
-    feature = dense_feature_loss(
-        output["rendered_future_features"],
-        batch["future_features"],
-        batch["future_valid"],
-        output["feature_loss_coverage"],
-    )
+    feature, change_parts = world_model_feature_loss(model, batch, output)
     rgb, rgb_delta, rgb_object, rgb_parts = rgb_loss_bundle(
         model, batch, output, feature
     )
@@ -471,6 +472,7 @@ def adaptive_world_model_loss(
     parts.update(action_specificity_parts)
     parts.update(geometry_parts)
     parts.update(readout_parts)
+    parts.update(change_parts)
     if collect_diagnostics:
         parts.update(
             object_memory_training_diagnostics(

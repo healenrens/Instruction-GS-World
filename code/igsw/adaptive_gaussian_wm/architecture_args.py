@@ -49,7 +49,8 @@ def apply_architecture_args(
         overrides.update(
             gaussian_children=args.gaussian_children,
             hierarchical_gaussian_carrier=args.gaussian_children > 1,
-            dense_object_readout=args.gaussian_children == 1,
+            dense_object_readout=False,
+            change_residual_readout=args.gaussian_children == 1,
         )
     if args.aggregation_mode != "auto":
         overrides["aggregation_mode"] = args.aggregation_mode

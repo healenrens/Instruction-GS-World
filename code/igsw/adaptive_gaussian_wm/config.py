@@ -103,6 +103,10 @@ class AdaptiveGaussianWMConfig:
     hierarchical_gaussian_carrier: bool = False
     dense_object_readout: bool = False
     dense_readout_dim: int = 256
+    full_dino_features: bool = False
+    explicit_background_state: bool = False
+    change_residual_readout: bool = False
+    change_readout_dim: int = 256
 
     def __post_init__(self) -> None:
         positive = {
@@ -125,6 +129,7 @@ class AdaptiveGaussianWMConfig:
             "memory_relation_dim": self.memory_relation_dim,
             "gaussian_children": self.gaussian_children,
             "dense_readout_dim": self.dense_readout_dim,
+            "change_readout_dim": self.change_readout_dim,
         }
         for name, value in positive.items():
             if value <= 0:
@@ -154,6 +159,12 @@ class AdaptiveGaussianWMConfig:
         if self.dense_object_readout and self.hierarchical_gaussian_carrier:
             raise ValueError(
                 "dense and hierarchical Gaussian readouts are mutually exclusive"
+            )
+        if self.change_residual_readout and (
+            self.dense_object_readout or self.hierarchical_gaussian_carrier
+        ):
+            raise ValueError(
+                "change residual, dense, and hierarchical readouts are mutually exclusive"
             )
         if self.memory_motion_scale <= 0.0:
             raise ValueError("memory_motion_scale must be positive")
@@ -319,6 +330,16 @@ class AdaptiveGaussianWMConfig:
                 raise ValueError("object_memory_v1 token gate contract is [64,256]")
             if self.condition_dim != 0 or self.rgb_supervision:
                 raise ValueError("object_memory_v1 is language-free and feature-only")
+            if not self.full_dino_features or self.feature_dim != 1024:
+                raise ValueError("backbone-native DINOv2-L requires feature_dim=1024")
+            if not self.change_residual_readout or not self.explicit_background_state:
+                raise ValueError(
+                    "object_memory_v1 requires change-only readout and background state"
+                )
+            if self.explicit_background_state and self.aggregation_mode != "competitive":
+                raise ValueError(
+                    "explicit background state requires competitive aggregation"
+                )
             if any(
                 (
                     self.canonical_center_action,
@@ -428,8 +449,12 @@ class AdaptiveGaussianWMConfig:
             gaussian_feature_residual=True,
             gaussian_children=1,
             hierarchical_gaussian_carrier=False,
-            dense_object_readout=True,
+            dense_object_readout=False,
             dense_readout_dim=256,
+            full_dino_features=True,
+            explicit_background_state=True,
+            change_residual_readout=True,
+            change_readout_dim=256,
         )
 
     @classmethod

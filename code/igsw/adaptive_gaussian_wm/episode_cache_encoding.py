@@ -23,10 +23,17 @@ def projection_matrix(
     return torch.linalg.qr(matrix, mode="reduced").Q
 
 
-def projected_sequence(extractor, projection, frames) -> torch.Tensor:
+def encoded_feature_sequence(
+    extractor,
+    projection: torch.Tensor | None,
+    frames,
+) -> torch.Tensor:
+    """Encode normalized backbone features, optionally through a legacy projection."""
     grid, _ = extractor.grid_batch(frames)
     grid = F.normalize(grid, dim=-1)
-    return F.normalize(grid @ projection, dim=-1).to(torch.bfloat16).cpu()
+    if projection is not None:
+        grid = F.normalize(grid @ projection, dim=-1)
+    return grid.to(torch.bfloat16).cpu()
 
 
 def decode_source_frame(dataset, index: int) -> torch.Tensor:

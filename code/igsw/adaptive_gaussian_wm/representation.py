@@ -4,6 +4,7 @@ from __future__ import annotations
 import torch
 
 from .readout_runtime import decode_gaussian_readout
+from .feature_readout_runtime import decode_current_change_readout
 from .rgb_supervision import render_current_rgb
 
 
@@ -24,6 +25,24 @@ def reconstruct_current(
     )
     if slot_values.shape != current_slots.slots.shape:
         raise ValueError("slots_override must match current object slots")
+    if model.change_readout is not None:
+        change_readout = decode_current_change_readout(model, batch, encoded)
+        return {
+            "history": encoded,
+            "tokens": current_tokens,
+            "slots": current_slots,
+            "readout": None,
+            "readout_context": None,
+            "feature": batch["history_features"][:, -1:].float(),
+            "feature_coverage": torch.ones_like(
+                batch["history_valid"][:, -1:].float()
+            ),
+            "change_readout": change_readout,
+            "rgb": None,
+            "rgb_coverage": None,
+        }
+    if model.gaussian_readout is None:
+        raise ValueError("current reconstruction has no enabled readout")
     readout, readout_context = decode_gaussian_readout(
         model,
         batch,
@@ -52,6 +71,7 @@ def reconstruct_current(
         "readout_context": readout_context,
         "feature": feature,
         "feature_coverage": feature_coverage,
+        "change_readout": None,
         "rgb": rgb,
         "rgb_coverage": rgb_coverage,
     }
