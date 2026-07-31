@@ -53,7 +53,7 @@ class JitDinoFeatureRuntime:
         )
         self.coordinates = torch.stack((x, y), dim=-1).reshape(-1, 2)
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def _encode(self, rgb: torch.Tensor) -> torch.Tensor:
         if rgb.ndim != 5 or rgb.shape[2] != 3 or rgb.dtype != torch.uint8:
             raise ValueError("JIT DINO RGB must have shape [B,T,3,H,W] uint8")
