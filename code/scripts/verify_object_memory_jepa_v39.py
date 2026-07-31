@@ -13,7 +13,6 @@ import sys
 from types import SimpleNamespace
 
 import torch
-from torch.utils.data import default_collate
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
@@ -57,6 +56,9 @@ from igsw.adaptive_gaussian_wm.v28_training import (  # noqa: E402
 from igsw.adaptive_gaussian_wm.v39_causal_verification import (  # noqa: E402
     verify_v39_causal_paths,
 )
+from igsw.adaptive_gaussian_wm.v39_gate_sampling import (  # noqa: E402
+    select_v39_gate_batch,
+)
 
 
 FEATURE_CONTRACT = "jit_backbone_native_dinov2_l_1024"
@@ -85,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal_tail_guard_frames", type=int, default=0)
     parser.add_argument("--goal_probe_frames", type=int, default=3)
     parser.add_argument("--goal_stability_threshold", type=float, default=0.05)
+    parser.add_argument("--goal_gate_candidates", type=int, default=32)
     parser.add_argument("--goal_rollout_weight", type=float, default=1.0)
     parser.add_argument("--path_consistency_weight", type=float, default=0.25)
     args = parser.parse_args()
@@ -94,6 +97,7 @@ def parse_args() -> argparse.Namespace:
         value = getattr(args, name)
         require(not value or os.path.isabs(value), f"--{name} must be absolute")
     require(args.jit_dino_batch > 0, "--jit_dino_batch must be positive")
+    require(args.goal_gate_candidates >= 4, "goal gate requires four candidates")
     return args
 
 
@@ -160,7 +164,7 @@ def build_dataset(args, tail_guard: int | None = None):
             args.goal_tail_guard_frames if tail_guard is None else tail_guard
         ),
         goal_probe_frames=args.goal_probe_frames,
-        max_items=16,
+        max_items=max(16, args.goal_gate_candidates),
         teacher_sidecar=args.teacher_sidecar,
         feature_source="jit",
     )
@@ -429,12 +433,6 @@ def main() -> None:
         dataset.teacher_sidecar.verify_hashes()
     temporal = verify_temporal_contract(dataset, args)
     device = torch.device("cuda:0")
-    require(len(dataset) >= 4, "v39 gate requires four temporal samples")
-    raw = default_collate([dataset[(index, 4)] for index in range(4)])
-    raw = {
-        name: value.to(device) if torch.is_tensor(value) else value
-        for name, value in raw.items()
-    }
     dino_amp = "bf16" if torch.cuda.is_bf16_supported() else "fp32"
     runtime = JitDinoFeatureRuntime(
         device,
@@ -442,10 +440,11 @@ def main() -> None:
         args.jit_dino_batch,
         args.goal_stability_threshold,
     )
-    batch = runtime(raw)
-    require(
-        bool(batch["future_horizon_valid"][:, 1].any()),
-        "v39 gate found no stable terminal target in its sample batch",
+    batch, goal_scan = select_v39_gate_batch(
+        dataset,
+        runtime,
+        device,
+        args.goal_gate_candidates,
     )
     del runtime
     torch.cuda.empty_cache()
@@ -471,6 +470,7 @@ def main() -> None:
         "jit_dino_image_size": JIT_DINO_IMAGE_SIZE,
         "jit_dino_frame_batch": args.jit_dino_batch,
         "goal_stability_threshold": args.goal_stability_threshold,
+        **goal_scan,
         "goal_rollout_weight": args.goal_rollout_weight,
         "path_consistency_weight": args.path_consistency_weight,
         "control_hz": float(dataset.control_hz),
