@@ -10,6 +10,7 @@ def joint_phase_flags(phase: str, architecture: str) -> tuple[bool, bool, bool]:
         "joint_loss",
         "posterior_dynamics_loss",
         "object_memory_representation_loss",
+        "history_prior_loss",
     }
     if phase not in allowed:
         raise ValueError(f"unknown training phase: {phase}")

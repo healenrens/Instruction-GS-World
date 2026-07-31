@@ -9,8 +9,7 @@ import random
 import torch
 import torch.distributed as dist
 
-
-CHECKPOINT_VERSION = 38
+CHECKPOINT_VERSION = 39
 
 
 def collect_rng_states(context) -> list[dict]:
@@ -168,8 +167,17 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "data_format",
         "feature_source",
         "jit_dino_batch",
+        "temporal_contract",
         "history_frames",
+        "history_frames_min",
+        "history_frames_max",
+        "history_span_frames",
         "future_frames",
+        "short_horizon_frames",
+        "goal_query_seconds",
+        "goal_tail_guard_frames",
+        "goal_probe_frames",
+        "goal_stability_threshold",
         "sequence_anchors",
         "sequence_data_sha256",
         "condition_cache",
@@ -203,6 +211,8 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "readout_gate_report_sha256",
         "representation_gate_report",
         "representation_gate_report_sha256",
+        "posterior_gate_report",
+        "posterior_gate_report_sha256",
         "gate_report",
         "gate_report_sha256",
         "target_global_batch",
@@ -237,6 +247,8 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "action_residual_gate",
         "action_residual_dropout",
         "semantic_action_basis",
+        "goal_rollout_weight",
+        "path_consistency_weight",
     )
     mismatches = {}
     for name in immutable:

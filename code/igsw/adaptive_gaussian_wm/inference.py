@@ -4,6 +4,10 @@ from __future__ import annotations
 import torch
 
 from .dynamics_runtime import run_object_dynamics
+from .dual_horizon_runtime import (
+    compose_dynamics_effects,
+    transition_effect_scales,
+)
 from .feature_readout_runtime import decode_inference_features
 from .scale import signed_gap_scale
 
@@ -25,9 +29,10 @@ def predict_prior_states(
         batch["future_times"],
         model.config.gap_reference,
     )
+    effect_scale = transition_effect_scales(model, batch)
     context = model.prior_context(
         history,
-        future_scale,
+        effect_scale,
         history_scale,
         condition,
         batch.get("condition_tokens"),
@@ -49,13 +54,14 @@ def predict_prior_states(
         dtype=torch.bool,
     )
     for actions in action_samples:
+        dynamics_actions = compose_dynamics_effects(model, actions)
         prediction = run_object_dynamics(
             model,
             history["slots"],
             history["activity"],
             history_scale,
             future_scale,
-            actions,
+            dynamics_actions,
             empty_mask,
             history["center"],
             dynamics_condition,
@@ -90,9 +96,10 @@ def predict_prior_features(
         batch["future_times"],
         model.config.gap_reference,
     )
+    effect_scale = transition_effect_scales(model, batch)
     context = model.prior_context(
         history,
-        future_scale,
+        effect_scale,
         history_scale,
         condition,
         batch.get("condition_tokens"),
@@ -115,13 +122,14 @@ def predict_prior_features(
     )
     features = []
     for actions in action_samples:
+        dynamics_actions = compose_dynamics_effects(model, actions)
         prediction = run_object_dynamics(
             model,
             history["slots"],
             history["activity"],
             history_scale,
             future_scale,
-            actions,
+            dynamics_actions,
             empty_mask,
             history["center"],
             dynamics_condition,

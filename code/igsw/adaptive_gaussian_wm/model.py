@@ -4,23 +4,29 @@ from __future__ import annotations
 import copy
 import torch
 import torch.nn as nn
-from .action_embedding import residual_action_dropout
 from .conditioning import LanguageConditionProjector
 from .config import AdaptiveGaussianWMConfig
 from .change_residual_readout import ChangeResidualReadout
 from .decoder import GaussianReadout
 from .dense_object_readout import DenseObjectReadout
 from .dynamics import JointObjectLatentDynamics
-from .dynamics_runtime import factorized_result_fields, run_object_dynamics
+from .dual_horizon_objective import dual_horizon_loss
+from .dual_horizon_runtime import (
+    mask_horizon_supervision,
+    prepare_transition_effects,
+    rollout_goal_prediction,
+)
+from .dynamics_runtime import run_object_dynamics
 from .factorized_dynamics import FactorizedObjectDynamics
 from .feature_readout_runtime import decode_feature_readouts
 from .gpstoken import LearnableGPSTokenAllocator
 from .latent_action import LatentActionModel
 from .language_effect import LanguageEffectAlignment
-from .model_phases import joint_phase_flags, select_dynamics_actions
+from .latent_effect_composer import LatentEffectComposer
+from .model_output_runtime import assemble_model_output
+from .model_phases import joint_phase_flags
 from .object_memory import ObjectMemoryTransition
 from .object_slots import ObjectSlotAggregator
-from .observed_action import posterior_from_targets
 from .rgb_supervision import residual_future_rgb, render_current_rgb, render_future_rgb
 from .scale import signed_gap_scale
 from .sequence_encoding import encode_visual_sequence
@@ -50,6 +56,9 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             for parameter in self.target_object_memory.parameters():
                 parameter.requires_grad_(False)
         self.latent_actions = LatentActionModel(config)
+        self.effect_composer = (
+            LatentEffectComposer(config) if config.dual_horizon_dynamics else None
+        )
         self.dynamics = (
             FactorizedObjectDynamics(config)
             if config.factorized_dynamics
@@ -218,35 +227,17 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             batch["future_times"],
             self.config.gap_reference,
         )
-        posterior_actions, action_rgb = posterior_from_targets(
+        effects = prepare_transition_effects(
             self,
             batch,
             history,
             target_future,
-            future_scale,
-            condition,
-        )
-        prior_context = self.prior_context(
-            history,
-            future_scale,
             history_scale,
+            future_scale,
             condition,
-            batch.get("condition_tokens"),
-            batch.get("condition_token_valid"),
-        )
-        actions = select_dynamics_actions(
-            self,
-            posterior_actions,
-            prior_context,
             use_posterior,
             actions_override,
             action_free,
-        )
-        actions = residual_action_dropout(
-            actions,
-            self.config.action_residual_dropout,
-            self.training,
-            self.config.canonical_action_dim,
         )
         if history_mask is None:
             history_mask = self.make_history_mask(history["slots"])
@@ -262,7 +253,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             history["activity"],
             history_scale,
             future_scale,
-            actions,
+            effects.dynamics,
             history_mask,
             history["center"],
             condition,
@@ -274,7 +265,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             history["activity"],
             history_scale,
             future_scale,
-            torch.zeros_like(actions),
+            torch.zeros_like(effects.dynamics),
             history_mask,
             history["center"],
             condition,
@@ -337,94 +328,43 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             if not posterior_dynamics_loss:
                 rendered_current_rgb = residual_reference_rgb[:, :1]
                 current_rgb_coverage = reference_coverage[:, :1]
-        result = {
-            "predicted_future_slots": future_output.future_slots,
-            "predicted_future_centers": predicted_future_centers,
-            "predicted_future_object_features": (
-                self.object_aggregator.decode_feature(
-                    future_output.future_slots
-                )
-            ),
-            "zero_action_future_slots": history_output.future_slots,
-            "zero_action_future_centers": zero_action_future_centers,
-            "predicted_history_slots": history_output.history_slots,
-            "predicted_history_centers": predicted_history_centers,
-            "target_future_slots": target_future["slots"],
-            "target_future_activity": target_future["activity"],
-            "target_future_visibility": target_future.get(
-                "visibility", target_future["activity"]
-            ),
-            "target_future_existence": target_future.get(
-                "existence", target_future["activity"]
-            ),
-            "target_future_in_frame": target_future.get(
-                "in_frame", target_future["activity"]
-            ),
-            "target_future_relative_scale": target_future.get("relative_scale"),
-            "target_future_relative_disparity": target_future.get(
-                "relative_disparity"
-            ),
-            "target_future_relations": target_future.get("relations"),
-            "target_future_centers": target_future["center"],
-            "target_future_object_features": target_future["feature"],
-            "current_object_rgb": action_rgb[0],
-            "target_future_object_rgb": action_rgb[1],
-            "target_history_slots": target_history["slots"],
-            "target_history_activity": target_history["activity"],
-            "target_history_visibility": target_history.get(
-                "visibility", target_history["activity"]
-            ),
-            "target_history_existence": target_history.get(
-                "existence", target_history["activity"]
-            ),
-            "target_history_in_frame": target_history.get(
-                "in_frame", target_history["activity"]
-            ),
-            "target_history_relative_scale": target_history.get("relative_scale"),
-            "target_history_relative_disparity": target_history.get(
-                "relative_disparity"
-            ),
-            "target_history_relations": target_history.get("relations"),
-            "target_history_centers": target_history["center"],
-            "target_history_object_features": target_history["feature"],
-            "online_history_slots": history["slots"],
-            "online_history_centers": history["center"],
-            "online_history_visibility": history.get(
-                "visibility", history["activity"]
-            ),
-            "online_history_existence": history.get(
-                "existence", history["activity"]
-            ),
-            "online_history_in_frame": history.get(
-                "in_frame", history["activity"]
-            ),
-            "online_history_relative_scale": history.get("relative_scale"),
-            "online_history_relative_disparity": history.get(
-                "relative_disparity"
-            ),
-            "online_history_relations": history.get("relations"),
-            "online_history_object_features": torch.stack(
-                [
-                    state.decoded_feature
-                    for state in history["slot_states"]
-                ],
-                dim=1,
-            ),
-            "posterior_actions": posterior_actions,
-            "dynamics_actions": actions,
-            "prior_context": prior_context,
-            "history_mask": history_mask,
-            **readout_fields,
+        rgb_fields = {
             "rendered_future_rgb": rendered_rgb,
             "residual_reference_rgb": residual_reference_rgb,
             "rgb_render_coverage": rgb_coverage,
             "rendered_current_rgb": rendered_current_rgb,
             "current_rgb_render_coverage": current_rgb_coverage,
-            "language_condition": condition,
-            "history_token_states": history["token_states"],
-            "history_slot_states": history["slot_states"],
         }
-        result.update(factorized_result_fields(future_output, history_output, target_future, target_history))
+        result = assemble_model_output(
+            self,
+            history,
+            target_history,
+            target_future,
+            future_output,
+            history_output,
+            predicted_future_centers,
+            predicted_history_centers,
+            zero_action_future_centers,
+            effects,
+            history_mask,
+            readout_fields,
+            rgb_fields,
+            condition,
+        )
+        if self.config.dual_horizon_dynamics and not action_free and phase != "history_prior_loss":
+            result.update(
+                rollout_goal_prediction(
+                    self,
+                    batch,
+                    history,
+                    current_tokens,
+                    current_slot_state,
+                    future_output,
+                    effects,
+                    condition,
+                )
+            )
+        loss_batch = mask_horizon_supervision(batch, result, action_free)
         if compute_joint_loss:
             if loss_weights is None:
                 raise ValueError("joint_loss phase requires loss_weights")
@@ -432,11 +372,15 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
 
             loss, parts = adaptive_world_model_loss(
                 self,
-                batch,
+                loss_batch,
                 result,
                 loss_weights,
                 collect_diagnostics,
             )
+            dual_loss, dual_parts = dual_horizon_loss(self, loss_batch, result)
+            loss = loss + dual_loss
+            parts.update(dual_parts)
+            parts["total"] = loss
             result["loss"] = loss
             result["parts"] = parts
         return result

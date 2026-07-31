@@ -52,6 +52,10 @@ _DIAGNOSTIC_PREFIXES = (
     "change_",
     "feature_change_",
     "feature_static_",
+    "dual_horizon_",
+    "short_",
+    "goal_",
+    "history_h",
 )
 
 

@@ -51,6 +51,11 @@ def apply_architecture_args(
             hierarchical_gaussian_carrier=args.gaussian_children > 1,
             dense_object_readout=False,
             change_residual_readout=args.gaussian_children == 1,
+            dual_horizon_dynamics=(
+                args.temporal_contract == "dynamic_dual_horizon_v1"
+            ),
+            goal_rollout_weight=args.goal_rollout_weight,
+            path_consistency_weight=args.path_consistency_weight,
         )
     if args.aggregation_mode != "auto":
         overrides["aggregation_mode"] = args.aggregation_mode

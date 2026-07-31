@@ -107,6 +107,9 @@ class AdaptiveGaussianWMConfig:
     explicit_background_state: bool = False
     change_residual_readout: bool = False
     change_readout_dim: int = 256
+    dual_horizon_dynamics: bool = False
+    goal_rollout_weight: float = 1.0
+    path_consistency_weight: float = 0.25
 
     def __post_init__(self) -> None:
         positive = {
@@ -311,6 +314,8 @@ class AdaptiveGaussianWMConfig:
             raise ValueError("zero-action margin weight must be non-negative")
         if self.zero_action_relative_margin <= 0.0:
             raise ValueError("zero-action relative margin must be positive")
+        if self.goal_rollout_weight < 0.0 or self.path_consistency_weight < 0.0:
+            raise ValueError("dual-horizon loss weights must be non-negative")
         if self.persistent_object_memory != self.relative_geometry:
             raise ValueError(
                 "persistent object memory and relative geometry must be enabled together"
@@ -349,6 +354,8 @@ class AdaptiveGaussianWMConfig:
                 )
             ):
                 raise ValueError("object_memory_v1 forbids explicit action anchors")
+        if self.dual_horizon_dynamics and self.architecture != "object_memory_v1":
+            raise ValueError("dual-horizon Dynamics requires object_memory_v1")
 
     def to_dict(self) -> dict:
         return asdict(self)

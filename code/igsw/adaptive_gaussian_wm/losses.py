@@ -12,6 +12,7 @@ from .change_objectives import (
     scale_invariant_object_change_loss,
 )
 from .change_readout_objective import world_model_feature_loss
+from .dual_horizon_objective import prior_flow_loss
 from .gpstoken import GPSTokenState
 from .jepa_losses import (
     masked_history_loss,
@@ -348,11 +349,7 @@ def adaptive_world_model_loss(
         output["target_history_activity"],
     )
     flow = (
-        model.latent_actions.prior.loss(
-            output["posterior_actions"],
-            output["prior_context"],
-            batch.get("group_id"),
-        )
+        prior_flow_loss(model, batch, output)
         if weights.flow > 0.0
         else future * 0.0
     )

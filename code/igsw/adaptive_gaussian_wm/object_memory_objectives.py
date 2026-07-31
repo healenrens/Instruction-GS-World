@@ -47,9 +47,13 @@ def object_memory_geometry_loss(
     predicted_existence_logits = output.get("predicted_future_existence_logits")
     if predicted_existence_logits is None:
         raise ValueError("factorized Dynamics has no existence logits")
-    existence = F.binary_cross_entropy_with_logits(
-        predicted_existence_logits,
-        output["target_future_existence"].detach(),
+    existence = weighted_mean(
+        F.binary_cross_entropy_with_logits(
+            predicted_existence_logits,
+            output["target_future_existence"].detach(),
+            reduction="none",
+        ),
+        output["future_horizon_valid"][..., None],
     )
     teacher, teacher_parts = teacher_sidecar_loss(output, batch, reference)
     total = scale + relations + 0.5 * existence + teacher
@@ -82,7 +86,12 @@ def _pool_dense_teacher(output: dict, batch: dict):
         visibility = batch["teacher_future_visibility"][:, index].float()
         correspondence = batch["teacher_future_correspondence"][:, index]
         valid_track = (correspondence >= 0).to(confidence.dtype)
-        support = dense_object * (confidence * valid_track)[..., None]
+        horizon = output["future_horizon_valid"][:, index].float()
+        support = (
+            dense_object
+            * (confidence * valid_track)[..., None]
+            * horizon[:, None, None]
+        )
         support_mass = support.sum(dim=1)
         denominator = support_mass.clamp_min(1e-6)
         object_validity.append((support_mass > 1e-5).to(confidence.dtype))

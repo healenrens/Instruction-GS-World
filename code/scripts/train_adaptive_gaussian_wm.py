@@ -320,7 +320,7 @@ def main() -> None:
             warm_start_report[name]
             for name in ("missing", "unexpected", "shape_mismatch")
         ):
-            raise ValueError("v37 warm start must load the complete model state")
+            raise ValueError("v39 warm start must load the complete model state")
         if context.is_main:
             report_path = os.path.join(args.out, "warm_start_report.json")
             with open(report_path, "w", encoding="utf-8") as handle:

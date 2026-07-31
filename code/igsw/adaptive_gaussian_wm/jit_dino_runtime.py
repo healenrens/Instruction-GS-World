@@ -18,14 +18,23 @@ from .rgb_episode_cache_contract import (
 class JitDinoFeatureRuntime:
     """Inject frozen dense DINO features without joining model state or optimizer."""
 
-    def __init__(self, device: torch.device, amp: str, frame_batch: int):
+    def __init__(
+        self,
+        device: torch.device,
+        amp: str,
+        frame_batch: int,
+        goal_stability_threshold: float = 0.05,
+    ):
         if device.type != "cuda":
             raise ValueError("JIT DINO training requires CUDA")
         if frame_batch < 1:
             raise ValueError("JIT DINO frame batch must be positive")
+        if goal_stability_threshold <= 0.0:
+            raise ValueError("goal stability threshold must be positive")
         self.device = device
         self.dtype = torch.bfloat16 if amp == "bf16" else torch.float32
         self.frame_batch = frame_batch
+        self.goal_stability_threshold = float(goal_stability_threshold)
         self.extractor = DinoFeatures(JIT_DINO_MODEL, JIT_DINO_IMAGE_SIZE).to(device)
         self.extractor = self.extractor.to(dtype=self.dtype).eval()
         if any(parameter.requires_grad for parameter in self.extractor.parameters()):
@@ -71,8 +80,10 @@ class JitDinoFeatureRuntime:
         missing = required.difference(batch)
         if missing:
             raise ValueError(f"JIT DINO batch is missing: {sorted(missing)}")
-        history = self._encode(batch.pop("history_jit_rgb"))
-        future = self._encode(batch.pop("future_jit_rgb"))
+        history_rgb = batch.pop("history_jit_rgb")
+        future_rgb = batch.pop("future_jit_rgb")
+        history = self._encode(history_rgb)
+        future = self._encode(future_rgb)
         batch_size, history_count, token_count = history.shape[:3]
         future_count = future.shape[1]
         valid = torch.ones(
@@ -95,6 +106,43 @@ class JitDinoFeatureRuntime:
                 dtype=torch.long,
             )[None].expand(batch_size, -1),
         )
+        if "goal_probe_jit_rgb" in batch:
+            if future_count != 2:
+                raise ValueError("goal stability probes require short and goal targets")
+            probe = self._encode(batch.pop("goal_probe_jit_rgb"))
+            trajectory = torch.cat((probe, future[:, 1:2]), dim=1).float()
+            stability = (
+                1.0
+                - F.cosine_similarity(
+                    trajectory[:, 1:],
+                    trajectory[:, :-1],
+                    dim=-1,
+                )
+            ).mean(dim=(-1, -2))
+            goal_pixels = future_rgb[:, 1].float()
+            goal_rgb_mean = goal_pixels.mean(dim=(1, 2, 3))
+            goal_rgb_std = goal_pixels.std(dim=(1, 2, 3), unbiased=False)
+            goal_content_valid = (
+                (goal_rgb_std > 2.0)
+                & (goal_rgb_mean > 2.0)
+                & (goal_rgb_mean < 253.0)
+            )
+            goal_valid = (
+                stability <= self.goal_stability_threshold
+            ) & goal_content_valid
+            horizon_valid = batch.get("future_horizon_valid")
+            if horizon_valid is None or horizon_valid.shape != (batch_size, 2):
+                raise ValueError("dynamic targets require [B,2] horizon validity")
+            horizon_valid = horizon_valid.clone()
+            horizon_valid[:, 1] &= goal_valid
+            batch.update(
+                future_horizon_valid=horizon_valid,
+                goal_stability_error=stability,
+                goal_rgb_mean=goal_rgb_mean,
+                goal_rgb_std=goal_rgb_std,
+                goal_content_valid=goal_content_valid,
+                goal_valid=goal_valid,
+            )
         return batch
 
 
@@ -106,7 +154,12 @@ def build_feature_runtime(args, dataset, device: torch.device):
         raise ValueError(f"unknown feature source: {source}")
     if dataset.feature_contract != JIT_DINO_FEATURE_CONTRACT:
         raise ValueError("JIT feature source and dataset contract differ")
-    return JitDinoFeatureRuntime(device, args.amp, args.jit_dino_batch)
+    return JitDinoFeatureRuntime(
+        device,
+        args.amp,
+        args.jit_dino_batch,
+        args.goal_stability_threshold,
+    )
 
 
 def prepare_feature_batch(runtime, batch: dict[str, torch.Tensor]):

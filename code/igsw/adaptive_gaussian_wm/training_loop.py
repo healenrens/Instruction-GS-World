@@ -98,13 +98,19 @@ def train_phase(
                     )
                     loss, parts = result["loss"], result["parts"]
                 else:
-                    result = wrapped(
-                        batch,
-                        phase=(
+                    if args.training_stage == "prior":
+                        model_phase = "history_prior_loss"
+                    elif args.training_stage == "posterior":
+                        model_phase = "posterior_dynamics_loss"
+                    else:
+                        model_phase = (
                             "posterior_dynamics_loss"
                             if args.posterior_dynamics_gate
                             else "joint_loss"
-                        ),
+                        )
+                    result = wrapped(
+                        batch,
+                        phase=model_phase,
                         loss_weights=weights,
                         collect_diagnostics=collect_diagnostics,
                     )
@@ -131,8 +137,11 @@ def train_phase(
                 model,
                 args.posterior_dynamics_gate,
                 freeze_target=(
-                    args.training_stage == "readout"
-                    and args.readout_scope == "isolated"
+                    args.training_stage == "prior"
+                    or (
+                        args.training_stage == "readout"
+                        and args.readout_scope == "isolated"
+                    )
                 ),
             )
             step += 1
@@ -266,7 +275,11 @@ def train_stages(
         feature_runtime,
     )
     joint_step, global_step = train_phase(
-        "posterior" if args.training_stage == "posterior" else "joint",
+        (
+            "posterior"
+            if args.training_stage == "posterior"
+            else "prior" if args.training_stage == "prior" else "joint"
+        ),
         args.joint_steps,
         joint_step,
         global_step,

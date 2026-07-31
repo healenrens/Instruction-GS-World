@@ -160,6 +160,61 @@ class DistributedGroupBalancedSampler(Sampler[int]):
         self.start_index = int(start_index)
 
 
+class SynchronizedDynamicHistorySampler(Sampler[tuple[int, int]]):
+    """Assign one history length to each DDP-synchronized local microbatch."""
+
+    def __init__(
+        self,
+        sampler: Sampler[int],
+        history_lengths: tuple[int, ...],
+        batch_size: int,
+        seed: int,
+    ):
+        if not history_lengths or min(history_lengths) < 1:
+            raise ValueError("dynamic history lengths must be positive")
+        if batch_size < 1:
+            raise ValueError("dynamic history batch size must be positive")
+        self.sampler = sampler
+        self.history_lengths = tuple(int(value) for value in history_lengths)
+        self.batch_size = int(batch_size)
+        self.seed = int(seed)
+        self.epoch = 0
+
+    @property
+    def num_samples(self) -> int:
+        value = getattr(self.sampler, "num_samples", None)
+        return int(len(self.sampler) if value is None else value)
+
+    @property
+    def start_index(self) -> int:
+        return int(getattr(self.sampler, "start_index", 0))
+
+    def __iter__(self) -> Iterator[tuple[int, int]]:
+        rotation = _stable_integer(
+            "dynamic-history-rotation", self.seed, self.epoch
+        ) % len(self.history_lengths)
+        start_batch = self.start_index // self.batch_size
+        for offset, source_index in enumerate(self.sampler):
+            batch_index = start_batch + offset // self.batch_size
+            history_index = (rotation + batch_index) % len(self.history_lengths)
+            yield int(source_index), self.history_lengths[history_index]
+
+    def __len__(self) -> int:
+        return len(self.sampler)
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+        if hasattr(self.sampler, "set_epoch"):
+            self.sampler.set_epoch(epoch)
+
+    def set_start_index(self, start_index: int) -> None:
+        if not hasattr(self.sampler, "set_start_index"):
+            raise ValueError("underlying sampler does not support a start index")
+        if start_index % self.batch_size:
+            raise ValueError("dynamic history resume must start at a batch boundary")
+        self.sampler.set_start_index(start_index)
+
+
 def build_training_sampler(
     dataset,
     num_replicas: int,
@@ -172,7 +227,7 @@ def build_training_sampler(
         global_batch = batch_size * grad_accum * num_replicas
         minimum = sum(dataset.sampling_group_targets)
         optimizer_steps = math.ceil(minimum / global_batch)
-        return DistributedGroupBalancedSampler(
+        sampler = DistributedGroupBalancedSampler(
             dataset,
             dataset.sampling_group_spans,
             dataset.sampling_group_targets,
@@ -181,11 +236,21 @@ def build_training_sampler(
             seed=seed,
             samples_per_rank=optimizer_steps * batch_size * grad_accum,
         )
-    return DistributedSampler(
-        dataset,
-        num_replicas=num_replicas,
-        rank=rank,
-        shuffle=True,
-        seed=seed,
-        drop_last=True,
-    )
+    else:
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=num_replicas,
+            rank=rank,
+            shuffle=True,
+            seed=seed,
+            drop_last=True,
+        )
+    history_lengths = getattr(dataset, "dynamic_history_lengths", ())
+    if history_lengths:
+        return SynchronizedDynamicHistorySampler(
+            sampler,
+            tuple(history_lengths),
+            batch_size,
+            seed,
+        )
+    return sampler

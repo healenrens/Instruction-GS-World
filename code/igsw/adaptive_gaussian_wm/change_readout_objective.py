@@ -39,7 +39,7 @@ def relative_change_targets(
     for index in range(rows.shape[0]):
         values = rows[index, row_valid[index]]
         if values.numel() == 0:
-            raise ValueError("future change target has no valid patches")
+            continue
         lower = torch.quantile(values, 0.5)
         upper = torch.quantile(values, 0.9)
         spread = upper - lower
