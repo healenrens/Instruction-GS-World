@@ -1,4 +1,5 @@
 """CLI and construction helpers for pair and visual-sequence datasets."""
+
 from __future__ import annotations
 
 from .pair_dataset import CausalPairFeatureDataset
@@ -15,6 +16,8 @@ def add_dataset_arguments(parser) -> None:
     parser.add_argument("--future_frames", type=int, default=4)
     parser.add_argument("--sequence_anchors", default="3,5,8")
     parser.add_argument("--teacher_sidecar", default="")
+    parser.add_argument("--feature_source", choices=("cached", "jit"), default="cached")
+    parser.add_argument("--jit_dino_batch", type=int, default=4)
 
 
 def build_training_dataset(
@@ -26,6 +29,8 @@ def build_training_dataset(
     if args.teacher_sidecar and args.data_format != "sequence":
         raise ValueError("teacher sidecars require sequence data")
     if args.data_format == "pair":
+        if args.feature_source != "cached":
+            raise ValueError("pair data only supports cached features")
         if not args.dino:
             raise ValueError("pair data requires --dino")
         return CausalPairFeatureDataset(
@@ -53,4 +58,5 @@ def build_training_dataset(
         rgb_short_side=args.rgb_short_side,
         rgb_pad_multiple=args.rgb_pad_multiple,
         teacher_sidecar=args.teacher_sidecar,
+        feature_source=args.feature_source,
     )

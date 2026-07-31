@@ -1,4 +1,5 @@
 """Language-free multi-frame visual sequence dataset with physical timestamps."""
+
 from __future__ import annotations
 
 import glob
@@ -34,7 +35,10 @@ class WindowCausalVisualSequenceDataset(Dataset):
         rgb_short_side: int = 256,
         rgb_pad_multiple: int = 16,
         teacher_sidecar: str = "",
+        feature_source: str = "cached",
     ):
+        if feature_source != "cached":
+            raise ValueError("window sequence caches do not support JIT DINO")
         if teacher_sidecar:
             raise ValueError("teacher sidecars require the dense episode backend")
         clip_paths = [
@@ -53,14 +57,8 @@ class WindowCausalVisualSequenceDataset(Dataset):
         self.condition_dim = 0
         self.data_sha256 = ""
         self.contract_label = "language-free causal visual sequences"
-        self.clip_indices = {
-            path: index for index, path in enumerate(clip_paths)
-        }
-        examples = [
-            (path, anchor)
-            for path in clip_paths
-            for anchor in self.anchors
-        ]
+        self.clip_indices = {path: index for index, path in enumerate(clip_paths)}
+        examples = [(path, anchor) for path in clip_paths for anchor in self.anchors]
         if max_items > 0 and max_items < len(examples):
             if max_items == 1:
                 examples = [examples[0]]
@@ -132,7 +130,9 @@ class WindowCausalVisualSequenceDataset(Dataset):
         if abs(float(cache.get("control_hz", 0.0)) - CONTROL_HZ) > 1e-9:
             raise ValueError(f"control frequency mismatch: {path}")
         rgb = cache.get("rgb")
-        if not isinstance(rgb, dict) or len(rgb.get("jpeg_frames", ())) != len(features):
+        if not isinstance(rgb, dict) or len(rgb.get("jpeg_frames", ())) != len(
+            features
+        ):
             raise ValueError(f"invalid sequence RGB cache: {path}")
 
     @staticmethod
@@ -270,6 +270,7 @@ def CausalVisualSequenceDataset(
     rgb_short_side: int = 256,
     rgb_pad_multiple: int = 16,
     teacher_sidecar: str = "",
+    feature_source: str = "cached",
 ):
     """Select the versioned window or dense-episode sequence backend."""
     arguments = dict(
@@ -284,6 +285,7 @@ def CausalVisualSequenceDataset(
         rgb_short_side=rgb_short_side,
         rgb_pad_multiple=rgb_pad_multiple,
         teacher_sidecar=teacher_sidecar,
+        feature_source=feature_source,
     )
     if os.path.isfile(os.path.join(cache_root, EPISODE_MANIFEST_NAME)):
         from .episode_sequence_dataset import CausalVisualEpisodeDataset

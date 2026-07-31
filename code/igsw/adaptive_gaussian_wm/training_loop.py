@@ -1,4 +1,5 @@
 """Shared phased training loop for the adaptive Gaussian world model."""
+
 from __future__ import annotations
 
 from contextlib import nullcontext
@@ -35,6 +36,7 @@ def train_phase(
     args,
     weights,
     experiment_tracker=None,
+    feature_runtime=None,
 ) -> tuple[int, int]:
     if start_step >= phase_steps:
         return start_step, global_step
@@ -54,9 +56,7 @@ def train_phase(
     optimizer.zero_grad(set_to_none=True)
     while step < phase_steps:
         action_free_phase = phase in ("representation", "readout")
-        sampler.set_epoch(
-            args.seed + epoch + (0 if action_free_phase else 100000)
-        )
+        sampler.set_epoch(args.seed + epoch + (0 if action_free_phase else 100000))
         accumulated: dict[str, torch.Tensor] = {}
         micro_count = 0
         for batch_index, cpu_batch in enumerate(loader):
@@ -65,6 +65,8 @@ def train_phase(
             if batch_index >= usable_batches:
                 break
             batch = move_to_device(cpu_batch, device)
+            if feature_runtime is not None:
+                batch = feature_runtime(batch)
             micro_count += 1
             synchronize = micro_count == args.grad_accum
             collect_diagnostics = (
@@ -110,15 +112,13 @@ def train_phase(
                 scaled_loss = loss / args.grad_accum
             scaled_loss.backward()
             for name, value in parts.items():
-                accumulated[name] = accumulated.get(
-                    name, value.detach() * 0.0
-                ) + value.detach()
+                accumulated[name] = (
+                    accumulated.get(name, value.detach() * 0.0) + value.detach()
+                )
             if not synchronize:
                 continue
             group_grad_norms = (
-                optimizer_group_grad_norms(optimizer)
-                if collect_diagnostics
-                else {}
+                optimizer_group_grad_norms(optimizer) if collect_diagnostics else {}
             )
             grad_norm = clip_finite_grad_norm_(
                 model.named_parameters(),
@@ -147,17 +147,13 @@ def train_phase(
                 )
             )
             if group_grad_norms:
-                metrics.update(
-                    reduce_metrics(group_grad_norms, context.world_size)
-                )
+                metrics.update(reduce_metrics(group_grad_norms, context.world_size))
             accumulated = {}
             micro_count = 0
             if context.is_main and (
                 step == 1 or step % args.log_every == 0 or step == phase_steps
             ):
-                effective_batch = (
-                    args.batch * context.world_size * args.grad_accum
-                )
+                effective_batch = args.batch * context.world_size * args.grad_accum
                 elapsed = max(time.time() - started, 1e-6)
                 completed_steps = step - start_step
                 steps_per_second = completed_steps / elapsed
@@ -172,9 +168,7 @@ def train_phase(
                     "lr": scheduler.get_last_lr()[0],
                     "grad_norm": float(grad_norm),
                     "steps_per_second": steps_per_second,
-                    "samples_per_second": (
-                        effective_batch * steps_per_second
-                    ),
+                    "samples_per_second": (effective_batch * steps_per_second),
                     "wall_time_seconds": elapsed,
                     "micro_batch": args.batch,
                     "grad_accum": args.grad_accum,
@@ -236,3 +230,56 @@ def train_phase(
         epoch += 1
         skip_batches = 0
     return step, global_step
+
+
+def train_stages(
+    representation_step,
+    joint_step,
+    global_step,
+    model,
+    wrapped,
+    loader,
+    sampler,
+    optimizer,
+    scheduler,
+    context,
+    args,
+    weights,
+    experiment_tracker,
+    feature_runtime,
+):
+    representation_step, global_step = train_phase(
+        "readout" if args.training_stage == "readout" else "representation",
+        args.representation_steps,
+        representation_step,
+        global_step,
+        model,
+        wrapped,
+        loader,
+        sampler,
+        optimizer,
+        scheduler,
+        context,
+        args,
+        weights,
+        experiment_tracker,
+        feature_runtime,
+    )
+    joint_step, global_step = train_phase(
+        "posterior" if args.training_stage == "posterior" else "joint",
+        args.joint_steps,
+        joint_step,
+        global_step,
+        model,
+        wrapped,
+        loader,
+        sampler,
+        optimizer,
+        scheduler,
+        context,
+        args,
+        weights,
+        experiment_tracker,
+        feature_runtime,
+    )
+    return representation_step, joint_step, global_step

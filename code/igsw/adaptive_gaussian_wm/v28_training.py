@@ -1,4 +1,4 @@
-"""Strict training and launch contracts for Object Memory JEPA v37."""
+"""Strict training and launch contracts for Object Memory JEPA v38."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def resolve_v28_gradient_accumulation(args, world_size: int) -> None:
     if not is_v28(args):
         return
     if world_size <= 0 or args.target_global_batch <= 0:
-        raise ValueError("v37 world size and target global batch must be positive")
+        raise ValueError("v38 world size and target global batch must be positive")
     if args.grad_accum == 0:
         samples_per_micro_step = args.batch * world_size
         args.grad_accum = max(
@@ -90,6 +90,10 @@ def validate_v28_arguments(args, world_size: int) -> None:
         raise ValueError("object_memory_v1 requires an explicit training stage")
     if args.profile != "full" or args.data_format != "sequence":
         raise ValueError("object_memory_v1 requires full sequence training")
+    if args.feature_source != "jit":
+        raise ValueError("v38 object_memory_v1 requires per-rank JIT DINO")
+    if args.jit_dino_batch < 1:
+        raise ValueError("v38 JIT DINO frame batch must be positive")
     if args.language_condition != "off" or args.rgb_supervision != "off":
         raise ValueError("object_memory_v1 forces language and RGB supervision off")
     if args.condition_cache:
@@ -99,7 +103,7 @@ def validate_v28_arguments(args, world_size: int) -> None:
     if args.posterior_dynamics_gate or args.posterior_core_training:
         raise ValueError("object_memory_v1 uses training_stage, not legacy modes")
     if min(args.core_lr, args.action_lr, args.readout_lr) <= 0.0:
-        raise ValueError("v37 learning rates must be positive")
+        raise ValueError("v38 learning rates must be positive")
     if (
         min(
             args.current_readout_weight,
@@ -109,22 +113,22 @@ def validate_v28_arguments(args, world_size: int) -> None:
         )
         < 0.0
     ):
-        raise ValueError("v37 readout weights must be non-negative")
+        raise ValueError("v38 readout weights must be non-negative")
     if args.gaussian_children != 1:
-        raise ValueError("v37 change residual readout requires gaussian_children=1")
+        raise ValueError("v38 change residual readout requires gaussian_children=1")
     if (
         args.basis_gate_report
         or args.carrier_preflight_report
         or args.carrier_support_weight != 0.0
         or args.carrier_compact_weight != 0.0
     ):
-        raise ValueError("v37 forbids hierarchical Gaussian carrier inputs")
+        raise ValueError("v38 forbids hierarchical Gaussian carrier inputs")
     if args.grad_accum <= 0:
-        raise ValueError("v37 gradient accumulation did not resolve")
+        raise ValueError("v38 gradient accumulation did not resolve")
     if args.lr != args.core_lr or abs(args.lr_floor / args.core_lr - 0.1) > 1e-9:
-        raise ValueError("v37 legacy LR fields must mirror core LR and its 0.1 floor")
+        raise ValueError("v38 legacy LR fields must mirror core LR and its 0.1 floor")
     if args.warmup_steps != 0 or abs(args.warmup_fraction - 0.05) > 1e-9:
-        raise ValueError("v37 warmup is fixed at five percent")
+        raise ValueError("v38 warmup is fixed at five percent")
     if args.training_stage == "representation":
         if args.representation_steps <= 0 or args.joint_steps != 0:
             raise ValueError("representation stage must only set representation_steps")
@@ -141,7 +145,7 @@ def validate_v28_arguments(args, world_size: int) -> None:
         or args.dense_preflight_report
         or args.readout_gate_report
     ):
-        raise ValueError("v37 has no separate readout stage or v30 readout gates")
+        raise ValueError("v38 has no separate readout stage or v30 readout gates")
     if args.training_stage == "posterior" and not (args.init_from or args.resume):
         raise ValueError(
             "posterior stage requires representation init or strict resume"
@@ -154,9 +158,9 @@ def validate_v28_arguments(args, world_size: int) -> None:
         raise ValueError("posterior training requires a passed representation gate")
     if not args.validate_only:
         if args.batch not in (2, 4, 8):
-            raise ValueError("v37 per-rank batch must be 2, 4, or 8")
+            raise ValueError("v38 per-rank batch must be 2, 4, or 8")
         if not args.gate_report:
-            raise ValueError("v37 training requires --gate_report")
+            raise ValueError("v38 training requires --gate_report")
 
 
 def validate_v28_gate(args, dataset, project_root: str) -> dict:
@@ -179,14 +183,17 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         text=True,
     )
     if worktree.strip():
-        raise ValueError("v37 training rejects tracked worktree changes")
+        raise ValueError("v38 training rejects tracked worktree changes")
     expected = {
         "status": "passed",
         "architecture": ARCHITECTURE,
         "checkpoint_version": CHECKPOINT_VERSION,
         "checkpoint_contract": "rolling_recovery_v1",
         "readout_backend": "change_only_object_residual",
-        "feature_contract": "backbone_native_dinov2_l_1024",
+        "feature_contract": "jit_backbone_native_dinov2_l_1024",
+        "jit_dino_model": "vit_large_patch14_dinov2.lvd142m",
+        "jit_dino_image_size": 518,
+        "jit_dino_frame_batch": args.jit_dino_batch,
         "control_hz": float(dataset.control_hz),
         "git_commit": current_commit,
         "data_manifest_sha256": dataset.data_sha256,
@@ -198,7 +205,7 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         if report.get(name) != value
     }
     if mismatch:
-        raise ValueError(f"v37 verifier gate differs: {mismatch}")
+        raise ValueError(f"v38 verifier gate differs: {mismatch}")
     args.gate_report_sha256 = file_sha256(args.gate_report)
     args.dense_preflight_report_sha256 = (
         file_sha256(args.dense_preflight_report) if args.dense_preflight_report else ""
@@ -233,7 +240,7 @@ def _validate_representation_held_gate(args) -> None:
         report = json.load(handle)
     expected = {
         "status": "passed",
-        "contract": "object_memory_v37_representation_held_v1",
+        "contract": "object_memory_v38_representation_held_v1",
         "git_commit": args.git_commit,
         "data_manifest_sha256": args.sequence_data_sha256,
         "source_checkpoint": os.path.abspath(args.init_from),
@@ -245,7 +252,7 @@ def _validate_representation_held_gate(args) -> None:
         if report.get(name) != value
     }
     if mismatch:
-        raise ValueError(f"v37 representation gate differs: {mismatch}")
+        raise ValueError(f"v38 representation gate differs: {mismatch}")
     args.representation_gate_report_sha256 = file_sha256(
         args.representation_gate_report
     )
@@ -256,10 +263,10 @@ def validate_v28_initialization(checkpoint: dict, args) -> None:
         return
     version = int(checkpoint.get("checkpoint_version", 0))
     if version > CHECKPOINT_VERSION:
-        raise ValueError("cannot initialize v37 from a newer checkpoint")
+        raise ValueError("cannot initialize v38 from a newer checkpoint")
     if args.training_stage == "representation":
         raise ValueError(
-            "v37 representation starts from scratch; use resume to continue"
+            "v38 representation starts from scratch; use resume to continue"
         )
     if checkpoint.get("config", {}).get("architecture") != ARCHITECTURE:
         raise ValueError("checkpoint initialization architecture differs")
@@ -270,7 +277,7 @@ def validate_v28_initialization(checkpoint: dict, args) -> None:
         or saved.get("training_stage") != "representation"
         or not _stage_complete(checkpoint)
     ):
-        raise ValueError("posterior must start from completed v37 representation")
+        raise ValueError("posterior must start from completed v38 representation")
     _validate_representation_held_gate(args)
 
 
@@ -328,7 +335,7 @@ def build_optimizer(model, args) -> torch.optim.AdamW:
     if action:
         groups.append({"params": action, "lr": args.action_lr, "group_name": "action"})
     if not groups:
-        raise ValueError("v37 optimizer has no trainable parameters")
+        raise ValueError("v38 optimizer has no trainable parameters")
     return torch.optim.AdamW(groups, weight_decay=args.weight_decay)
 
 
@@ -375,7 +382,11 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "rgb_supervision": "off",
         "latent_action_shape": [4, 32],
         "data_manifest_sha256": dataset.data_sha256,
-        "feature_contract": "backbone_native_dinov2_l_1024",
+        "feature_source": args.feature_source,
+        "feature_contract": "jit_backbone_native_dinov2_l_1024",
+        "jit_dino_model": "vit_large_patch14_dinov2.lvd142m",
+        "jit_dino_image_size": 518,
+        "jit_dino_frame_batch": args.jit_dino_batch,
         "control_hz": float(dataset.control_hz),
         "core_lr": args.core_lr,
         "action_lr": args.action_lr,

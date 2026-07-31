@@ -35,6 +35,7 @@ from igsw.adaptive_gaussian_wm.dataset_factory import (  # noqa: E402
 from igsw.adaptive_gaussian_wm.group_balanced_sampler import (  # noqa: E402
     build_training_sampler,
 )
+from igsw.adaptive_gaussian_wm import jit_dino_runtime  # noqa: E402
 from igsw.adaptive_gaussian_wm.experiment_tracking import (  # noqa: E402
     add_wandb_arguments,
     init_wandb_tracker,
@@ -44,7 +45,7 @@ from igsw.adaptive_gaussian_wm.train_runtime import (  # noqa: E402
     cosine_schedule,
     validate_data_model_contract,
 )
-from igsw.adaptive_gaussian_wm.training_loop import train_phase  # noqa: E402
+from igsw.adaptive_gaussian_wm.training_loop import train_stages  # noqa: E402
 from igsw.adaptive_gaussian_wm.training_modes import (  # noqa: E402
     configure_posterior_core_training,
     configure_posterior_dynamics_gate,
@@ -243,8 +244,16 @@ def main() -> None:
                         "status": "ok",
                         "examples": len(dataset),
                         "feature_dim": dataset.feature_dim,
-                        "history_shape": list(sample["history_features"].shape),
-                        "future_shape": list(sample["future_features"].shape),
+                        "history_shape": [
+                            len(sample["history_times"]),
+                            dataset.grid_height * dataset.grid_width,
+                            dataset.feature_dim,
+                        ],
+                        "future_shape": [
+                            len(sample["future_times"]),
+                            dataset.grid_height * dataset.grid_width,
+                            dataset.feature_dim,
+                        ],
                         "condition_dim": dataset.condition_dim,
                         "teacher_sidecar": bool(args.teacher_sidecar),
                         "rgb_shape": (
@@ -293,6 +302,7 @@ def main() -> None:
         rgb_enabled,
     )
     model = AdaptiveGaussianObjectWorldModel(config).to(device)
+    feature_runtime = jit_dino_runtime.build_feature_runtime(args, dataset, device)
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model"], strict=True)
         if is_v28(args):
@@ -407,7 +417,8 @@ def main() -> None:
             f"stage={args.training_stage} profile={args.profile} "
             f"world={context.world_size} "
             f"effective_batch={effective_batch} examples={len(dataset)} "
-            f"data_format={args.data_format} "
+            f"data_format={args.data_format} feature_source={args.feature_source} "
+            f"jit_dino_batch={args.jit_dino_batch} "
             f"language={language_enabled} rgb={rgb_enabled} "
             f"posterior_gate={args.posterior_dynamics_gate} "
             f"posterior_core={args.posterior_core_training} "
@@ -454,25 +465,8 @@ def main() -> None:
             },
         },
     )
-    representation_step, global_step = train_phase(
-        "readout" if args.training_stage == "readout" else "representation",
-        args.representation_steps,
+    representation_step, joint_step, global_step = train_stages(
         representation_step,
-        global_step,
-        model,
-        wrapped,
-        loader,
-        sampler,
-        optimizer,
-        scheduler,
-        context,
-        args,
-        weights,
-        experiment_tracker,
-    )
-    joint_step, global_step = train_phase(
-        "posterior" if args.training_stage == "posterior" else "joint",
-        args.joint_steps,
         joint_step,
         global_step,
         model,
@@ -485,6 +479,7 @@ def main() -> None:
         args,
         weights,
         experiment_tracker,
+        feature_runtime,
     )
     if experiment_tracker is not None:
         experiment_tracker.finish()

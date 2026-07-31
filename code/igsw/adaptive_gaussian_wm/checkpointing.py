@@ -1,4 +1,5 @@
 """Strict resume and explicit warm-start handling for adaptive WM checkpoints."""
+
 from __future__ import annotations
 
 import json
@@ -9,7 +10,7 @@ import torch
 import torch.distributed as dist
 
 
-CHECKPOINT_VERSION = 37
+CHECKPOINT_VERSION = 38
 
 
 def collect_rng_states(context) -> list[dict]:
@@ -17,9 +18,7 @@ def collect_rng_states(context) -> list[dict]:
     local_state = {
         "torch": torch.get_rng_state(),
         "cuda": (
-            torch.cuda.get_rng_state(device=device)
-            if device.type == "cuda"
-            else None
+            torch.cuda.get_rng_state(device=device) if device.type == "cuda" else None
         ),
         "python": random.getstate(),
     }
@@ -63,8 +62,7 @@ def save_checkpoint(
         "parallelism": "ddp_full_state_dict",
         "git_commit": getattr(args, "git_commit", ""),
         "model": {
-            name: value.detach().cpu()
-            for name, value in model.state_dict().items()
+            name: value.detach().cpu() for name, value in model.state_dict().items()
         },
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
@@ -168,6 +166,8 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "data",
         "dino",
         "data_format",
+        "feature_source",
+        "jit_dino_batch",
         "history_frames",
         "future_frames",
         "sequence_anchors",
@@ -252,12 +252,16 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         else:
             previous = saved[name]
         current = getattr(args, name)
-        if name in (
-            "data",
-            "dino",
-            "condition_cache",
-            "teacher_sidecar",
-        ) and current:
+        if (
+            name
+            in (
+                "data",
+                "dino",
+                "condition_cache",
+                "teacher_sidecar",
+            )
+            and current
+        ):
             current = os.path.abspath(current)
             previous = os.path.abspath(previous)
         if current != previous:
@@ -314,8 +318,7 @@ def _resize_action_tensor(
             6 if source_config.get("canonical_semantic_action", False) else 0
         )
         source_is_residual_head = (
-            checkpoint.get("checkpoint_version", 1) >= 14
-            and source_canonical_dim > 0
+            checkpoint.get("checkpoint_version", 1) >= 14 and source_canonical_dim > 0
         )
         offset = 0 if source_is_residual_head else source_canonical_dim
         resized = _copy_axis_prefix(source[offset:], target, 0)
@@ -339,11 +342,7 @@ def _resize_action_tensor(
     }
     if name in prefix_axis:
         resized = _copy_axis_prefix(source, target, prefix_axis[name])
-        return (
-            (resized, "action_prefix_copy")
-            if resized is not None
-            else None
-        )
+        return (resized, "action_prefix_copy") if resized is not None else None
     if name == "latent_actions.prior.input_projection.weight":
         source_tail = source.shape[1] - 2 * source_action_dim
         target_tail = target.shape[1] - 2 * target_action_dim
@@ -369,9 +368,8 @@ def warm_start_model(model, checkpoint: dict) -> dict:
     dropped = {}
     unexpected = []
     shape_mismatch = {}
-    rgb_semantics_changed = (
-        model.config.rgb_semantic_action
-        and not source_config.get("rgb_semantic_action", False)
+    rgb_semantics_changed = model.config.rgb_semantic_action and not source_config.get(
+        "rgb_semantic_action", False
     )
     semantic_input_weights = {
         "dynamics.action_input.weight",
@@ -461,9 +459,10 @@ def warm_start_model(model, checkpoint: dict) -> dict:
         and residual_name not in compatible
     ):
         source_weight = source.get("dynamics.action_input.weight")
-        if source_weight is None or source_weight.shape[0] != target[
-            residual_name
-        ].shape[0]:
+        if (
+            source_weight is None
+            or source_weight.shape[0] != target[residual_name].shape[0]
+        ):
             raise ValueError("cannot warm-start bounded residual projection")
         output = target[residual_name].clone()
         count = min(

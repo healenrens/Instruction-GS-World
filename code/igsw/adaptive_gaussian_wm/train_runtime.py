@@ -1,4 +1,5 @@
 """Shared runtime helpers for adaptive Gaussian world-model training."""
+
 from __future__ import annotations
 
 import math
@@ -66,11 +67,13 @@ def validate_data_model_contract(
     mismatches = {}
     if config.feature_dim != dataset.feature_dim:
         mismatches["feature_dim"] = (config.feature_dim, dataset.feature_dim)
-    if config.full_dino_features and getattr(dataset, "feature_contract", "") != (
-        "backbone_native"
+    valid_feature_contracts = {"backbone_native", "jit_backbone_native"}
+    if (
+        config.full_dino_features
+        and getattr(dataset, "feature_contract", "") not in valid_feature_contracts
     ):
         mismatches["feature_contract"] = (
-            "backbone_native",
+            sorted(valid_feature_contracts),
             getattr(dataset, "feature_contract", "<missing>"),
         )
     if config.condition_dim != expected_condition_dim:
@@ -80,12 +83,9 @@ def validate_data_model_contract(
         )
     if config.rgb_supervision != rgb_enabled:
         mismatches["rgb_supervision"] = (config.rgb_supervision, rgb_enabled)
-    if (
-        config.token_conditioned_prior
-        and (
-            dataset.condition_store is None
-            or dataset.condition_store.token_features is None
-        )
+    if config.token_conditioned_prior and (
+        dataset.condition_store is None
+        or dataset.condition_store.token_features is None
     ):
         mismatches["token_conditioned_prior"] = (
             True,

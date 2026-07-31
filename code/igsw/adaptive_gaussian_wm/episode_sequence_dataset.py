@@ -27,6 +27,11 @@ from .sequence_contract import (
     temporal_layout,
 )
 from .group_balanced_sampler import sqrt_coverage_targets
+from .rgb_episode_cache_contract import (
+    RGB_EPISODE_CACHE_VERSION,
+    validate_episode_payload as validate_rgb_episode_payload,
+    validate_manifest as validate_rgb_manifest,
+)
 from .teacher_sidecar import TeacherSidecarStore
 
 
@@ -69,11 +74,25 @@ class CausalVisualEpisodeDataset(Dataset):
         rgb_short_side: int = 256,
         rgb_pad_multiple: int = 16,
         teacher_sidecar: str = "",
+        feature_source: str = "cached",
     ):
         manifest_path = os.path.join(cache_root, EPISODE_MANIFEST_NAME)
         with open(manifest_path, encoding="utf-8") as handle:
             manifest = json.load(handle)
-        self.control_hz = validate_episode_manifest(manifest, manifest_path)
+        self._manifest = manifest
+        self.jit_dino = manifest.get("episode_cache_version") == (
+            RGB_EPISODE_CACHE_VERSION
+        )
+        expected_source = "jit" if self.jit_dino else "cached"
+        if feature_source != expected_source:
+            raise ValueError(
+                f"feature_source={feature_source} differs from {expected_source} data"
+            )
+        self.control_hz = (
+            validate_rgb_manifest(manifest, manifest_path)
+            if self.jit_dino
+            else validate_episode_manifest(manifest, manifest_path)
+        )
         self.data_sha256 = _file_sha256(manifest_path)
         self.history_frames = history_frames
         self.future_frames = future_frames
@@ -93,6 +112,8 @@ class CausalVisualEpisodeDataset(Dataset):
             raise ValueError("episode sample stride must be positive")
         self.load_rgb = load_rgb
         self.explicit_goal = explicit_goal
+        if self.jit_dino and explicit_goal:
+            raise ValueError("JIT DINO sequence data does not expose explicit goals")
         group_balance = manifest["sampling"].get("group_balance", "none")
         if group_balance not in ("none", "task_sqrt_coverage"):
             raise ValueError(f"unknown episode group balance: {group_balance}")
@@ -109,9 +130,12 @@ class CausalVisualEpisodeDataset(Dataset):
             raise ValueError("episode task sampling temperature mismatch")
         self.condition_store = None
         self.condition_dim = 0
-        self.feature_contract = str(manifest["cache"].get("feature_contract", ""))
+        feature_metadata = manifest["feature"] if self.jit_dino else manifest["cache"]
+        self.feature_contract = str(feature_metadata.get("feature_contract", ""))
         self.contract_label = (
-            "language-free dense causal visual episodes with backbone-native DINO"
+            "language-free RGB episodes with per-rank frozen JIT DINO"
+            if self.jit_dino
+            else "language-free dense causal visual episodes with backbone-native DINO"
         )
 
         episodes = [entry for entry in manifest["episodes"] if entry["split"] == split]
@@ -119,12 +143,14 @@ class CausalVisualEpisodeDataset(Dataset):
             raise ValueError(f"no {split} episodes in {manifest_path}")
         records = []
         episode_paths = []
+        self._entries_by_path = {}
         grouped_episodes: dict[str, list[tuple[int, str, int]]] = {}
         for episode_index, entry in enumerate(episodes):
             path = os.path.join(cache_root, entry["filename"])
             if not os.path.isfile(path):
                 raise ValueError(f"episode cache is missing: {path}")
             episode_paths.append(path)
+            self._entries_by_path[path] = entry
             frame_count = int(entry["frame_count"])
             group = str(entry["sampling_group"])
             grouped_episodes.setdefault(group, []).append(
@@ -214,13 +240,25 @@ class CausalVisualEpisodeDataset(Dataset):
         ]
 
         first = self._load_cache(episode_paths[0])
-        validate_episode_payload(first, episode_paths[0], self.control_hz)
-        features = first["dino"]
-        self.feature_dim = int(first["feature_dim"])
-        if first.get("feature_contract") != self.feature_contract:
-            raise ValueError("episode feature contract differs from manifest")
-        self.grid_height = int(features.shape[1])
-        self.grid_width = int(features.shape[2])
+        if self.jit_dino:
+            validate_rgb_episode_payload(
+                first,
+                episode_paths[0],
+                self._entries_by_path[episode_paths[0]],
+                manifest,
+            )
+            self.feature_dim = int(feature_metadata["feature_dim"])
+            grid_size = int(feature_metadata["image_size"]) // 14
+            self.grid_height = grid_size
+            self.grid_width = grid_size
+        else:
+            validate_episode_payload(first, episode_paths[0], self.control_hz)
+            features = first["dino"]
+            self.feature_dim = int(first["feature_dim"])
+            if first.get("feature_contract") != self.feature_contract:
+                raise ValueError("episode feature contract differs from manifest")
+            self.grid_height = int(features.shape[1])
+            self.grid_width = int(features.shape[2])
         y, x = torch.meshgrid(
             torch.linspace(-1.0, 1.0, self.grid_height),
             torch.linspace(-1.0, 1.0, self.grid_width),
@@ -228,15 +266,19 @@ class CausalVisualEpisodeDataset(Dataset):
         )
         self.coordinates = torch.stack((x, y), dim=-1).reshape(-1, 2)
         rgb_meta = first["rgb"]
-        if (
+        if self.jit_dino:
+            self.rgb_height = int(rgb_meta["height"])
+            self.rgb_width = int(rgb_meta["width"])
+        elif (
             int(rgb_meta["short_side"]) != rgb_short_side
             or int(rgb_meta["pad_multiple"]) != rgb_pad_multiple
         ):
             raise ValueError(
                 "episode RGB cache and runtime resize configuration differ"
             )
-        self.rgb_height = int(rgb_meta["padded_height"])
-        self.rgb_width = int(rgb_meta["padded_width"])
+        if not self.jit_dino:
+            self.rgb_height = int(rgb_meta["padded_height"])
+            self.rgb_width = int(rgb_meta["padded_width"])
         self.teacher_sidecar = (
             TeacherSidecarStore(
                 teacher_sidecar,
@@ -295,8 +337,8 @@ class CausalVisualEpisodeDataset(Dataset):
         rgb_cache: dict,
         indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        content_height = int(rgb_cache["content_height"])
-        content_width = int(rgb_cache["content_width"])
+        content_height = int(rgb_cache.get("content_height", rgb_cache.get("height")))
+        content_width = int(rgb_cache.get("content_width", rgb_cache.get("width")))
         blob = rgb_cache["jpeg_bytes"]
         offsets = rgb_cache["jpeg_offsets"].long()
         decoded = torch.stack(
@@ -333,9 +375,17 @@ class CausalVisualEpisodeDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         record, start, anchor = self._locate(index)
         cache = self._load_cache(record.path)
-        validate_episode_payload(cache, record.path, self.control_hz)
-        if len(cache["dino"]) != record.frame_count:
-            raise ValueError("episode frame count differs from manifest")
+        if self.jit_dino:
+            validate_rgb_episode_payload(
+                cache,
+                record.path,
+                self._entries_by_path[record.path],
+                self._manifest,
+            )
+        else:
+            validate_episode_payload(cache, record.path, self.control_hz)
+            if len(cache["dino"]) != record.frame_count:
+                raise ValueError("episode frame count differs from manifest")
         sampled_controls = control_frame_indices(
             start,
             record.window,
@@ -349,27 +399,14 @@ class CausalVisualEpisodeDataset(Dataset):
         )
         anchor_control = sampled_controls[anchor]
         relative_seconds = (sampled_controls - anchor_control).float() / self.control_hz
-        sampled_features = cache["dino"][sampled_controls]
-        history = self._normalize(sampled_features[history_index]).flatten(1, 2)
-        future = self._normalize(sampled_features[future_index]).flatten(1, 2)
+        if not self.jit_dino:
+            sampled_features = cache["dino"][sampled_controls]
+            history = self._normalize(sampled_features[history_index]).flatten(1, 2)
+            future = self._normalize(sampled_features[future_index]).flatten(1, 2)
         valid = torch.ones(len(self.coordinates), dtype=torch.bool)
         result = {
-            "history_features": history,
-            "history_coordinates": self.coordinates[None].expand(
-                len(history_index), -1, -1
-            ),
-            "history_valid": valid[None].expand(len(history_index), -1),
             "history_times": relative_seconds[history_index],
-            "future_features": future,
-            "future_coordinates": self.coordinates[None].expand(
-                len(future_index), -1, -1
-            ),
-            "future_valid": valid[None].expand(len(future_index), -1),
             "future_times": relative_seconds[future_index],
-            "feature_grid_hw": torch.tensor(
-                [self.grid_height, self.grid_width],
-                dtype=torch.long,
-            ),
             "anchor_frame_index": torch.tensor(anchor, dtype=torch.long),
             "history_frame_indices": history_index,
             "future_frame_indices": future_index,
@@ -385,6 +422,33 @@ class CausalVisualEpisodeDataset(Dataset):
                 dtype=torch.long,
             ),
         }
+        if self.jit_dino:
+            history_rgb, _ = self._decode_rgb(
+                cache["rgb"], sampled_controls[history_index]
+            )
+            future_rgb, _ = self._decode_rgb(
+                cache["rgb"], sampled_controls[future_index]
+            )
+            result.update(
+                history_jit_rgb=history_rgb,
+                future_jit_rgb=future_rgb,
+            )
+        else:
+            result.update(
+                history_features=history,
+                history_coordinates=self.coordinates[None].expand(
+                    len(history_index), -1, -1
+                ),
+                history_valid=valid[None].expand(len(history_index), -1),
+                future_features=future,
+                future_coordinates=self.coordinates[None].expand(
+                    len(future_index), -1, -1
+                ),
+                future_valid=valid[None].expand(len(future_index), -1),
+                feature_grid_hw=torch.tensor(
+                    [self.grid_height, self.grid_width], dtype=torch.long
+                ),
+            )
         if self.explicit_goal:
             goal_index = future_index[-1]
             result.update(
