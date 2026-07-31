@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
+
+from .distributed_statistics import gather_batch_without_grad
 
 
 def _gather_batch(value: torch.Tensor) -> torch.Tensor:
-    value = value.detach().float()
-    if not dist.is_available() or not dist.is_initialized():
-        return value
-    gathered = [torch.empty_like(value) for _ in range(dist.get_world_size())]
-    dist.all_gather(gathered, value)
-    return torch.cat(gathered, dim=0)
+    return gather_batch_without_grad(value.float())
 
 
 def _masked_codes(actions: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
