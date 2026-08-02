@@ -6,6 +6,11 @@ from __future__ import annotations
 import os
 import sys
 
+os.environ.setdefault("HF_HOME", "/mnt/pfs/public/xuhaoming/hf_cache")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("XDG_CACHE_HOME", "/mnt/pfs/public/xuhaoming/.cache")
+
 sys.path.insert(0, os.path.dirname(__file__))
 
 import evaluate_dynamic_dual_horizon_v39 as evaluator  # noqa: E402

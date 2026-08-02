@@ -10,6 +10,11 @@ import os
 import sys
 from types import SimpleNamespace
 
+os.environ.setdefault("HF_HOME", "/mnt/pfs/public/xuhaoming/hf_cache")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("XDG_CACHE_HOME", "/mnt/pfs/public/xuhaoming/.cache")
+
 import torch
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
