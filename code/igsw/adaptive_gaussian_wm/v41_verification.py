@@ -91,24 +91,42 @@ def verify_v41_correspondence_contracts(
     _require(not missing, f"v41 model outputs are missing: {missing}")
     state = output["history_slot_states"][-1]
     token_state = output["history_token_states"][-1]
+    _require(
+        state.identity_key.dtype == torch.float32,
+        "persistent identity state is not float32",
+    )
     delta_time = torch.ones(
         state.slots.shape[0],
         device=state.slots.device,
         dtype=state.slots.dtype,
     )
-    predicted = model.object_memory.predict(state, delta_time)
-    observation = model.object_aggregator(
-        token_state,
-        predicted.tracking_slots,
-        predicted.center,
-        predicted.identity_key,
+    with amp_context():
+        predicted = model.object_memory.predict(state, delta_time)
+        observation = model.object_aggregator(
+            token_state,
+            predicted.tracking_slots,
+            predicted.center,
+            predicted.identity_key,
+        )
+        geometry = pool_object_geometry(
+            token_state,
+            observation.assignment,
+            observation.activity,
+        )
+        correspondence = module(predicted, observation, geometry)
+        corrected = model.object_memory.correct(predicted, observation, token_state)
+    correspondence_tensors = (
+        correspondence.transport,
+        correspondence.unmatched_probability,
+        correspondence.discovery_probability,
+        correspondence.entropy,
+        correspondence.identity_similarity,
+        correspondence.support_distance,
     )
-    geometry = pool_object_geometry(
-        token_state,
-        observation.assignment,
-        observation.activity,
+    _require(
+        all(bool(torch.isfinite(value).all()) for value in correspondence_tensors),
+        "correspondence produced non-finite values",
     )
-    correspondence = module(predicted, observation, geometry)
     row_error = _difference(
         correspondence.transport.sum(dim=-1)
         + correspondence.unmatched_probability,
@@ -122,7 +140,6 @@ def verify_v41_correspondence_contracts(
     _require(row_error < 5e-4, "correspondence row mass is not conserved")
     _require(column_error < 5e-4, "correspondence column mass is not conserved")
 
-    corrected = model.object_memory.correct(predicted, observation, token_state)
     permutation = torch.arange(
         observation.slots.shape[1] - 1,
         -1,
@@ -130,11 +147,12 @@ def verify_v41_correspondence_contracts(
         device=observation.slots.device,
     )
     permuted_observation = _permute_observation(observation, permutation)
-    permuted = model.object_memory.correct(
-        predicted,
-        permuted_observation,
-        token_state,
-    )
+    with amp_context():
+        permuted = model.object_memory.correct(
+            predicted,
+            permuted_observation,
+            token_state,
+        )
     permutation_slot_difference = _difference(corrected.slots, permuted.slots)
     permutation_center_difference = _difference(corrected.center, permuted.center)
     permutation_identity_difference = _difference(
@@ -163,11 +181,12 @@ def verify_v41_correspondence_contracts(
         center=scale * geometry.center + translation,
         relative_scale=scale * geometry.relative_scale,
     )
-    transformed = module(
-        transformed_prediction,
-        observation,
-        transformed_geometry,
-    )
+    with amp_context():
+        transformed = module(
+            transformed_prediction,
+            observation,
+            transformed_geometry,
+        )
     geometry_invariance = _difference(
         correspondence.transport,
         transformed.transport,
@@ -192,7 +211,8 @@ def verify_v41_correspondence_contracts(
         ),
         permutation,
     )
-    synthetic = module(predicted, synthetic_observation, synthetic_geometry)
+    with amp_context():
+        synthetic = module(predicted, synthetic_observation, synthetic_geometry)
     expected = permutation[None].expand(synthetic.transport.shape[0], -1)
     retrieval_accuracy = float(
         (synthetic.transport.argmax(dim=-1) == expected).float().mean()
@@ -204,37 +224,17 @@ def verify_v41_correspondence_contracts(
     ) * corrected.observation_confidence
     birth_formula_difference = _difference(corrected.birth_evidence, expected_birth)
     _require(birth_formula_difference < 1e-6, "birth evidence is not factorized")
-    module.zero_grad(set_to_none=True)
-    with torch.enable_grad():
-        gradient_probe = module(predicted, observation, geometry)
-        observation_cost = torch.linspace(
-            0.1,
-            1.0,
-            gradient_probe.transport.shape[-1],
-            device=gradient_probe.transport.device,
-        )
-        probe_loss = (
-            gradient_probe.transport * observation_cost[None, None]
-        ).sum() + 0.37 * gradient_probe.unmatched_probability.sum()
-        probe_loss.backward()
-    residual_gradient = module.residual[-1].weight.grad
-    dustbin_gradient = module.dustbin_logit.grad
-    _require(residual_gradient is not None, "correspondence residual has no gradient")
-    _require(dustbin_gradient is not None, "correspondence dustbin has no gradient")
-    _require(
-        bool(torch.isfinite(residual_gradient).all()),
-        "correspondence residual gradient is non-finite",
+    observation_hierarchy_violation = float(
+        torch.relu(
+            corrected.observation_confidence.float() - corrected.existence.float()
+        ).max()
     )
     _require(
-        bool(torch.isfinite(dustbin_gradient).all()),
-        "correspondence dustbin gradient is non-finite",
+        observation_hierarchy_violation < 1e-6,
+        "observation confidence exceeds track presence",
     )
-    residual_gradient_norm = float(residual_gradient.float().norm())
-    dustbin_gradient_norm = float(dustbin_gradient.float().norm())
-    _require(residual_gradient_norm > 0.0, "correspondence residual gradient is zero")
-    _require(dustbin_gradient_norm > 0.0, "correspondence dustbin gradient is zero")
-    module.zero_grad(set_to_none=True)
     return {
+        "persistent_identity_state_dtype_fp32": 1.0,
         "correspondence_row_mass_max_difference": row_error,
         "correspondence_column_mass_max_difference": column_error,
         "correspondence_permutation_slot_max_difference": (
@@ -249,6 +249,7 @@ def verify_v41_correspondence_contracts(
         "correspondence_geometry_invariance_max_difference": geometry_invariance,
         "correspondence_synthetic_reappearance_accuracy": retrieval_accuracy,
         "track_birth_evidence_formula_max_difference": birth_formula_difference,
-        "correspondence_residual_gradient_norm": residual_gradient_norm,
-        "correspondence_dustbin_gradient_norm": dustbin_gradient_norm,
+        "track_observation_hierarchy_max_violation": (
+            observation_hierarchy_violation
+        ),
     }

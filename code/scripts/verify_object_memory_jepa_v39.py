@@ -30,6 +30,9 @@ from igsw.adaptive_gaussian_wm.dynamic_dual_horizon_dataset import (  # noqa: E4
 from igsw.adaptive_gaussian_wm.group_balanced_sampler import (  # noqa: E402
     build_training_sampler,
 )
+from igsw.adaptive_gaussian_wm.gradient_contracts import (  # noqa: E402
+    nonzero_gradient_parameter_names,
+)
 from igsw.adaptive_gaussian_wm.jit_dino_runtime import (  # noqa: E402
     JitDinoFeatureRuntime,
 )
@@ -293,7 +296,7 @@ def build_model(dataset, args, device):
 def verify_model_paths(model, batch: dict, amp_context) -> dict:
     configure_v28_stage(
         model,
-        SimpleNamespace(architecture="object_memory_v1", training_stage="representation"),
+        SimpleNamespace(architecture=model.config.architecture, training_stage="representation"),
     )
     model.train()
     model.zero_grad(set_to_none=True)
@@ -332,6 +335,9 @@ def verify_model_paths(model, batch: dict, amp_context) -> dict:
     require(not nonfinite, f"non-finite gradients: {nonfinite}")
     require(core_gradients > 0, "representation core received no gradients")
     require(action_gradients == 0, "representation updated posterior/composer")
+    correspondence_gradients = nonzero_gradient_parameter_names(
+        model, "object_memory.correspondence."
+    )
     representation_loss = float(representation["loss"].detach())
     short_prediction = representation["predicted_future_slots"][:, :1].detach().clone()
     model.zero_grad(set_to_none=True)
@@ -363,7 +369,7 @@ def verify_model_paths(model, batch: dict, amp_context) -> dict:
             target_module.requires_grad_(False)
     configure_v28_stage(
         model,
-        SimpleNamespace(architecture="object_memory_v1", training_stage="posterior"),
+        SimpleNamespace(architecture=model.config.architecture, training_stage="posterior"),
     )
     model.zero_grad(set_to_none=True)
     with amp_context():
@@ -400,10 +406,11 @@ def verify_model_paths(model, batch: dict, amp_context) -> dict:
     require(not posterior_nonfinite, f"non-finite posterior gradients: {posterior_nonfinite}")
     require(posterior_gradients > 0, "Posterior received no gradients")
     require(composer_gradients > 0, "effect composer received no gradients")
-    return {
+    report = {
         "representation_loss": representation_loss,
         "representation_core_gradient_tensors": core_gradients,
         "representation_action_gradient_tensors": action_gradients,
+        "representation_correspondence_gradient_parameters": correspondence_gradients,
         "action_free_short_future_swap_max_difference": action_free_difference,
         "posterior_loss": float(posterior["loss"].detach()),
         "posterior_action_gradient_tensors": posterior_gradients,
@@ -413,6 +420,8 @@ def verify_model_paths(model, batch: dict, amp_context) -> dict:
         ),
         "goal_stability_error": float(batch["goal_stability_error"].mean()),
     }
+    model.zero_grad(set_to_none=True)
+    return report
 
 
 def main() -> None:

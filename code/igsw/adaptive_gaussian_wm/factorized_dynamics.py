@@ -9,7 +9,11 @@ import torch.nn.functional as F
 
 from .config import AdaptiveGaussianWMConfig
 from .relative_geometry import RelativeGeometryEncoder, pairwise_relative_geometry
-from .object_lifecycle import factorized_lifecycle_prediction, stable_logit
+from .object_lifecycle import (
+    factorized_lifecycle_prediction,
+    soft_in_frame,
+    stable_logit,
+)
 from .relative_transport import (
     centers_from_support_transport,
     temporal_motion_features,
@@ -401,6 +405,9 @@ class FactorizedObjectDynamics(nn.Module):
         current_existence = existence[:, -1, None]
         lifecycle_prediction = None
         if self.config.factorized_lifecycle:
+            current_visible_presence = (
+                current_visibility / soft_in_frame(current_center).clamp_min(1e-4)
+            ).clamp(0.0, 1.0)
             if (
                 self.observability_output is None
                 or self.action_observability_basis is None
@@ -414,7 +421,7 @@ class FactorizedObjectDynamics(nn.Module):
             ).squeeze(-1)
             lifecycle_prediction = factorized_lifecycle_prediction(
                 current_existence.expand(-1, future_count, -1),
-                current_visibility.expand(-1, future_count, -1),
+                current_visible_presence.expand(-1, future_count, -1),
                 future_centers,
                 lifecycle[..., 0] + action_geometry[..., 4],
                 lifecycle[..., 1] + action_geometry[..., 5],

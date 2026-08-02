@@ -79,9 +79,10 @@ if [[ -n "${TEACHER_SIDECAR}" ]] \
     echo "[object-memory-v41] TEACHER_SIDECAR is invalid" >&2
     exit 2
 fi
+VISIBLE_GPU_COUNT="$("${PY}" -c 'import torch; print(torch.cuda.device_count())')"
 if [[ "${NPROC_PER_NODE}" == "auto" ]]; then
     TORCHRUN_NPROC=gpu
-    RESUME_WORLD_SIZE="$("${PY}" -c 'import torch; print(torch.cuda.device_count())')"
+    RESUME_WORLD_SIZE="${VISIBLE_GPU_COUNT}"
 elif [[ "${NPROC_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
     TORCHRUN_NPROC="${NPROC_PER_NODE}"
     RESUME_WORLD_SIZE="${NPROC_PER_NODE}"
@@ -91,6 +92,10 @@ else
 fi
 if [[ "${RESUME_WORLD_SIZE}" -lt 1 ]]; then
     echo "[object-memory-v41] no visible CUDA GPU" >&2
+    exit 2
+fi
+if [[ "${RESUME_WORLD_SIZE}" -gt "${VISIBLE_GPU_COUNT}" ]]; then
+    echo "[object-memory-v41] requested ${RESUME_WORLD_SIZE} ranks but only ${VISIBLE_GPU_COUNT} GPUs are visible" >&2
     exit 2
 fi
 if [[ "${GRAD_ACCUM}" == "auto" ]]; then

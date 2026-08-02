@@ -11,7 +11,7 @@ def gate_contract_fields(architecture: str) -> dict[str, object]:
             "transport_contract": "support_normalized_relative_transport_v1",
             "lifecycle_contract": "track_presence_discovery_observation_v2",
             "correspondence_temperature": 0.5,
-            "correspondence_sinkhorn_iterations": 32,
+            "correspondence_sinkhorn_iterations": 64,
             "correspondence_dustbin_logit": 0.0,
             "correspondence_residual_scale": 0.1,
         }

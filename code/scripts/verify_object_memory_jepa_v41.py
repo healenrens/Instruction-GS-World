@@ -118,6 +118,17 @@ def main() -> None:
     with torch.no_grad(), amp_context():
         causal = base.verify_v39_causal_paths(model, batch)
     training = base.verify_model_paths(model, batch, amp_context)
+    correspondence_gradients = set(
+        training["representation_correspondence_gradient_parameters"]
+    )
+    required_correspondence_gradients = {
+        "object_memory.correspondence.dustbin_logit",
+        "object_memory.correspondence.residual.3.weight",
+    }
+    base.require(
+        required_correspondence_gradients <= correspondence_gradients,
+        "representation loss does not train correspondence parameters",
+    )
     correspondence_module = model.object_memory.correspondence
     base.require(correspondence_module is not None, "correspondence module is missing")
     base.configure_v28_stage(

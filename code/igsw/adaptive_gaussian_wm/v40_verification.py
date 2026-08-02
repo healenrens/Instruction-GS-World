@@ -124,14 +124,24 @@ def verify_v40_state_contracts(model, batch: dict, amp_context, loss_weights) ->
         device=state.slots.device,
         dtype=state.slots.dtype,
     )
-    predicted = model.object_memory.predict(state, delta_time)
     memory_scale_factor = 1.7
     scaled_state = replace(
         state,
         center=memory_scale_factor * state.center,
         relative_scale=memory_scale_factor * state.relative_scale,
     )
-    scaled_prediction = model.object_memory.predict(scaled_state, delta_time)
+    occluded_observation = replace(
+        state,
+        activity=torch.zeros_like(state.activity),
+    )
+    with amp_context():
+        predicted = model.object_memory.predict(state, delta_time)
+        scaled_prediction = model.object_memory.predict(scaled_state, delta_time)
+        corrected = model.object_memory.correct(
+            predicted,
+            occluded_observation,
+            token_state,
+        )
     memory_transport_scale_equivariance = _difference(
         scaled_prediction.center,
         memory_scale_factor * predicted.center,
@@ -139,15 +149,6 @@ def verify_v40_state_contracts(model, batch: dict, amp_context, loss_weights) ->
     prediction_identity_difference = _difference(
         predicted.identity_key,
         state.identity_key,
-    )
-    occluded_observation = replace(
-        state,
-        activity=torch.zeros_like(state.activity),
-    )
-    corrected = model.object_memory.correct(
-        predicted,
-        occluded_observation,
-        token_state,
     )
     occluded_identity_difference = _difference(
         corrected.identity_key,

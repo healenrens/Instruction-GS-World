@@ -36,7 +36,7 @@ def soft_in_frame(center: torch.Tensor) -> torch.Tensor:
 
 def factorized_lifecycle_prediction(
     current_existence: torch.Tensor,
-    current_visibility: torch.Tensor,
+    current_visible_presence: torch.Tensor,
     future_center: torch.Tensor,
     survival_delta: torch.Tensor,
     birth_delta: torch.Tensor,
@@ -47,7 +47,7 @@ def factorized_lifecycle_prediction(
     expected = future_center.shape[:-1]
     for name, value in (
         ("current_existence", current_existence),
-        ("current_visibility", current_visibility),
+        ("current_visible_presence", current_visible_presence),
         ("survival_delta", survival_delta),
         ("birth_delta", birth_delta),
         ("observability_delta", observability_delta),
@@ -55,7 +55,7 @@ def factorized_lifecycle_prediction(
         if value.shape != expected:
             raise ValueError(f"{name} must have shape {expected}")
     current_existence = current_existence.float().clamp(0.0, 1.0)
-    current_visibility = current_visibility.float().clamp(0.0, 1.0)
+    current_visible_presence = current_visible_presence.float().clamp(0.0, 1.0)
     survival_logits = stable_logit(
         current_existence.new_full((), survival_prior)
     ) + survival_delta.float()
@@ -63,7 +63,7 @@ def factorized_lifecycle_prediction(
         current_existence.new_full((), birth_prior)
     ) + birth_delta.float()
     observed_ratio = (
-        current_visibility / current_existence.clamp_min(1e-4)
+        current_visible_presence / current_existence.clamp_min(1e-4)
     ).clamp(0.05, 0.95)
     conditional_visibility = torch.where(
         current_existence > 1e-3,

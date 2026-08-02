@@ -464,6 +464,7 @@ class AdaptiveGaussianWMConfig:
             architecture="object_memory_v3",
             causal_object_correspondence=True,
             track_presence_semantics=True,
+            correspondence_sinkhorn_iterations=64,
         )
 
     @classmethod
