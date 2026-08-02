@@ -133,9 +133,7 @@ class ObjectMemoryTransition(nn.Module):
             visibility,
         )
         in_frame = torch.maximum(visibility, _inside_frame(geometry.center))
-        identity_key = F.normalize(observation.tracking_slots.float(), dim=-1).to(
-            observation.tracking_slots.dtype
-        )
+        identity_key = F.normalize(observation.tracking_slots.float(), dim=-1)
         object_count = visibility.shape[-1]
         identity = torch.eye(
             object_count,
@@ -263,7 +261,7 @@ class ObjectMemoryTransition(nn.Module):
         )
         observed_identity = F.normalize(
             observation.tracking_slots.float(), dim=-1
-        ).to(observation.tracking_slots.dtype)
+        )
         identity_similarity = (
             association.identity_similarity.to(predicted.identity_key.dtype)
             if association is not None
@@ -318,7 +316,7 @@ class ObjectMemoryTransition(nn.Module):
                 observed_identity.float() - predicted.identity_key.float()
             ),
             dim=-1,
-        ).to(predicted.identity_key.dtype)
+        )
         identity_key = torch.where(
             (update_gate > 0.0)[..., None],
             updated_identity,
