@@ -8,10 +8,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import AdaptiveGaussianWMConfig
-from .relative_geometry import (
-    RelativeGeometryEncoder,
-    pairwise_relative_geometry,
+from .relative_geometry import RelativeGeometryEncoder, pairwise_relative_geometry
+from .object_lifecycle import factorized_lifecycle_prediction, stable_logit
+from .relative_transport import (
+    centers_from_support_transport,
+    temporal_motion_features,
 )
+from .scale import inverse_signed_gap_scale
 
 
 @dataclass
@@ -29,6 +32,15 @@ class FactorizedDynamicsOutput:
     future_relations: torch.Tensor
     base_future_slots: torch.Tensor
     action_slot_residual: torch.Tensor
+    future_transport_units: torch.Tensor | None = None
+    history_motion_features: torch.Tensor | None = None
+    future_survival_logits: torch.Tensor | None = None
+    future_birth_logits: torch.Tensor | None = None
+    future_observability_logits: torch.Tensor | None = None
+    future_survival: torch.Tensor | None = None
+    future_birth: torch.Tensor | None = None
+    future_observability: torch.Tensor | None = None
+    future_in_frame: torch.Tensor | None = None
 
 
 class BiasedDynamicsBlock(nn.Module):
@@ -74,10 +86,6 @@ class BiasedDynamicsBlock(nn.Module):
         return tokens + self.dropout(self.mlp(self.norm_mlp(tokens)))
 
 
-def _stable_logit(value: torch.Tensor) -> torch.Tensor:
-    return torch.logit(value.float().clamp(1e-4, 1.0 - 1e-4))
-
-
 class FactorizedObjectDynamics(nn.Module):
     """Model predictable evolution separately from future-specific effects."""
 
@@ -98,6 +106,15 @@ class FactorizedObjectDynamics(nn.Module):
             nn.SiLU(),
             nn.Linear(dim, dim),
         )
+        self.motion_input = (
+            nn.Sequential(
+                nn.Linear(5, dim),
+                nn.SiLU(),
+                nn.Linear(dim, dim),
+            )
+            if config.relative_transport_dynamics
+            else None
+        )
         self.object_identity = nn.Parameter(
             torch.randn(config.object_slots, dim) / dim**0.5
         )
@@ -116,6 +133,9 @@ class FactorizedObjectDynamics(nn.Module):
         self.base_slot_output = nn.Linear(dim, config.object_dim)
         self.base_geometry_output = nn.Linear(dim, 4)
         self.base_lifecycle_output = nn.Linear(dim, 2)
+        self.observability_output = (
+            nn.Linear(dim, 1) if config.factorized_lifecycle else None
+        )
 
         route_dim = min(256, dim)
         self.routing_query = nn.Linear(config.object_dim, route_dim, bias=False)
@@ -137,12 +157,27 @@ class FactorizedObjectDynamics(nn.Module):
             nn.Linear(dim, 6),
         )
         self.action_geometry_gate = nn.Linear(dim, 6, bias=False)
+        self.action_observability_basis = (
+            nn.Sequential(
+                nn.LayerNorm(dim), nn.Linear(dim, dim), nn.SiLU(), nn.Linear(dim, 1)
+            )
+            if config.factorized_lifecycle
+            else None
+        )
+        self.action_observability_gate = (
+            nn.Linear(dim, 1, bias=False)
+            if config.factorized_lifecycle
+            else None
+        )
         nn.init.normal_(self.base_slot_output.weight, std=1e-3)
         nn.init.zeros_(self.base_slot_output.bias)
         nn.init.zeros_(self.base_geometry_output.weight)
         nn.init.zeros_(self.base_geometry_output.bias)
         nn.init.zeros_(self.base_lifecycle_output.weight)
         nn.init.zeros_(self.base_lifecycle_output.bias)
+        if self.observability_output is not None:
+            nn.init.zeros_(self.observability_output.weight)
+            nn.init.zeros_(self.observability_output.bias)
 
     def _relation_bias(
         self,
@@ -252,6 +287,18 @@ class FactorizedObjectDynamics(nn.Module):
             if history_existence is None
             else history_existence
         )
+        motion_features = None
+        if self.motion_input is not None:
+            motion_features = temporal_motion_features(
+                history_centers,
+                relative_scale,
+                inverse_signed_gap_scale(
+                    history_scale,
+                    self.config.gap_reference,
+                ),
+                existence,
+                history_activity,
+            )
         geometry = torch.cat(
             (
                 history_centers,
@@ -271,6 +318,8 @@ class FactorizedObjectDynamics(nn.Module):
             + identity
             + self.history_type
         )
+        if self.motion_input is not None:
+            history_tokens = history_tokens + self.motion_input(motion_features)
         masked = self.history_mask_token + identity + self.history_type
         history_tokens = torch.where(
             history_mask[..., None], masked, history_tokens
@@ -325,9 +374,20 @@ class FactorizedObjectDynamics(nn.Module):
             self.action_geometry_basis(future_hidden)
         ) * torch.tanh(self.action_geometry_gate(action_hidden))
         current_center = history_centers[:, -1, None]
-        future_centers = current_center + 0.5 * torch.tanh(
-            base_geometry[..., :2] + action_geometry[..., :2]
-        )
+        if self.config.relative_transport_dynamics:
+            future_transport_units = self.config.transport_max_support_units * torch.tanh(
+                base_geometry[..., :2] + action_geometry[..., :2]
+            )
+            future_centers = centers_from_support_transport(
+                current_center,
+                relative_scale[:, -1, None],
+                future_transport_units,
+            )
+        else:
+            future_transport_units = None
+            future_centers = current_center + 0.5 * torch.tanh(
+                base_geometry[..., :2] + action_geometry[..., :2]
+            )
         current_scale = relative_scale[:, -1, None]
         future_relative_scale = current_scale * torch.exp(
             0.25 * torch.tanh(base_geometry[..., 2] + action_geometry[..., 2])
@@ -339,18 +399,47 @@ class FactorizedObjectDynamics(nn.Module):
         lifecycle = self.base_lifecycle_output(future_hidden)
         current_visibility = history_activity[:, -1, None]
         current_existence = existence[:, -1, None]
-        future_visibility_logits = (
-            _stable_logit(current_visibility)
-            + lifecycle[..., 0]
-            + action_geometry[..., 4]
-        )
-        future_existence_logits = (
-            _stable_logit(current_existence)
-            + lifecycle[..., 1]
-            + action_geometry[..., 5]
-        )
-        future_visibility = torch.sigmoid(future_visibility_logits)
-        future_existence = torch.sigmoid(future_existence_logits)
+        lifecycle_prediction = None
+        if self.config.factorized_lifecycle:
+            if (
+                self.observability_output is None
+                or self.action_observability_basis is None
+                or self.action_observability_gate is None
+            ):
+                raise ValueError("factorized lifecycle modules are incomplete")
+            action_observability = torch.tanh(
+                self.action_observability_basis(future_hidden)
+            ).squeeze(-1) * torch.tanh(
+                self.action_observability_gate(action_hidden)
+            ).squeeze(-1)
+            lifecycle_prediction = factorized_lifecycle_prediction(
+                current_existence.expand(-1, future_count, -1),
+                current_visibility.expand(-1, future_count, -1),
+                future_centers,
+                lifecycle[..., 0] + action_geometry[..., 4],
+                lifecycle[..., 1] + action_geometry[..., 5],
+                self.observability_output(future_hidden).squeeze(-1)
+                + action_observability,
+                self.config.lifecycle_survival_prior,
+                self.config.lifecycle_birth_prior,
+            )
+            future_visibility_logits = lifecycle_prediction.visibility_logits
+            future_existence_logits = lifecycle_prediction.existence_logits
+            future_visibility = lifecycle_prediction.visibility
+            future_existence = lifecycle_prediction.existence
+        else:
+            future_visibility_logits = (
+                stable_logit(current_visibility)
+                + lifecycle[..., 0]
+                + action_geometry[..., 4]
+            )
+            future_existence_logits = (
+                stable_logit(current_existence)
+                + lifecycle[..., 1]
+                + action_geometry[..., 5]
+            )
+            future_visibility = torch.sigmoid(future_visibility_logits)
+            future_existence = torch.sigmoid(future_existence_logits)
         future_relations = pairwise_relative_geometry(
             future_centers,
             future_relative_scale,
@@ -371,4 +460,39 @@ class FactorizedObjectDynamics(nn.Module):
             future_relations=future_relations,
             base_future_slots=base_future,
             action_slot_residual=action_slot_residual,
+            future_transport_units=future_transport_units,
+            history_motion_features=motion_features,
+            future_survival_logits=(
+                lifecycle_prediction.survival_logits
+                if lifecycle_prediction is not None
+                else None
+            ),
+            future_birth_logits=(
+                lifecycle_prediction.birth_logits
+                if lifecycle_prediction is not None
+                else None
+            ),
+            future_observability_logits=(
+                lifecycle_prediction.observability_logits
+                if lifecycle_prediction is not None
+                else None
+            ),
+            future_survival=(
+                lifecycle_prediction.survival
+                if lifecycle_prediction is not None
+                else None
+            ),
+            future_birth=(
+                lifecycle_prediction.birth if lifecycle_prediction is not None else None
+            ),
+            future_observability=(
+                lifecycle_prediction.observability
+                if lifecycle_prediction is not None
+                else None
+            ),
+            future_in_frame=(
+                lifecycle_prediction.in_frame
+                if lifecycle_prediction is not None
+                else None
+            ),
         )

@@ -291,9 +291,16 @@ def adaptive_world_model_loss(
     future_object_feature = (
         future_feature_alignment + 2.0 * future_feature_change
     )
-    future = 0.5 * future_latent + 2.0 * future_object_feature + (
-        5.0 if model.config.learned_velocity_baseline else 1.0
-    ) * future_center
+    center_weight = (
+        0.0
+        if model.config.relative_transport_dynamics
+        else 5.0 if model.config.learned_velocity_baseline else 1.0
+    )
+    future = (
+        0.5 * future_latent
+        + 2.0 * future_object_feature
+        + center_weight * future_center
+    )
     zero_alignment = object_latent_loss(
         output["zero_action_future_slots"],
         output["target_future_slots"],

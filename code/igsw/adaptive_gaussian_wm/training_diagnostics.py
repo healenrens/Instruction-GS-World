@@ -13,6 +13,7 @@ from .diagnostic_statistics import correlation_moments, ratio_moments
 from .dense_readout_diagnostics import dense_object_readout_diagnostics
 from .dual_horizon_diagnostics import dual_horizon_effect_diagnostics
 from .jepa_losses import object_change_loss, object_latent_loss, weighted_mean
+from .lifecycle_transport_diagnostics import lifecycle_transport_diagnostics
 from .readout_diagnostics import gaussian_readout_diagnostics
 
 
@@ -66,7 +67,11 @@ def _object_prediction_terms(
         )
     else:
         center = slots.new_zeros((), dtype=torch.float32)
-    center_weight = 5.0 if model.config.learned_velocity_baseline else 1.0
+    center_weight = (
+        0.0
+        if model.config.relative_transport_dynamics
+        else 5.0 if model.config.learned_velocity_baseline else 1.0
+    )
     return {
         "latent": latent,
         "object_feature": object_feature,
@@ -387,7 +392,7 @@ def object_memory_training_diagnostics(
     geometry_parts: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
     """Measure predictive gains and memory behavior without changing gradients."""
-    if model.config.architecture != "object_memory_v1":
+    if model.config.architecture not in ("object_memory_v1", "object_memory_v2"):
         return {}
     persistence = _persistence_tensors(output)
     loss_coverage = output["feature_loss_coverage"]
@@ -451,6 +456,8 @@ def object_memory_training_diagnostics(
     )
     result.update(_geometry_persistence_diagnostics(output, geometry_parts))
     result.update(_lifecycle_diagnostics(output))
+    if model.config.architecture == "object_memory_v2":
+        result.update(lifecycle_transport_diagnostics(output))
     result.update(_token_diagnostics(output, batch))
     result.update(_horizon_diagnostics(model, batch, output, persistence))
     result.update(dual_horizon_effect_diagnostics(batch, output))

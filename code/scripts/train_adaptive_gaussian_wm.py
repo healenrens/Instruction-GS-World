@@ -62,6 +62,7 @@ from igsw.adaptive_gaussian_wm.v28_training import (  # noqa: E402
     validate_v28_arguments,
     validate_v28_gate,
     validate_v28_initialization,
+    validate_v28_warm_start_report,
 )
 from igsw.distributed import assert_same_paths, init_torchrun  # noqa: E402
 
@@ -316,11 +317,7 @@ def main() -> None:
         )
         validate_v28_initialization(init_checkpoint, args)
         warm_start_report = warm_start_model(model, init_checkpoint)
-        if is_v28(args) and any(
-            warm_start_report[name]
-            for name in ("missing", "unexpected", "shape_mismatch")
-        ):
-            raise ValueError("v39 warm start must load the complete model state")
+        validate_v28_warm_start_report(warm_start_report, args)
         if context.is_main:
             report_path = os.path.join(args.out, "warm_start_report.json")
             with open(report_path, "w", encoding="utf-8") as handle:

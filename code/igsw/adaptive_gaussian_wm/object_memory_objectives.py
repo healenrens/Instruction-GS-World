@@ -5,6 +5,9 @@ import torch
 import torch.nn.functional as F
 
 from .jepa_losses import weighted_mean
+from .object_identity import persistent_identity_loss
+from .object_lifecycle import object_lifecycle_loss
+from .relative_transport import relative_transport_loss
 
 
 def object_memory_geometry_loss(
@@ -44,24 +47,38 @@ def object_memory_geometry_loss(
         activity.unsqueeze(-1) * activity.unsqueeze(-2)
     )
     relations = weighted_mean(relation_error, pair_weight)
-    predicted_existence_logits = output.get("predicted_future_existence_logits")
-    if predicted_existence_logits is None:
+    if output.get("predicted_future_existence_logits") is None:
         raise ValueError("factorized Dynamics has no existence logits")
-    existence = weighted_mean(
-        F.binary_cross_entropy_with_logits(
-            predicted_existence_logits,
-            output["target_future_existence"].detach(),
-            reduction="none",
-        ),
-        output["future_horizon_valid"][..., None],
-    )
+    factorized_lifecycle = "predicted_future_survival_logits" in output
+    if factorized_lifecycle:
+        gamma = float(output.get("lifecycle_focal_gamma", 2.0))
+        lifecycle, lifecycle_parts = object_lifecycle_loss(output, gamma)
+        transport, transport_parts = relative_transport_loss(output)
+        identity, identity_parts = persistent_identity_loss(output)
+    else:
+        existence = weighted_mean(
+            F.binary_cross_entropy_with_logits(
+                output["predicted_future_existence_logits"],
+                output["target_future_existence"].detach(),
+                reduction="none",
+            ),
+            output["future_horizon_valid"][..., None],
+        )
+        lifecycle = 0.5 * existence
+        lifecycle_parts = {"geometry_existence": existence}
+        transport = reference
+        transport_parts = {}
+        identity = reference
+        identity_parts = {}
     teacher, teacher_parts = teacher_sidecar_loss(output, batch, reference)
-    total = scale + relations + 0.5 * existence + teacher
+    total = scale + relations + lifecycle + transport + 0.1 * identity + teacher
     parts = {
         "geometry_relative_scale": scale,
         "geometry_image_plane_relations": relations,
-        "geometry_existence": existence,
     }
+    parts.update(lifecycle_parts)
+    parts.update(transport_parts)
+    parts.update(identity_parts)
     parts.update(teacher_parts)
     return total, parts
 

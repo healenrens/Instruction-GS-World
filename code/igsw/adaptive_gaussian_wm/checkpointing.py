@@ -1,17 +1,13 @@
 """Strict resume and explicit warm-start handling for adaptive WM checkpoints."""
-
 from __future__ import annotations
-
 import json
 import os
 import random
-
 import torch
 import torch.distributed as dist
 
-CHECKPOINT_VERSION = 39
-
-
+from .v40_warm_start import record_v40_transform
+CHECKPOINT_VERSION = 40
 def collect_rng_states(context) -> list[dict]:
     device = torch.device(context.device)
     local_state = {
@@ -28,8 +24,6 @@ def collect_rng_states(context) -> list[dict]:
     if any(state is None for state in states):
         raise RuntimeError("failed to gather RNG state from every rank")
     return [state for state in states if state is not None]
-
-
 def restore_rng_state(checkpoint: dict, context) -> None:
     states = checkpoint["rng_states"]
     if len(states) != context.world_size:
@@ -453,6 +447,11 @@ def warm_start_model(model, checkpoint: dict) -> dict:
                 "source": list(value.shape),
                 "target": list(target[name].shape),
             }
+        elif record_v40_transform(
+            name, value, target[name], source_config, model.config,
+            compatible, transformed,
+        ):
+            continue
         elif rgb_semantics_changed and name in semantic_input_weights:
             output = value.clone()
             output[:, 3:6] = target[name][:, 3:6]

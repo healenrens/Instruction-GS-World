@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
-import hashlib
 import json
 import math
 import os
@@ -15,7 +14,6 @@ import sys
 import torch
 import torch.nn.functional as F
 from torch.utils.data import default_collate
-
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
@@ -37,13 +35,16 @@ from igsw.adaptive_gaussian_wm.sequence_contract import (  # noqa: E402
     EPISODE_MANIFEST_NAME,
     EPISODE_VERIFIED_NAME,
 )
-
-
+from igsw.adaptive_gaussian_wm.v40_held_metrics import (  # noqa: E402
+    add_v40_held_metrics,
+    v40_acceptance,
+)
+EXPECTED_CHECKPOINT_VERSION = 39
+EXPECTED_ARCHITECTURE = "object_memory_v1"
+HELD_CONTRACT_PREFIX = "object_memory_v39"
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True)
@@ -75,14 +76,6 @@ def parse_args() -> argparse.Namespace:
     require(args.max_items >= args.batch >= 2, "evaluation needs at least one batch")
     require(args.prior_samples > 0, "prior sample count must be positive")
     return args
-
-
-def file_digest(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(16 * 1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 class Metrics:
@@ -140,7 +133,10 @@ def load_model(args, dataset, device: torch.device):
     checkpoint = torch.load(
         args.checkpoint, map_location="cpu", weights_only=False, mmap=True
     )
-    require(checkpoint.get("checkpoint_version") == 39, "checkpoint is not v39")
+    require(
+        checkpoint.get("checkpoint_version") == EXPECTED_CHECKPOINT_VERSION,
+        "checkpoint version differs",
+    )
     require(checkpoint.get("phase") == args.stage, "checkpoint stage differs")
     saved = checkpoint.get("args", {})
     expected_contract = {
@@ -176,6 +172,7 @@ def load_model(args, dataset, device: torch.device):
         "promotion requires a completed stage checkpoint",
     )
     config = AdaptiveGaussianWMConfig(**checkpoint["config"])
+    require(config.architecture == EXPECTED_ARCHITECTURE, "architecture differs")
     require(
         config.feature_dim == dataset.feature_dim,
         "checkpoint feature dimension differs",
@@ -335,6 +332,8 @@ def evaluate(args, model, dataset, runtime, device, amp_context) -> dict:
                 metrics, args.stage, history_length, result, batch
             )
             metrics.add("goal_valid", goal_valid.float())
+            if model.config.architecture == "object_memory_v2":
+                add_v40_held_metrics(metrics, history_length, result)
             if args.stage == "posterior":
                 shuffled_actions = cross_episode_shuffle(
                     result["posterior_actions"], batch["sequence_index"]
@@ -392,6 +391,8 @@ def acceptance(stage: str, means: dict, minimum_shuffle: float) -> dict[str, boo
                 >= means["posterior/all/goal_rollout"] * (1.0 + minimum_shuffle)
             ),
         )
+    if any(name.startswith("v40/") for name in means):
+        checks.update(v40_acceptance(stage, means))
     return checks
 
 
@@ -457,7 +458,7 @@ def main() -> None:
     manifest_path = os.path.join(args.data, EPISODE_MANIFEST_NAME)
     report = {
         "status": "passed" if passed else "failed",
-        "contract": f"object_memory_v39_{args.stage}_held_v1",
+        "contract": f"{HELD_CONTRACT_PREFIX}_{args.stage}_held_v1",
         "git_commit": commit,
         "data": os.path.abspath(args.data),
         "data_manifest_sha256": file_sha256(manifest_path),
@@ -471,7 +472,7 @@ def main() -> None:
         "goal_probe_frames": args.goal_probe_frames,
         "goal_stability_threshold": args.goal_stability_threshold,
         "source_checkpoint": os.path.realpath(args.checkpoint),
-        "source_checkpoint_sha256": file_digest(args.checkpoint),
+        "source_checkpoint_sha256": file_sha256(args.checkpoint),
         "source_checkpoint_phase_step": checkpoint["phase_step"],
         "prior_samples": args.prior_samples if args.stage == "prior" else 0,
         "evaluation_seed": args.seed,

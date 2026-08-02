@@ -36,6 +36,7 @@ class ObjectSlotAggregator(nn.Module):
         self.aggregation_mode = config.aggregation_mode
         self.auxiliary_enabled = config.slot_auxiliary
         self.decoupled_jepa_slots = config.decoupled_jepa_slots
+        self.persistent_identity_key = config.persistent_identity_key
         self.use_background_dustbin = config.persistent_object_memory
         self.center_auxiliary_enabled = config.slot_auxiliary
         self.feature_dim = config.feature_dim
@@ -69,6 +70,13 @@ class ObjectSlotAggregator(nn.Module):
         self.key = nn.Linear(dim, dim, bias=False)
         self.value = nn.Linear(dim, dim, bias=False)
         self.query = nn.Linear(dim, dim, bias=False)
+        self.identity_anchor_projection = (
+            nn.Linear(dim, dim, bias=False)
+            if self.persistent_identity_key
+            else None
+        )
+        if self.identity_anchor_projection is not None:
+            nn.init.zeros_(self.identity_anchor_projection.weight)
         self.background_score = (
             nn.Linear(dim, 1)
             if self.use_background_dustbin
@@ -169,6 +177,7 @@ class ObjectSlotAggregator(nn.Module):
         tokens: GPSTokenState,
         anchor_slots: torch.Tensor | None = None,
         anchor_centers: torch.Tensor | None = None,
+        anchor_identity: torch.Tensor | None = None,
     ) -> ObjectSlotState:
         covariance = torch.stack(
             (
@@ -198,6 +207,8 @@ class ObjectSlotAggregator(nn.Module):
         pooled = (values * active[..., None]).sum(dim=1)
         pooled = pooled / active.sum(dim=1, keepdim=True).clamp_min(1e-6)
         if anchor_slots is None:
+            if anchor_identity is not None:
+                raise ValueError("anchor identity requires tracking slots")
             slots = self.initial_slots[None].expand(batch, -1, -1)
         else:
             expected = (batch, self.initial_slots.shape[0], dim)
@@ -206,6 +217,14 @@ class ObjectSlotAggregator(nn.Module):
                     f"anchor_slots must have shape {expected}, got {anchor_slots.shape}"
                 )
             slots = anchor_slots
+            if anchor_identity is not None:
+                if self.identity_anchor_projection is None:
+                    raise ValueError("identity anchor is disabled")
+                if anchor_identity.shape != expected:
+                    raise ValueError(
+                        f"anchor_identity must have shape {expected}"
+                    )
+                slots = slots + self.identity_anchor_projection(anchor_identity)
         slots = slots + 0.1 * self.context_update(pooled)[:, None]
         slot_centers = None
         if self.initial_slot_centers is not None:

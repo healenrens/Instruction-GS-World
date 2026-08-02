@@ -18,10 +18,13 @@ def build_config(
         "probe": AdaptiveGaussianWMConfig.probe,
         "full": AdaptiveGaussianWMConfig.full,
     }
-    constructor = (
-        AdaptiveGaussianWMConfig.object_memory_full
-        if args.architecture == "object_memory_v1"
-        else constructors[profile]
+    object_memory_constructors = {
+        "object_memory_v1": AdaptiveGaussianWMConfig.object_memory_full,
+        "object_memory_v2": AdaptiveGaussianWMConfig.object_memory_lifecycle_full,
+    }
+    constructor = object_memory_constructors.get(
+        args.architecture,
+        constructors[profile],
     )
     return replace(
         constructor(feature_dim),
@@ -45,7 +48,7 @@ def apply_architecture_args(
     args,
 ) -> AdaptiveGaussianWMConfig:
     overrides = {}
-    if args.architecture == "object_memory_v1":
+    if args.architecture in ("object_memory_v1", "object_memory_v2"):
         overrides.update(
             gaussian_children=args.gaussian_children,
             hierarchical_gaussian_carrier=args.gaussian_children > 1,

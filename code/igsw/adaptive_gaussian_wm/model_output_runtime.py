@@ -80,9 +80,13 @@ def assemble_model_output(
         "online_history_relative_scale": history.get("relative_scale"),
         "online_history_relative_disparity": history.get("relative_disparity"),
         "online_history_relations": history.get("relations"),
+        "online_history_identity_keys": history.get("identity_key"),
+        "online_history_identity_similarity": history.get("identity_similarity"),
         "online_history_object_features": torch.stack(
             [state.decoded_feature for state in history["slot_states"]], dim=1
         ),
+        "target_history_identity_keys": target_history.get("identity_key"),
+        "target_future_identity_keys": target_future.get("identity_key"),
         "posterior_actions": effects.posterior,
         "hierarchical_effects": effects.selected,
         "dynamics_actions": effects.dynamics,
@@ -92,6 +96,8 @@ def assemble_model_output(
         "history_token_states": history["token_states"],
         "history_slot_states": history["slot_states"],
         "dual_horizon": model.config.dual_horizon_dynamics,
+        "lifecycle_focal_gamma": model.config.lifecycle_focal_gamma,
+        "transport_max_support_units": model.config.transport_max_support_units,
         **readout_fields,
         **rgb_fields,
     }

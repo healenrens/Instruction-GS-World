@@ -1,5 +1,4 @@
-"""Strict training and launch contracts for Object Memory JEPA v39."""
-
+"""Strict staged-training contracts for Object Memory JEPA."""
 from __future__ import annotations
 
 import json
@@ -9,21 +8,23 @@ import subprocess
 import torch
 
 from .checkpointing import CHECKPOINT_VERSION
-from .dense_readout_contracts import (
-    file_sha256,
-)
+from .dense_readout_contracts import file_sha256
 from .loss_weights import AdaptiveGaussianLossWeights
 from .v39_stage_contracts import validate_v39_initialization
+from .v40_stage_contracts import (
+    validate_v40_initialization,
+    validate_v40_warm_start_report,
+)
 
 
 ARCHITECTURE = "object_memory_v1"
+LIFECYCLE_ARCHITECTURE = "object_memory_v2"
+OBJECT_MEMORY_ARCHITECTURES = (ARCHITECTURE, LIFECYCLE_ARCHITECTURE)
 DEFAULT_TARGET_GLOBAL_BATCH = 256
-
-
 def add_v28_arguments(parser) -> None:
     parser.add_argument(
         "--architecture",
-        choices=("legacy", ARCHITECTURE),
+        choices=("legacy", *OBJECT_MEMORY_ARCHITECTURES),
         default="legacy",
     )
     parser.add_argument(
@@ -68,12 +69,23 @@ def add_v28_arguments(parser) -> None:
 
 
 def is_v28(args) -> bool:
-    return args.architecture == ARCHITECTURE
+    return args.architecture in OBJECT_MEMORY_ARCHITECTURES
 
 
 def validate_v28_initialization(checkpoint: dict, args) -> None:
-    if is_v28(args):
+    if args.architecture == LIFECYCLE_ARCHITECTURE:
+        validate_v40_initialization(checkpoint, args)
+    elif args.architecture == ARCHITECTURE:
         validate_v39_initialization(checkpoint, args)
+
+
+def validate_v28_warm_start_report(report: dict, args) -> None:
+    if args.architecture == LIFECYCLE_ARCHITECTURE:
+        validate_v40_warm_start_report(report, args)
+    elif args.architecture == ARCHITECTURE and any(
+        report[name] for name in ("missing", "unexpected", "shape_mismatch")
+    ):
+        raise ValueError("v39 warm start must load the complete model state")
 
 
 def resolve_v28_gradient_accumulation(args, world_size: int) -> None:
@@ -216,7 +228,7 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         raise ValueError("v39 training rejects tracked worktree changes")
     expected = {
         "status": "passed",
-        "architecture": ARCHITECTURE,
+        "architecture": args.architecture,
         "checkpoint_version": CHECKPOINT_VERSION,
         "checkpoint_contract": "rolling_recovery_v1",
         "readout_backend": "change_only_object_residual",
@@ -239,6 +251,12 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         "data_manifest_sha256": dataset.data_sha256,
         "teacher_sidecar_sha256": getattr(dataset, "teacher_sidecar_sha256", ""),
     }
+    if args.architecture == LIFECYCLE_ARCHITECTURE:
+        expected.update(
+            identity_contract="persistent_identity_key_v1",
+            transport_contract="support_normalized_relative_transport_v1",
+            lifecycle_contract="survival_birth_observability_v1",
+        )
     mismatch = {
         name: {"gate": report.get(name), "current": value}
         for name, value in expected.items()
@@ -266,7 +284,7 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
 
 def _action_modules(model) -> tuple:
     dynamics = model.dynamics
-    return (
+    modules = (
         model.latent_actions.posterior,
         model.latent_actions.effect_head,
         dynamics.routing_query,
@@ -275,8 +293,11 @@ def _action_modules(model) -> tuple:
         dynamics.action_slot_gate,
         dynamics.action_geometry_basis,
         dynamics.action_geometry_gate,
+        dynamics.action_observability_basis,
+        dynamics.action_observability_gate,
         model.effect_composer,
     )
+    return tuple(module for module in modules if module is not None)
 
 
 def configure_v28_stage(model, args) -> None:
@@ -383,7 +404,11 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "checkpoint_contract": "rolling_recovery_v1",
         "architecture": args.architecture,
         "training_stage": args.training_stage,
-        "diagnostics_contract": "dynamic_dual_horizon_training_v1",
+        "diagnostics_contract": (
+            "object_lifecycle_transport_training_v1"
+            if args.architecture == LIFECYCLE_ARCHITECTURE
+            else "dynamic_dual_horizon_training_v1"
+        ),
         "language_condition": "off",
         "rgb_supervision": "off",
         "latent_action_shape": [4, 32],
@@ -414,6 +439,21 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "carrier_compact_weight": args.carrier_compact_weight,
         "gaussian_children": args.gaussian_children,
         "readout_backend": "change_only_object_residual",
+        "identity_contract": (
+            "persistent_identity_key_v1"
+            if args.architecture == LIFECYCLE_ARCHITECTURE
+            else "disabled"
+        ),
+        "transport_contract": (
+            "support_normalized_relative_transport_v1"
+            if args.architecture == LIFECYCLE_ARCHITECTURE
+            else "absolute_center_residual"
+        ),
+        "lifecycle_contract": (
+            "survival_birth_observability_v1"
+            if args.architecture == LIFECYCLE_ARCHITECTURE
+            else "joint_existence_visibility"
+        ),
         "basis_gate_report": (
             os.path.abspath(args.basis_gate_report) if args.basis_gate_report else ""
         ),

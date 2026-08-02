@@ -62,6 +62,8 @@ def _stack_states(
             "in_frame",
             "visibility",
             "update_gate",
+            "identity_key",
+            "identity_similarity",
         ):
             result[name] = torch.stack(
                 [getattr(state, name) for state in memory_states],
@@ -126,6 +128,7 @@ def encode_visual_sequence(
                 token_state,
                 predicted.tracking_slots,
                 predicted.center,
+                predicted.identity_key if memory.persistent_identity_key else None,
             )
             slot_state = memory.correct(predicted, observation, token_state)
         token_states.append(token_state)

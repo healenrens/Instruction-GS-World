@@ -1,7 +1,9 @@
 """Configuration for the adaptive GPSToken object-latent world model."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+
+from .config_validation import validate_action_and_prior_contracts
 
 
 @dataclass
@@ -110,6 +112,14 @@ class AdaptiveGaussianWMConfig:
     dual_horizon_dynamics: bool = False
     goal_rollout_weight: float = 1.0
     path_consistency_weight: float = 0.25
+    persistent_identity_key: bool = False
+    identity_memory_update_rate: float = 0.1
+    relative_transport_dynamics: bool = False
+    transport_max_support_units: float = 4.0
+    factorized_lifecycle: bool = False
+    lifecycle_survival_prior: float = 0.98
+    lifecycle_birth_prior: float = 0.02
+    lifecycle_focal_gamma: float = 2.0
 
     def __post_init__(self) -> None:
         positive = {
@@ -139,8 +149,14 @@ class AdaptiveGaussianWMConfig:
                 raise ValueError(f"{name} must be positive, got {value}")
         if self.model_dim % self.heads:
             raise ValueError("model_dim must be divisible by heads")
-        if self.architecture not in ("legacy", "object_memory_v1"):
-            raise ValueError("architecture must be legacy or object_memory_v1")
+        if self.architecture not in (
+            "legacy",
+            "object_memory_v1",
+            "object_memory_v2",
+        ):
+            raise ValueError(
+                "architecture must be legacy, object_memory_v1, or object_memory_v2"
+            )
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
         if self.gap_reference <= 0.0:
@@ -171,6 +187,18 @@ class AdaptiveGaussianWMConfig:
             )
         if self.memory_motion_scale <= 0.0:
             raise ValueError("memory_motion_scale must be positive")
+        if not 0.0 < self.identity_memory_update_rate <= 1.0:
+            raise ValueError("identity_memory_update_rate must be in (0, 1]")
+        if self.transport_max_support_units <= 0.0:
+            raise ValueError("transport_max_support_units must be positive")
+        for name, value in (
+            ("lifecycle_survival_prior", self.lifecycle_survival_prior),
+            ("lifecycle_birth_prior", self.lifecycle_birth_prior),
+        ):
+            if not 0.0 < value < 1.0:
+                raise ValueError(f"{name} must be in (0, 1)")
+        if self.lifecycle_focal_gamma < 0.0:
+            raise ValueError("lifecycle_focal_gamma must be non-negative")
         if self.prior_effect_weight < 0.0:
             raise ValueError("prior_effect_weight must be non-negative")
         if self.flow_source_scale <= 0.0:
@@ -195,103 +223,7 @@ class AdaptiveGaussianWMConfig:
             raise ValueError("density_mode must be legacy, adaptive, or fixed")
         if not 0.0 < self.fixed_token_fraction < 1.0:
             raise ValueError("fixed_token_fraction must be in (0, 1)")
-        if self.object_aligned_actions and self.action_tokens != self.object_slots:
-            raise ValueError(
-                "object-aligned actions require action_tokens == object_slots"
-            )
-        if self.object_aligned_actions and not self.structured_action:
-            raise ValueError("object-aligned actions require structured_action")
-        if self.prior_query_residual and not self.structured_action:
-            raise ValueError("prior query residual requires structured_action")
-        if self.decoupled_jepa_slots and (
-            self.slot_geometry_fusion
-            or self.slot_center_fusion
-            or self.slot_feature_fusion
-        ):
-            raise ValueError("decoupled JEPA slots cannot use slot fusion")
-        if self.kinematic_action_modulation and not self.decoupled_jepa_slots:
-            raise ValueError("kinematic action modulation requires decoupled slots")
-        if self.learned_velocity_baseline and not self.kinematic_action_modulation:
-            raise ValueError("learned velocity baseline requires kinematic modulation")
-        if self.canonical_center_action and not self.center_conditioned_posterior:
-            raise ValueError(
-                "canonical center action requires a center-conditioned posterior"
-            )
-        if not 0.0 < self.canonical_center_gate <= 1.0:
-            raise ValueError("canonical center gate must be in (0, 1]")
-        if not self.canonical_center_action and self.canonical_center_gate != 1.0:
-            raise ValueError("canonical center gate requires center actions")
-        if self.canonical_semantic_action and (
-            not self.canonical_center_action or self.action_dim < 6
-        ):
-            raise ValueError(
-                "canonical semantic action requires center action and action_dim >= 6"
-            )
-        if self.canonical_activity_gate and (
-            not self.canonical_semantic_action or not self.object_aligned_actions
-        ):
-            raise ValueError(
-                "canonical activity gate requires object-aligned semantic actions"
-            )
-        if self.canonical_activity_power <= 0.0:
-            raise ValueError("canonical activity power must be positive")
-        if not self.canonical_activity_gate and self.canonical_activity_power != 0.5:
-            raise ValueError("canonical activity power requires its gate")
-        if self.learned_semantic_action_basis and not self.canonical_semantic_action:
-            raise ValueError("learned semantic basis requires semantic actions")
-        if self.rgb_semantic_action and (
-            not self.canonical_semantic_action
-            or not self.object_aligned_actions
-            or not self.rgb_supervision
-        ):
-            raise ValueError(
-                "RGB semantic actions require object alignment and RGB supervision"
-            )
-        if self.rgb_semantic_action and self.learned_semantic_action_basis:
-            raise ValueError("RGB semantic actions cannot use a slot basis")
-        if self.semantic_action_basis_weight < 0.0:
-            raise ValueError("semantic action basis weight must be non-negative")
-        if self.learned_semantic_action_basis != (
-            self.semantic_action_basis_weight > 0.0
-        ):
-            raise ValueError("learned semantic basis requires a positive weight")
-        if self.bounded_residual_action and (
-            not self.object_aligned_actions
-            or not self.canonical_semantic_action
-        ):
-            raise ValueError(
-                "bounded action embedding requires canonical Object-Slot actions"
-            )
-        if not 0.0 < self.action_residual_gate <= 1.0:
-            raise ValueError("action_residual_gate must be in (0, 1]")
-        if not self.bounded_residual_action and self.action_residual_gate != 1.0:
-            raise ValueError("residual gate requires bounded residual action")
-        if self.action_residual_dim == 0 and self.action_residual_gate != 1.0:
-            raise ValueError("canonical-only actions cannot gate a residual")
-        if not 0.0 <= self.action_residual_dropout < 1.0:
-            raise ValueError("action_residual_dropout must be in [0, 1)")
-        if self.action_residual_dropout and not self.bounded_residual_action:
-            raise ValueError("residual dropout requires bounded residual action")
-        if self.action_residual_dropout and self.action_residual_dim == 0:
-            raise ValueError("canonical-only actions cannot drop a residual")
-        if self.mode_set_prior and self.flow_source_components < 2:
-            raise ValueError("mode-set prior requires at least two components")
-        if self.mode_set_geometry_weight < 0.0:
-            raise ValueError("mode-set geometry weight must be non-negative")
-        if self.mode_set_normalize_prototypes and not self.mode_set_prior:
-            raise ValueError("prototype normalization requires a mode-set prior")
-        if self.mode_set_normalize_prototypes and not self.normalize_posterior:
-            raise ValueError(
-                "prototype normalization requires a normalized posterior"
-            )
-        if self.mode_set_transformer and not self.mode_set_prior:
-            raise ValueError("mode-set transformer requires a mode-set prior")
-        if self.mode_set_transformer and self.flow_hidden_dim % self.heads:
-            raise ValueError(
-                "mode-set transformer hidden dimension must divide into heads"
-            )
-        if self.mode_set_global_codebook and not self.mode_set_prior:
-            raise ValueError("global codebook requires a mode-set prior")
+        validate_action_and_prior_contracts(self)
         if self.condition_dim < 0:
             raise ValueError("condition_dim must be non-negative")
         if self.rgb_short_side < 16:
@@ -320,7 +252,7 @@ class AdaptiveGaussianWMConfig:
             raise ValueError(
                 "persistent object memory and relative geometry must be enabled together"
             )
-        if self.architecture == "object_memory_v1":
+        if self.architecture in ("object_memory_v1", "object_memory_v2"):
             if not self.persistent_object_memory or not self.hard_token_gate:
                 raise ValueError(
                     "object_memory_v1 requires persistent memory and hard token gates"
@@ -354,8 +286,21 @@ class AdaptiveGaussianWMConfig:
                 )
             ):
                 raise ValueError("object_memory_v1 forbids explicit action anchors")
-        if self.dual_horizon_dynamics and self.architecture != "object_memory_v1":
-            raise ValueError("dual-horizon Dynamics requires object_memory_v1")
+        if self.architecture == "object_memory_v2" and not all(
+            (
+                self.persistent_identity_key,
+                self.relative_transport_dynamics,
+                self.factorized_lifecycle,
+            )
+        ):
+            raise ValueError(
+                "object_memory_v2 requires identity, relative transport, and lifecycle"
+            )
+        if self.dual_horizon_dynamics and self.architecture not in (
+            "object_memory_v1",
+            "object_memory_v2",
+        ):
+            raise ValueError("dual-horizon Dynamics requires Object Memory")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -462,6 +407,19 @@ class AdaptiveGaussianWMConfig:
             explicit_background_state=True,
             change_residual_readout=True,
             change_readout_dim=256,
+        )
+
+    @classmethod
+    def object_memory_lifecycle_full(
+        cls,
+        feature_dim: int,
+    ) -> "AdaptiveGaussianWMConfig":
+        return replace(
+            cls.object_memory_full(feature_dim),
+            architecture="object_memory_v2",
+            persistent_identity_key=True,
+            relative_transport_dynamics=True,
+            factorized_lifecycle=True,
         )
 
     @classmethod

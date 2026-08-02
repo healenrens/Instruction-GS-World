@@ -225,10 +225,9 @@ def rollout_goal_prediction(
     condition: torch.Tensor | None,
 ) -> dict[str, torch.Tensor]:
     short_slots = direct_output.future_slots[:, :1]
-    short_activity = (
-        direct_output.future_visibility[:, :1]
-        * direct_output.future_existence[:, :1]
-    )
+    short_activity = direct_output.future_visibility[:, :1]
+    if not model.config.factorized_lifecycle:
+        short_activity = short_activity * direct_output.future_existence[:, :1]
     history_scale = torch.zeros_like(effects.effect_scale[:, :1])
     mask = torch.zeros_like(short_activity, dtype=torch.bool)
     rollout = run_object_dynamics(

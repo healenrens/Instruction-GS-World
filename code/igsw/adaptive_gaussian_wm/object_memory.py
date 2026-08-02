@@ -39,6 +39,8 @@ class ObjectMemoryState:
     in_frame: torch.Tensor
     visibility: torch.Tensor
     update_gate: torch.Tensor
+    identity_key: torch.Tensor
+    identity_similarity: torch.Tensor
 
 
 @dataclass
@@ -53,6 +55,7 @@ class PredictedObjectMemory:
     relations: torch.Tensor
     existence: torch.Tensor
     in_frame: torch.Tensor
+    identity_key: torch.Tensor
 
 
 def _inside_frame(center: torch.Tensor) -> torch.Tensor:
@@ -67,6 +70,8 @@ class ObjectMemoryTransition(nn.Module):
         super().__init__()
         dim = config.object_dim
         self.motion_scale = config.memory_motion_scale
+        self.identity_update_rate = config.identity_memory_update_rate
+        self.persistent_identity_key = config.persistent_identity_key
         self.geometry = RelativeGeometryEncoder(config)
         self.time_input = nn.Sequential(
             nn.Linear(3, dim),
@@ -111,6 +116,9 @@ class ObjectMemoryTransition(nn.Module):
             visibility,
         )
         in_frame = torch.maximum(visibility, _inside_frame(geometry.center))
+        identity_key = F.normalize(observation.tracking_slots.float(), dim=-1).to(
+            observation.tracking_slots.dtype
+        )
         return ObjectMemoryState(
             slots=observation.slots,
             tracking_slots=observation.tracking_slots,
@@ -132,6 +140,8 @@ class ObjectMemoryTransition(nn.Module):
             in_frame=in_frame,
             visibility=visibility,
             update_gate=visibility,
+            identity_key=identity_key,
+            identity_similarity=torch.ones_like(visibility),
         )
 
     def predict(
@@ -154,10 +164,11 @@ class ObjectMemoryTransition(nn.Module):
         ).reshape_as(previous.slots)
         motion = self.motion_head(tracking)
         step = torch.tanh(delta_time)[:, None, None]
+        transport = self.motion_scale * step * torch.tanh(motion[..., :2])
         center = (
             previous.center
-            + self.motion_scale * step * torch.tanh(motion[..., :2])
-        ).clamp(-1.25, 1.25)
+            + previous.relative_scale[..., None] * transport
+        )
         relative_scale = previous.relative_scale * torch.exp(
             self.motion_scale * step.squeeze(-1) * torch.tanh(motion[..., 2])
         )
@@ -184,6 +195,7 @@ class ObjectMemoryTransition(nn.Module):
             relations=relations,
             existence=previous.existence,
             in_frame=previous.in_frame,
+            identity_key=previous.identity_key,
         )
 
     def correct(
@@ -203,6 +215,17 @@ class ObjectMemoryTransition(nn.Module):
             observation.decoded_feature,
             dim=-1,
         )
+        observed_identity = F.normalize(
+            observation.tracking_slots.float(), dim=-1
+        ).to(observation.tracking_slots.dtype)
+        identity_similarity = F.cosine_similarity(
+            predicted.identity_key,
+            observed_identity,
+            dim=-1,
+        )
+        association_similarity = (
+            identity_similarity if self.persistent_identity_key else feature_similarity
+        )
         center_distance = torch.sqrt(
             (observed_geometry.center - predicted.center)
             .square()
@@ -214,7 +237,7 @@ class ObjectMemoryTransition(nn.Module):
                 predicted.tracking_slots,
                 observation.tracking_slots,
                 observed_visibility[..., None],
-                feature_similarity[..., None],
+                association_similarity[..., None],
                 center_distance[..., None],
             ),
             dim=-1,
@@ -235,6 +258,19 @@ class ObjectMemoryTransition(nn.Module):
         )
         decoded_feature = predicted.decoded_feature + gate * (
             observation.decoded_feature - predicted.decoded_feature
+        )
+        identity_gate = self.identity_update_rate * gate
+        updated_identity = F.normalize(
+            predicted.identity_key.float()
+            + identity_gate.float() * (
+                observed_identity.float() - predicted.identity_key.float()
+            ),
+            dim=-1,
+        ).to(predicted.identity_key.dtype)
+        identity_key = torch.where(
+            (update_gate > 0.0)[..., None],
+            updated_identity,
+            predicted.identity_key,
         )
         relative_scale = predicted.relative_scale + update_gate * (
             observed_geometry.relative_scale - predicted.relative_scale
@@ -278,4 +314,6 @@ class ObjectMemoryTransition(nn.Module):
             in_frame=in_frame,
             visibility=visibility,
             update_gate=update_gate,
+            identity_key=identity_key,
+            identity_similarity=identity_similarity,
         )

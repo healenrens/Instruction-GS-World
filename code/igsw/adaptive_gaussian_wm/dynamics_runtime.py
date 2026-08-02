@@ -58,11 +58,20 @@ def factorized_result_fields(
         "future_relations",
         "base_future_slots",
         "action_slot_residual",
+        "future_transport_units",
+        "history_motion_features",
+        "future_survival_logits",
+        "future_birth_logits",
+        "future_observability_logits",
+        "future_survival",
+        "future_birth",
+        "future_observability",
+        "future_in_frame",
     )
     result = {
         f"predicted_{name}": getattr(future_output, name)
         for name in names
-        if hasattr(future_output, name)
+        if hasattr(future_output, name) and getattr(future_output, name) is not None
     }
     result["target_future_token_states"] = target_future["token_states"]
     result["target_future_slot_states"] = target_future["slot_states"]
@@ -86,4 +95,13 @@ def factorized_result_fields(
                 ),
             }
         )
+        for name in (
+            "future_survival",
+            "future_birth",
+            "future_observability",
+            "future_transport_units",
+        ):
+            value = getattr(history_output, name, None)
+            if value is not None:
+                result[f"zero_action_{name}"] = value
     return result
