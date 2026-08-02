@@ -42,6 +42,12 @@ def assemble_model_output(
         "target_future_existence": target_future.get(
             "existence", target_future["activity"]
         ),
+        "target_future_track_presence": target_future.get(
+            "existence", target_future["activity"]
+        ),
+        "target_future_observation_confidence": target_future.get(
+            "observation_confidence", target_future["activity"]
+        ),
         "target_future_in_frame": target_future.get(
             "in_frame", target_future["activity"]
         ),
@@ -62,6 +68,12 @@ def assemble_model_output(
         "target_history_existence": target_history.get(
             "existence", target_history["activity"]
         ),
+        "target_history_track_presence": target_history.get(
+            "existence", target_history["activity"]
+        ),
+        "target_history_observation_confidence": target_history.get(
+            "observation_confidence", target_history["activity"]
+        ),
         "target_history_in_frame": target_history.get(
             "in_frame", target_history["activity"]
         ),
@@ -76,17 +88,38 @@ def assemble_model_output(
         "online_history_centers": history["center"],
         "online_history_visibility": history.get("visibility", history["activity"]),
         "online_history_existence": history.get("existence", history["activity"]),
+        "online_history_track_presence": history.get(
+            "existence", history["activity"]
+        ),
+        "online_history_observation_confidence": history.get(
+            "observation_confidence", history["activity"]
+        ),
         "online_history_in_frame": history.get("in_frame", history["activity"]),
         "online_history_relative_scale": history.get("relative_scale"),
         "online_history_relative_disparity": history.get("relative_disparity"),
         "online_history_relations": history.get("relations"),
         "online_history_identity_keys": history.get("identity_key"),
         "online_history_identity_similarity": history.get("identity_similarity"),
+        "online_history_association": history.get("association_matrix"),
+        "online_history_association_match": history.get("association_match"),
+        "online_history_association_unmatched": history.get(
+            "association_unmatched"
+        ),
+        "online_history_association_discovery": history.get(
+            "association_discovery"
+        ),
+        "online_history_association_entropy": history.get("association_entropy"),
+        "online_history_association_support_distance": history.get(
+            "association_support_distance"
+        ),
+        "online_history_birth_evidence": history.get("birth_evidence"),
         "online_history_object_features": torch.stack(
             [state.decoded_feature for state in history["slot_states"]], dim=1
         ),
         "target_history_identity_keys": target_history.get("identity_key"),
         "target_future_identity_keys": target_future.get("identity_key"),
+        "target_history_association": target_history.get("association_matrix"),
+        "target_future_association": target_future.get("association_matrix"),
         "posterior_actions": effects.posterior,
         "hierarchical_effects": effects.selected,
         "dynamics_actions": effects.dynamics,
@@ -121,4 +154,15 @@ def assemble_model_output(
             target_history,
         )
     )
+    if model.config.track_presence_semantics:
+        result.update(
+            predicted_future_track_presence=result["predicted_future_existence"],
+            predicted_future_track_presence_logits=result[
+                "predicted_future_existence_logits"
+            ],
+            zero_action_future_track_presence=result[
+                "zero_action_future_existence"
+            ],
+            lifecycle_semantics="latent_track_presence_not_physical_existence",
+        )
     return result

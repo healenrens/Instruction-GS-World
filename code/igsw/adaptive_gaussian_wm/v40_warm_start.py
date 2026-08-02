@@ -14,7 +14,8 @@ def transform_v40_parameter(
 ) -> tuple[torch.Tensor, str] | None:
     if (
         source_config.get("architecture") != "object_memory_v1"
-        or target_config.architecture != "object_memory_v2"
+        or target_config.architecture
+        not in ("object_memory_v2", "object_memory_v3")
     ):
         return None
     if name in (

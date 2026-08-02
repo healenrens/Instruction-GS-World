@@ -9,6 +9,10 @@ import torch.nn.functional as F
 
 from .config import AdaptiveGaussianWMConfig
 from .gpstoken import GPSTokenState
+from .object_correspondence import (
+    CausalObjectCorrespondence,
+    align_object_observation,
+)
 from .object_slots import ObjectSlotState
 from .relative_geometry import (
     RelativeGeometryEncoder,
@@ -41,6 +45,14 @@ class ObjectMemoryState:
     update_gate: torch.Tensor
     identity_key: torch.Tensor
     identity_similarity: torch.Tensor
+    association_matrix: torch.Tensor
+    association_match: torch.Tensor
+    association_unmatched: torch.Tensor
+    association_discovery: torch.Tensor
+    association_entropy: torch.Tensor
+    association_support_distance: torch.Tensor
+    observation_confidence: torch.Tensor
+    birth_evidence: torch.Tensor
 
 
 @dataclass
@@ -72,6 +84,11 @@ class ObjectMemoryTransition(nn.Module):
         self.motion_scale = config.memory_motion_scale
         self.identity_update_rate = config.identity_memory_update_rate
         self.persistent_identity_key = config.persistent_identity_key
+        self.correspondence = (
+            CausalObjectCorrespondence(config)
+            if config.causal_object_correspondence
+            else None
+        )
         self.geometry = RelativeGeometryEncoder(config)
         self.time_input = nn.Sequential(
             nn.Linear(3, dim),
@@ -119,6 +136,13 @@ class ObjectMemoryTransition(nn.Module):
         identity_key = F.normalize(observation.tracking_slots.float(), dim=-1).to(
             observation.tracking_slots.dtype
         )
+        object_count = visibility.shape[-1]
+        identity = torch.eye(
+            object_count,
+            device=visibility.device,
+            dtype=visibility.dtype,
+        )[None]
+        association = identity * visibility[..., None]
         return ObjectMemoryState(
             slots=observation.slots,
             tracking_slots=observation.tracking_slots,
@@ -142,6 +166,14 @@ class ObjectMemoryTransition(nn.Module):
             update_gate=visibility,
             identity_key=identity_key,
             identity_similarity=torch.ones_like(visibility),
+            association_matrix=association,
+            association_match=visibility,
+            association_unmatched=1.0 - visibility,
+            association_discovery=1.0 - visibility,
+            association_entropy=torch.zeros_like(visibility),
+            association_support_distance=torch.zeros_like(visibility),
+            observation_confidence=visibility,
+            birth_evidence=visibility,
         )
 
     def predict(
@@ -210,6 +242,20 @@ class ObjectMemoryTransition(nn.Module):
             observation.assignment,
             observed_visibility,
         )
+        association = None
+        if self.correspondence is not None:
+            association = self.correspondence(
+                predicted,
+                observation,
+                observed_geometry,
+            )
+            observation = align_object_observation(observation, association)
+            observed_visibility = observation.activity.clamp(0.0, 1.0)
+            observed_geometry = pool_object_geometry(
+                tokens,
+                observation.assignment,
+                observed_visibility,
+            )
         feature_similarity = F.cosine_similarity(
             predicted.decoded_feature,
             observation.decoded_feature,
@@ -218,10 +264,14 @@ class ObjectMemoryTransition(nn.Module):
         observed_identity = F.normalize(
             observation.tracking_slots.float(), dim=-1
         ).to(observation.tracking_slots.dtype)
-        identity_similarity = F.cosine_similarity(
-            predicted.identity_key,
-            observed_identity,
-            dim=-1,
+        identity_similarity = (
+            association.identity_similarity.to(predicted.identity_key.dtype)
+            if association is not None
+            else F.cosine_similarity(
+                predicted.identity_key,
+                observed_identity,
+                dim=-1,
+            )
         )
         association_similarity = (
             identity_similarity if self.persistent_identity_key else feature_similarity
@@ -232,6 +282,8 @@ class ObjectMemoryTransition(nn.Module):
             .sum(dim=-1)
             + 1e-6
         )
+        if association is not None:
+            center_distance = association.support_distance.to(center_distance.dtype)
         gate_features = torch.cat(
             (
                 predicted.tracking_slots,
@@ -293,6 +345,31 @@ class ObjectMemoryTransition(nn.Module):
             relative_disparity,
             visibility,
         )
+        if association is None:
+            object_count = visibility.shape[-1]
+            identity = torch.eye(
+                object_count,
+                device=visibility.device,
+                dtype=visibility.dtype,
+            )[None]
+            association_matrix = identity * visibility[..., None]
+            association_match = visibility
+            association_unmatched = 1.0 - visibility
+            association_discovery = 1.0 - visibility
+            association_entropy = torch.zeros_like(visibility)
+            association_distance = center_distance
+        else:
+            association_matrix = association.transport.to(visibility.dtype)
+            association_match = association.match_probability.to(visibility.dtype)
+            association_unmatched = association.unmatched_probability.to(
+                visibility.dtype
+            )
+            association_discovery = association.discovery_probability.to(
+                visibility.dtype
+            )
+            association_entropy = association.entropy.to(visibility.dtype)
+            association_distance = association.support_distance.to(visibility.dtype)
+        birth_evidence = (1.0 - predicted.existence) * visibility
         return ObjectMemoryState(
             slots=slots,
             tracking_slots=tracking,
@@ -316,4 +393,12 @@ class ObjectMemoryTransition(nn.Module):
             update_gate=update_gate,
             identity_key=identity_key,
             identity_similarity=identity_similarity,
+            association_matrix=association_matrix,
+            association_match=association_match,
+            association_unmatched=association_unmatched,
+            association_discovery=association_discovery,
+            association_entropy=association_entropy,
+            association_support_distance=association_distance,
+            observation_confidence=visibility,
+            birth_evidence=birth_evidence,
         )

@@ -120,6 +120,12 @@ class AdaptiveGaussianWMConfig:
     lifecycle_survival_prior: float = 0.98
     lifecycle_birth_prior: float = 0.02
     lifecycle_focal_gamma: float = 2.0
+    causal_object_correspondence: bool = False
+    track_presence_semantics: bool = False
+    correspondence_temperature: float = 0.5
+    correspondence_sinkhorn_iterations: int = 32
+    correspondence_dustbin_logit: float = 0.0
+    correspondence_residual_scale: float = 0.1
 
     def __post_init__(self) -> None:
         positive = {
@@ -143,6 +149,9 @@ class AdaptiveGaussianWMConfig:
             "gaussian_children": self.gaussian_children,
             "dense_readout_dim": self.dense_readout_dim,
             "change_readout_dim": self.change_readout_dim,
+            "correspondence_sinkhorn_iterations": (
+                self.correspondence_sinkhorn_iterations
+            ),
         }
         for name, value in positive.items():
             if value <= 0:
@@ -153,9 +162,10 @@ class AdaptiveGaussianWMConfig:
             "legacy",
             "object_memory_v1",
             "object_memory_v2",
+            "object_memory_v3",
         ):
             raise ValueError(
-                "architecture must be legacy, object_memory_v1, or object_memory_v2"
+                "architecture must be legacy or an object_memory_v1-v3 variant"
             )
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
@@ -199,6 +209,10 @@ class AdaptiveGaussianWMConfig:
                 raise ValueError(f"{name} must be in (0, 1)")
         if self.lifecycle_focal_gamma < 0.0:
             raise ValueError("lifecycle_focal_gamma must be non-negative")
+        if self.correspondence_temperature <= 0.0:
+            raise ValueError("correspondence_temperature must be positive")
+        if self.correspondence_residual_scale < 0.0:
+            raise ValueError("correspondence_residual_scale must be non-negative")
         if self.prior_effect_weight < 0.0:
             raise ValueError("prior_effect_weight must be non-negative")
         if self.flow_source_scale <= 0.0:
@@ -252,7 +266,11 @@ class AdaptiveGaussianWMConfig:
             raise ValueError(
                 "persistent object memory and relative geometry must be enabled together"
             )
-        if self.architecture in ("object_memory_v1", "object_memory_v2"):
+        if self.architecture in (
+            "object_memory_v1",
+            "object_memory_v2",
+            "object_memory_v3",
+        ):
             if not self.persistent_object_memory or not self.hard_token_gate:
                 raise ValueError(
                     "object_memory_v1 requires persistent memory and hard token gates"
@@ -296,9 +314,23 @@ class AdaptiveGaussianWMConfig:
             raise ValueError(
                 "object_memory_v2 requires identity, relative transport, and lifecycle"
             )
+        if self.architecture == "object_memory_v3" and not all(
+            (
+                self.persistent_identity_key,
+                self.relative_transport_dynamics,
+                self.factorized_lifecycle,
+                self.causal_object_correspondence,
+                self.track_presence_semantics,
+            )
+        ):
+            raise ValueError(
+                "object_memory_v3 requires identity, correspondence, relative "
+                "transport, lifecycle, and track-presence semantics"
+            )
         if self.dual_horizon_dynamics and self.architecture not in (
             "object_memory_v1",
             "object_memory_v2",
+            "object_memory_v3",
         ):
             raise ValueError("dual-horizon Dynamics requires Object Memory")
 
@@ -420,6 +452,18 @@ class AdaptiveGaussianWMConfig:
             persistent_identity_key=True,
             relative_transport_dynamics=True,
             factorized_lifecycle=True,
+        )
+
+    @classmethod
+    def object_memory_correspondence_full(
+        cls,
+        feature_dim: int,
+    ) -> "AdaptiveGaussianWMConfig":
+        return replace(
+            cls.object_memory_lifecycle_full(feature_dim),
+            architecture="object_memory_v3",
+            causal_object_correspondence=True,
+            track_presence_semantics=True,
         )
 
     @classmethod

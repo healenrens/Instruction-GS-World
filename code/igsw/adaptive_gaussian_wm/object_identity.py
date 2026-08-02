@@ -20,6 +20,7 @@ def persistent_identity_loss(
             "identity_visible_alignment": reference,
             "identity_temporal_drift": reference,
             "identity_occluded_drift": reference,
+            "identity_association_entropy": reference,
         }
     visible_terms = []
     visible_weights = []
@@ -29,6 +30,8 @@ def persistent_identity_loss(
     occluded_weights = []
     separation_terms = []
     separation_weights = []
+    association_terms = []
+    association_weights = []
     for index, state in enumerate(states):
         visible_terms.append(
             1.0
@@ -38,7 +41,11 @@ def persistent_identity_loss(
                 dim=-1,
             )
         )
-        visible_weights.append(state.visibility.float())
+        visible_weights.append(
+            state.visibility.float() * state.association_match.float()
+        )
+        association_terms.append(state.association_entropy.float())
+        association_weights.append(state.observation_confidence.float())
         normalized = F.normalize(state.identity_key.float(), dim=-1)
         similarity = torch.einsum("bkd,bjd->bkj", normalized, normalized)
         object_count = similarity.shape[-1]
@@ -65,9 +72,11 @@ def persistent_identity_loss(
             state.existence.float(), previous.existence.float()
         )
         temporal_terms.append(drift)
-        temporal_weights.append(persistent)
+        temporal_weights.append(persistent * state.association_match.float())
         occluded_terms.append(drift)
-        occluded_weights.append(persistent * (1.0 - state.visibility.float()))
+        occluded_weights.append(
+            persistent * state.association_unmatched.float()
+        )
     visible = _weighted_mean(
         torch.stack(visible_terms),
         torch.stack(visible_weights),
@@ -75,6 +84,10 @@ def persistent_identity_loss(
     separation = _weighted_mean(
         torch.stack(separation_terms),
         torch.stack(separation_weights),
+    )
+    association = _weighted_mean(
+        torch.stack(association_terms),
+        torch.stack(association_weights),
     )
     if temporal_terms:
         temporal = _weighted_mean(
@@ -88,10 +101,17 @@ def persistent_identity_loss(
     else:
         temporal = reference
         occluded = reference
-    total = visible + 0.5 * temporal + occluded + 0.25 * separation
+    total = (
+        visible
+        + 0.5 * temporal
+        + occluded
+        + 0.25 * separation
+        + 0.1 * association
+    )
     return total, {
         "identity_visible_alignment": visible,
         "identity_temporal_drift": temporal,
         "identity_occluded_drift": occluded,
         "identity_inter_object_separation": separation,
+        "identity_association_entropy": association,
     }

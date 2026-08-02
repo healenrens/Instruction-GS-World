@@ -332,7 +332,7 @@ def evaluate(args, model, dataset, runtime, device, amp_context) -> dict:
                 metrics, args.stage, history_length, result, batch
             )
             metrics.add("goal_valid", goal_valid.float())
-            if model.config.architecture == "object_memory_v2":
+            if model.config.architecture in ("object_memory_v2", "object_memory_v3"):
                 add_v40_held_metrics(metrics, history_length, result)
             if args.stage == "posterior":
                 shuffled_actions = cross_episode_shuffle(
@@ -391,7 +391,7 @@ def acceptance(stage: str, means: dict, minimum_shuffle: float) -> dict[str, boo
                 >= means["posterior/all/goal_rollout"] * (1.0 + minimum_shuffle)
             ),
         )
-    if any(name.startswith("v40/") for name in means):
+    if any(name.startswith(("v40/", "v41/")) for name in means):
         checks.update(v40_acceptance(stage, means))
     return checks
 

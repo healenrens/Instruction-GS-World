@@ -18,21 +18,33 @@ def _weighted_mean(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 
 
 def _event_metrics(output: dict) -> dict[str, torch.Tensor]:
-    existence = output["predicted_future_existence"].detach().float()
+    presence = output.get(
+        "predicted_future_track_presence",
+        output["predicted_future_existence"],
+    ).detach().float()
     visibility = output["predicted_future_visibility"].detach().float()
     in_frame = output["predicted_future_in_frame"].detach().float()
     survival = output["predicted_future_survival"].detach().float()
     birth = output["predicted_future_birth"].detach().float()
     observability = output["predicted_future_observability"].detach().float()
-    target_existence = output["target_future_existence"].detach().float()
-    target_visibility = output["target_future_visibility"].detach().float()
-    current = output["target_history_existence"][:, -1, None].detach().float()
+    target_presence = output.get(
+        "target_future_track_presence",
+        output["target_future_existence"],
+    ).detach().float()
+    target_observation = output.get(
+        "target_future_observation_confidence",
+        output["target_future_visibility"],
+    ).detach().float()
+    target_in_frame = output["target_future_in_frame"].detach().float()
+    current = output.get(
+        "target_history_track_presence",
+        output["target_history_existence"],
+    )[:, -1, None].detach().float()
     valid = output["future_horizon_valid"].detach().float()[..., None]
-    valid = valid.expand_as(target_existence)
-    current_positive = (current >= 0.5).expand_as(target_existence)
-    target_positive = target_existence >= 0.5
+    valid = valid.expand_as(target_presence)
+    current_positive = (current >= 0.5).expand_as(target_presence)
+    target_positive = target_presence >= 0.5
     survival_positive = current_positive & target_positive
-    disappearance = current_positive & (~target_positive)
     birth_positive = (~current_positive) & target_positive
     persistent_absence = (~current_positive) & (~target_positive)
     survival_binary = survival >= 0.5
@@ -44,40 +56,36 @@ def _event_metrics(output: dict) -> dict[str, torch.Tensor]:
             observability,
             valid,
         ),
-        "lifecycle_visibility_above_existence_max": F.relu(
-            visibility - existence
+        "lifecycle_visibility_above_track_presence_max": F.relu(
+            visibility - presence
         ).amax(),
         "lifecycle_visibility_above_in_frame_max": F.relu(
             visibility - in_frame
         ).amax(),
-        "lifecycle_observability_brier": _weighted_mean(
+        "lifecycle_observation_brier": _weighted_mean(
             (
                 observability
                 - (
-                    target_visibility / target_existence.clamp_min(1e-4)
+                    target_observation
+                    / (target_presence * target_in_frame).clamp_min(1e-4)
                 ).clamp(0.0, 1.0)
             ).square(),
-            valid * target_existence,
+            valid * target_presence * target_in_frame,
         ),
     }
     for name, numerator, denominator in (
         (
-            "lifecycle_survival_positive_recall",
+            "lifecycle_track_retention_recall",
             survival_binary & survival_positive,
             survival_positive,
         ),
         (
-            "lifecycle_disappearance_recall",
-            (~survival_binary) & disappearance,
-            disappearance,
-        ),
-        (
-            "lifecycle_birth_positive_recall",
+            "lifecycle_track_discovery_recall",
             birth_binary & birth_positive,
             birth_positive,
         ),
         (
-            "lifecycle_persistent_absence_recall",
+            "lifecycle_inactive_capacity_recall",
             (~birth_binary) & persistent_absence,
             persistent_absence,
         ),
@@ -95,7 +103,10 @@ def _event_metrics(output: dict) -> dict[str, torch.Tensor]:
 def _identity_metrics(output: dict) -> dict[str, torch.Tensor]:
     keys = output["online_history_identity_keys"].detach().float()
     visibility = output["online_history_visibility"].detach().float()
-    existence = output["online_history_existence"].detach().float()
+    presence = output.get(
+        "online_history_track_presence",
+        output["online_history_existence"],
+    ).detach().float()
     similarity = output["online_history_identity_similarity"].detach().float()
     result = {
         "identity_visible_correction_similarity": _weighted_mean(
@@ -111,7 +122,7 @@ def _identity_metrics(output: dict) -> dict[str, torch.Tensor]:
         )
         return result
     drift = 1.0 - F.cosine_similarity(keys[:, 1:], keys[:, :-1], dim=-1)
-    persistent = torch.minimum(existence[:, 1:], existence[:, :-1])
+    persistent = torch.minimum(presence[:, 1:], presence[:, :-1])
     result.update(
         identity_temporal_cosine_drift=_weighted_mean(drift, persistent),
         identity_occluded_cosine_drift=_weighted_mean(

@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 
 from .v40_warm_start import record_v40_transform
-CHECKPOINT_VERSION = 40
+CHECKPOINT_VERSION = 41
 def collect_rng_states(context) -> list[dict]:
     device = torch.device(context.device)
     local_state = {

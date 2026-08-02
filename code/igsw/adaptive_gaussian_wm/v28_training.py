@@ -15,11 +15,21 @@ from .v40_stage_contracts import (
     validate_v40_initialization,
     validate_v40_warm_start_report,
 )
+from .v41_stage_contracts import (
+    validate_v41_initialization,
+    validate_v41_warm_start_report,
+)
+from .v41_runtime_contracts import gate_contract_fields, runtime_contract_fields
 
 
 ARCHITECTURE = "object_memory_v1"
 LIFECYCLE_ARCHITECTURE = "object_memory_v2"
-OBJECT_MEMORY_ARCHITECTURES = (ARCHITECTURE, LIFECYCLE_ARCHITECTURE)
+CORRESPONDENCE_ARCHITECTURE = "object_memory_v3"
+OBJECT_MEMORY_ARCHITECTURES = (
+    ARCHITECTURE,
+    LIFECYCLE_ARCHITECTURE,
+    CORRESPONDENCE_ARCHITECTURE,
+)
 DEFAULT_TARGET_GLOBAL_BATCH = 256
 def add_v28_arguments(parser) -> None:
     parser.add_argument(
@@ -73,14 +83,18 @@ def is_v28(args) -> bool:
 
 
 def validate_v28_initialization(checkpoint: dict, args) -> None:
-    if args.architecture == LIFECYCLE_ARCHITECTURE:
+    if args.architecture == CORRESPONDENCE_ARCHITECTURE:
+        validate_v41_initialization(checkpoint, args)
+    elif args.architecture == LIFECYCLE_ARCHITECTURE:
         validate_v40_initialization(checkpoint, args)
     elif args.architecture == ARCHITECTURE:
         validate_v39_initialization(checkpoint, args)
 
 
 def validate_v28_warm_start_report(report: dict, args) -> None:
-    if args.architecture == LIFECYCLE_ARCHITECTURE:
+    if args.architecture == CORRESPONDENCE_ARCHITECTURE:
+        validate_v41_warm_start_report(report, args)
+    elif args.architecture == LIFECYCLE_ARCHITECTURE:
         validate_v40_warm_start_report(report, args)
     elif args.architecture == ARCHITECTURE and any(
         report[name] for name in ("missing", "unexpected", "shape_mismatch")
@@ -251,12 +265,7 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         "data_manifest_sha256": dataset.data_sha256,
         "teacher_sidecar_sha256": getattr(dataset, "teacher_sidecar_sha256", ""),
     }
-    if args.architecture == LIFECYCLE_ARCHITECTURE:
-        expected.update(
-            identity_contract="persistent_identity_key_v1",
-            transport_contract="support_normalized_relative_transport_v1",
-            lifecycle_contract="survival_birth_observability_v1",
-        )
+    expected.update(gate_contract_fields(args.architecture))
     mismatch = {
         name: {"gate": report.get(name), "current": value}
         for name, value in expected.items()
@@ -404,11 +413,7 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "checkpoint_contract": "rolling_recovery_v1",
         "architecture": args.architecture,
         "training_stage": args.training_stage,
-        "diagnostics_contract": (
-            "object_lifecycle_transport_training_v1"
-            if args.architecture == LIFECYCLE_ARCHITECTURE
-            else "dynamic_dual_horizon_training_v1"
-        ),
+        **runtime_contract_fields(args.architecture),
         "language_condition": "off",
         "rgb_supervision": "off",
         "latent_action_shape": [4, 32],
@@ -439,21 +444,6 @@ def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
         "carrier_compact_weight": args.carrier_compact_weight,
         "gaussian_children": args.gaussian_children,
         "readout_backend": "change_only_object_residual",
-        "identity_contract": (
-            "persistent_identity_key_v1"
-            if args.architecture == LIFECYCLE_ARCHITECTURE
-            else "disabled"
-        ),
-        "transport_contract": (
-            "support_normalized_relative_transport_v1"
-            if args.architecture == LIFECYCLE_ARCHITECTURE
-            else "absolute_center_residual"
-        ),
-        "lifecycle_contract": (
-            "survival_birth_observability_v1"
-            if args.architecture == LIFECYCLE_ARCHITECTURE
-            else "joint_existence_visibility"
-        ),
         "basis_gate_report": (
             os.path.abspath(args.basis_gate_report) if args.basis_gate_report else ""
         ),

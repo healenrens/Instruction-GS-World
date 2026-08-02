@@ -20,7 +20,10 @@ def _require(condition: bool, message: str) -> None:
 
 @torch.no_grad()
 def verify_v40_state_contracts(model, batch: dict, amp_context, loss_weights) -> dict:
-    _require(model.config.architecture == "object_memory_v2", "model is not v40")
+    _require(
+        model.config.architecture in ("object_memory_v2", "object_memory_v3"),
+        "model has no lifecycle transport contract",
+    )
     _require(model.config.persistent_identity_key, "identity key is disabled")
     _require(model.config.relative_transport_dynamics, "relative transport is disabled")
     _require(model.config.factorized_lifecycle, "factorized lifecycle is disabled")

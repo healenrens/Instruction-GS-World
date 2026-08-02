@@ -15,7 +15,11 @@ def joint_phase_flags(phase: str, architecture: str) -> tuple[bool, bool, bool]:
     if phase not in allowed:
         raise ValueError(f"unknown training phase: {phase}")
     representation = phase == "object_memory_representation_loss"
-    if representation and architecture not in ("object_memory_v1", "object_memory_v2"):
+    if representation and architecture not in (
+        "object_memory_v1",
+        "object_memory_v2",
+        "object_memory_v3",
+    ):
         raise ValueError("object-memory representation phase requires staged architecture")
     return phase != "joint", phase == "posterior_dynamics_loss", representation
 

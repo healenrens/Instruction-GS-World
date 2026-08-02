@@ -1,4 +1,4 @@
-"""Factorized object survival, birth, observability, and lifecycle losses."""
+"""Factorized track presence, discovery, and observation losses."""
 
 from __future__ import annotations
 
@@ -132,54 +132,77 @@ def object_lifecycle_loss(
     )
     if any(name not in output for name in required):
         raise ValueError("factorized lifecycle outputs are missing")
-    current = output["target_history_existence"][:, -1, None].detach().float()
-    target_existence = output["target_future_existence"].detach().float()
-    target_visibility = output["target_future_visibility"].detach().float()
+    current = output.get(
+        "target_history_track_presence",
+        output["target_history_existence"],
+    )[:, -1, None].detach().float()
+    target_presence = output.get(
+        "target_future_track_presence",
+        output["target_future_existence"],
+    ).detach().float()
+    target_observation = output.get(
+        "target_future_observation_confidence",
+        output["target_future_visibility"],
+    ).detach().float()
+    target_in_frame = output["target_future_in_frame"].detach().float()
     horizon = output["future_horizon_valid"].detach().float()[..., None]
     survival_weight = current * horizon
     birth_weight = (1.0 - current) * horizon
-    existence = balanced_continuous_focal_loss(
-        output["predicted_future_existence_logits"],
-        target_existence,
+    presence = balanced_continuous_focal_loss(
+        output.get(
+            "predicted_future_track_presence_logits",
+            output["predicted_future_existence_logits"],
+        ),
+        target_presence,
         horizon,
         gamma,
     )
     survival = balanced_continuous_focal_loss(
         output["predicted_future_survival_logits"],
-        target_existence,
+        target_presence,
         survival_weight,
         gamma,
     )
     birth = balanced_continuous_focal_loss(
         output["predicted_future_birth_logits"],
-        target_existence,
+        target_presence,
         birth_weight,
         gamma,
     )
-    conditional_visibility = (
-        target_visibility / target_existence.clamp_min(1e-4)
+    conditional_observation = (
+        target_observation
+        / (target_presence * target_in_frame).clamp_min(1e-4)
     ).clamp(0.0, 1.0)
-    observable_weight = target_existence * horizon
+    observable_weight = target_presence * target_in_frame * horizon
     observability = balanced_continuous_focal_loss(
         output["predicted_future_observability_logits"],
-        conditional_visibility,
+        conditional_observation,
         observable_weight,
         gamma,
     )
-    prediction = output["predicted_future_existence"].float()
-    false_death = _weighted_mean(
-        F.relu(target_existence - prediction),
-        survival_weight * target_existence,
+    prediction = output.get(
+        "predicted_future_track_presence",
+        output["predicted_future_existence"],
+    ).float()
+    retention = _weighted_mean(
+        F.relu(target_presence - prediction),
+        survival_weight * target_presence,
     )
     hierarchy = F.relu(
         output["predicted_future_visibility"].float() - prediction
     ).mean()
-    total = existence + 0.5 * survival + 0.5 * birth + 0.5 * observability + false_death
+    total = (
+        presence
+        + 0.5 * survival
+        + 0.5 * birth
+        + 0.5 * observability
+        + retention
+    )
     return total, {
-        "geometry_existence": existence,
-        "lifecycle_survival": survival,
-        "lifecycle_birth": birth,
-        "lifecycle_observability": observability,
-        "lifecycle_false_death": false_death,
+        "geometry_track_presence": presence,
+        "lifecycle_track_retention": survival,
+        "lifecycle_track_discovery": birth,
+        "lifecycle_observation": observability,
+        "lifecycle_presence_retention_error": retention,
         "lifecycle_hierarchy_violation": hierarchy,
     }

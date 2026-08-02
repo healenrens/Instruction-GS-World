@@ -83,7 +83,8 @@ def train_phase(
                 if action_free_phase:
                     model_phase = (
                         "object_memory_representation_loss"
-                        if args.architecture in ("object_memory_v1", "object_memory_v2")
+                        if args.architecture
+                        in ("object_memory_v1", "object_memory_v2", "object_memory_v3")
                         else "representation"
                     )
                     result = wrapped(

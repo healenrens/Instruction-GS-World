@@ -64,6 +64,14 @@ def _stack_states(
             "update_gate",
             "identity_key",
             "identity_similarity",
+            "association_matrix",
+            "association_match",
+            "association_unmatched",
+            "association_discovery",
+            "association_entropy",
+            "association_support_distance",
+            "observation_confidence",
+            "birth_evidence",
         ):
             result[name] = torch.stack(
                 [getattr(state, name) for state in memory_states],

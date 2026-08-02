@@ -14,6 +14,7 @@ from .dense_readout_diagnostics import dense_object_readout_diagnostics
 from .dual_horizon_diagnostics import dual_horizon_effect_diagnostics
 from .jepa_losses import object_change_loss, object_latent_loss, weighted_mean
 from .lifecycle_transport_diagnostics import lifecycle_transport_diagnostics
+from .object_correspondence_diagnostics import object_correspondence_diagnostics
 from .readout_diagnostics import gaussian_readout_diagnostics
 
 
@@ -171,12 +172,21 @@ def _geometry_persistence_diagnostics(
 
 
 def _lifecycle_diagnostics(output: dict) -> dict[str, torch.Tensor]:
-    prediction = output["predicted_future_existence"].detach().float()
+    prediction = output.get(
+        "predicted_future_track_presence",
+        output["predicted_future_existence"],
+    ).detach().float()
     visibility_prediction = output["predicted_future_visibility"].detach().float()
-    target = output["target_future_existence"].detach().float()
+    target = output.get(
+        "target_future_track_presence",
+        output["target_future_existence"],
+    ).detach().float()
     visibility_target = output["target_future_visibility"].detach().float()
     in_frame_target = output["target_future_in_frame"].detach().float()
-    current = output["target_history_existence"][:, -1, None].detach().float()
+    current = output.get(
+        "target_history_track_presence",
+        output["target_history_existence"],
+    )[:, -1, None].detach().float()
     current = current.expand_as(target)
     target_binary = target >= 0.5
     prediction_binary = prediction >= 0.5
@@ -185,10 +195,10 @@ def _lifecycle_diagnostics(output: dict) -> dict[str, torch.Tensor]:
     positive = target_binary.float().sum()
     negative = (~target_binary).float().sum()
     result = {
-        "memory_existence_target_mean": target.mean(),
-        "memory_existence_prediction_mean": prediction.mean(),
-        "memory_existence_brier": (prediction - target).square().mean(),
-        "memory_existence_accuracy": (
+        "memory_track_presence_target_mean": target.mean(),
+        "memory_track_presence_prediction_mean": prediction.mean(),
+        "memory_track_presence_brier": (prediction - target).square().mean(),
+        "memory_track_presence_accuracy": (
             prediction_binary == target_binary
         ).float().mean(),
         "memory_visibility_target_mean": visibility_target.mean(),
@@ -197,33 +207,33 @@ def _lifecycle_diagnostics(output: dict) -> dict[str, torch.Tensor]:
             visibility_prediction - visibility_target
         ).square().mean(),
         "memory_in_frame_target_mean": in_frame_target.mean(),
-        "memory_existence_change_target_mean": (target - current).abs().mean(),
-        "memory_existence_change_prediction_mean": (
+        "memory_track_presence_change_target_mean": (target - current).abs().mean(),
+        "memory_track_presence_change_prediction_mean": (
             prediction - current
         ).abs().mean(),
     }
     result.update(
         ratio_moments(
-            "memory_existence_target_positive_rate", positive, total
+            "memory_track_presence_target_positive_rate", positive, total
         )
     )
     result.update(
         ratio_moments(
-            "memory_existence_prediction_positive_rate",
+            "memory_track_presence_prediction_positive_rate",
             prediction_binary.float().sum(),
             total,
         )
     )
     result.update(
         ratio_moments(
-            "memory_existence_positive_recall",
+            "memory_track_presence_positive_recall",
             (prediction_binary & target_binary).float().sum(),
             positive,
         )
     )
     result.update(
         ratio_moments(
-            "memory_existence_negative_recall",
+            "memory_track_presence_negative_recall",
             ((~prediction_binary) & (~target_binary)).float().sum(),
             negative,
         )
@@ -392,7 +402,11 @@ def object_memory_training_diagnostics(
     geometry_parts: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
     """Measure predictive gains and memory behavior without changing gradients."""
-    if model.config.architecture not in ("object_memory_v1", "object_memory_v2"):
+    if model.config.architecture not in (
+        "object_memory_v1",
+        "object_memory_v2",
+        "object_memory_v3",
+    ):
         return {}
     persistence = _persistence_tensors(output)
     loss_coverage = output["feature_loss_coverage"]
@@ -456,8 +470,10 @@ def object_memory_training_diagnostics(
     )
     result.update(_geometry_persistence_diagnostics(output, geometry_parts))
     result.update(_lifecycle_diagnostics(output))
-    if model.config.architecture == "object_memory_v2":
+    if model.config.architecture in ("object_memory_v2", "object_memory_v3"):
         result.update(lifecycle_transport_diagnostics(output))
+    if model.config.architecture == "object_memory_v3":
+        result.update(object_correspondence_diagnostics(output))
     result.update(_token_diagnostics(output, batch))
     result.update(_horizon_diagnostics(model, batch, output, persistence))
     result.update(dual_horizon_effect_diagnostics(batch, output))
