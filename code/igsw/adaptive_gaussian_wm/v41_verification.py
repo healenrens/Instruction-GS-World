@@ -137,8 +137,9 @@ def verify_v41_correspondence_contracts(
         + correspondence.discovery_probability,
         torch.ones_like(correspondence.discovery_probability),
     )
-    _require(row_error < 5e-4, "correspondence row mass is not conserved")
-    _require(column_error < 5e-4, "correspondence column mass is not conserved")
+    tolerance = float(model.config.correspondence_mass_tolerance)
+    _require(row_error < tolerance, "correspondence row mass is not conserved")
+    _require(column_error < tolerance, "correspondence column mass is not conserved")
 
     permutation = torch.arange(
         observation.slots.shape[1] - 1,

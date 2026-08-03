@@ -34,13 +34,17 @@ def cosine_schedule(
 def reduce_metrics(
     parts: dict[str, torch.Tensor],
     world_size: int,
+    max_names: frozenset[str] = frozenset(),
 ) -> dict[str, float]:
     result = {}
     for name, value in parts.items():
         reduced = value.detach().float()
         if world_size > 1:
-            dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
-            reduced /= world_size
+            if name in max_names:
+                dist.all_reduce(reduced, op=dist.ReduceOp.MAX)
+            else:
+                dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+                reduced /= world_size
         result[name] = float(reduced)
     return result
 

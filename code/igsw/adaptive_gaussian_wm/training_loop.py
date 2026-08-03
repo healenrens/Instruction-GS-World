@@ -19,6 +19,10 @@ from .train_runtime import (
     reduce_metrics,
 )
 from .training_modes import update_target_for_training
+from .training_health import (
+    CORRESPONDENCE_MASS_METRICS,
+    enforce_object_memory_training_health,
+)
 
 
 def train_phase(
@@ -119,9 +123,17 @@ def train_phase(
                 scaled_loss = loss / args.grad_accum
             scaled_loss.backward()
             for name, value in parts.items():
-                accumulated[name] = (
-                    accumulated.get(name, value.detach() * 0.0) + value.detach()
-                )
+                if name in CORRESPONDENCE_MASS_METRICS:
+                    previous = accumulated.get(name)
+                    accumulated[name] = (
+                        value.detach()
+                        if previous is None
+                        else torch.maximum(previous, value.detach())
+                    )
+                else:
+                    accumulated[name] = (
+                        accumulated.get(name, value.detach() * 0.0) + value.detach()
+                    )
             if not synchronize:
                 continue
             group_grad_norms = (
@@ -150,14 +162,20 @@ def train_phase(
             metrics = finalize_diagnostic_metrics(
                 reduce_metrics(
                     {
-                        name: value / args.grad_accum
+                        name: (
+                            value
+                            if name in CORRESPONDENCE_MASS_METRICS
+                            else value / args.grad_accum
+                        )
                         for name, value in accumulated.items()
                     },
                     context.world_size,
+                    CORRESPONDENCE_MASS_METRICS,
                 )
             )
             if group_grad_norms:
                 metrics.update(reduce_metrics(group_grad_norms, context.world_size))
+            enforce_object_memory_training_health(model.config, metrics)
             accumulated = {}
             micro_count = 0
             if context.is_main and (
@@ -177,6 +195,8 @@ def train_phase(
                     "samples_seen": global_step * effective_batch,
                     "lr": scheduler.get_last_lr()[0],
                     "grad_norm": float(grad_norm),
+                    "grad_clip_scale": min(1.0, 5.0 / max(float(grad_norm), 1e-12)),
+                    "grad_clipped": float(float(grad_norm) > 5.0),
                     "steps_per_second": steps_per_second,
                     "samples_per_second": (effective_batch * steps_per_second),
                     "wall_time_seconds": elapsed,

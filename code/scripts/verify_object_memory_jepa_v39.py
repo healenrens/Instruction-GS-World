@@ -319,6 +319,15 @@ def verify_model_paths(model, batch: dict, amp_context) -> dict:
         not bool(representation["future_horizon_valid"][:, 1].any()),
         "representation stage supervised the terminal target",
     )
+    lifecycle_objectives = {
+        name: float(representation["parts"][name].detach())
+        for name in (
+            "geometry_track_presence",
+            "lifecycle_history_presence_anchor",
+            "lifecycle_presence_mass_calibration",
+        )
+        if name in representation["parts"]
+    }
     representation["loss"].backward()
     nonfinite = []
     core_gradients = 0
@@ -411,6 +420,7 @@ def verify_model_paths(model, batch: dict, amp_context) -> dict:
         "representation_core_gradient_tensors": core_gradients,
         "representation_action_gradient_tensors": action_gradients,
         "representation_correspondence_gradient_parameters": correspondence_gradients,
+        "representation_lifecycle_objectives": lifecycle_objectives,
         "action_free_short_future_swap_max_difference": action_free_difference,
         "posterior_loss": float(posterior["loss"].detach()),
         "posterior_action_gradient_tensors": posterior_gradients,

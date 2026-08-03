@@ -188,6 +188,14 @@ def _lifecycle_diagnostics(output: dict) -> dict[str, torch.Tensor]:
         output["target_history_existence"],
     )[:, -1, None].detach().float()
     current = current.expand_as(target)
+    online_history = output.get(
+        "online_history_track_presence",
+        output["online_history_existence"],
+    ).detach().float()
+    target_history = output.get(
+        "target_history_track_presence",
+        output["target_history_existence"],
+    ).detach().float()
     target_binary = target >= 0.5
     prediction_binary = prediction >= 0.5
     current_binary = current >= 0.5
@@ -198,6 +206,11 @@ def _lifecycle_diagnostics(output: dict) -> dict[str, torch.Tensor]:
         "memory_track_presence_target_mean": target.mean(),
         "memory_track_presence_prediction_mean": prediction.mean(),
         "memory_track_presence_brier": (prediction - target).square().mean(),
+        "memory_history_presence_prediction_mean": online_history.mean(),
+        "memory_history_presence_target_mean": target_history.mean(),
+        "memory_history_presence_brier": (
+            online_history - target_history
+        ).square().mean(),
         "memory_track_presence_accuracy": (
             prediction_binary == target_binary
         ).float().mean(),
@@ -222,6 +235,20 @@ def _lifecycle_diagnostics(output: dict) -> dict[str, torch.Tensor]:
             "memory_track_presence_prediction_positive_rate",
             prediction_binary.float().sum(),
             total,
+        )
+    )
+    result.update(
+        ratio_moments(
+            "memory_track_presence_mean_ratio_to_target",
+            prediction.sum(),
+            target.sum(),
+        )
+    )
+    result.update(
+        ratio_moments(
+            "memory_track_presence_positive_rate_ratio_to_target",
+            prediction_binary.float().sum(),
+            positive,
         )
     )
     result.update(
@@ -417,7 +444,13 @@ def object_memory_training_diagnostics(
         batch["future_valid"],
         loss_coverage,
     )
-    predicted_core = future_parts["future"] + 0.5 * future_parts["feature"]
+    predicted_dense = dense_feature_loss(
+        output["rendered_future_features"].detach().float(),
+        batch["future_features"].detach().float(),
+        batch["future_valid"],
+        loss_coverage,
+    )
+    predicted_core = future_parts["future"] + 0.5 * predicted_dense
     baseline_core = baseline["total"] + 0.5 * dense_baseline
     result = {
         "baseline_persistence_future": baseline["total"],
@@ -425,6 +458,8 @@ def object_memory_training_diagnostics(
         "baseline_persistence_object_feature": baseline["object_feature"],
         "baseline_persistence_center": baseline["center"],
         "baseline_persistence_dense_feature": dense_baseline,
+        "dense_feature_comparable": predicted_dense,
+        "dense_feature_training_objective": future_parts["feature"].detach().float(),
         "dynamics_gain_over_persistence": (
             baseline["total"] - future_parts["future"].detach().float()
         ),
@@ -439,7 +474,7 @@ def object_memory_training_diagnostics(
             baseline["center"] - future_parts["future_center"].detach().float()
         ),
         "dense_feature_gain_over_persistence": (
-            dense_baseline - future_parts["feature"].detach().float()
+            dense_baseline - predicted_dense
         ),
         "predictive_core": predicted_core.detach().float(),
         "baseline_persistence_predictive_core": baseline_core,
@@ -457,7 +492,7 @@ def object_memory_training_diagnostics(
     result.update(
         ratio_moments(
             "dense_feature_relative_gain_over_persistence",
-            dense_baseline - future_parts["feature"].detach().float(),
+            dense_baseline - predicted_dense,
             dense_baseline,
         )
     )

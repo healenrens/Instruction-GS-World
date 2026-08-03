@@ -126,6 +126,8 @@ class AdaptiveGaussianWMConfig:
     correspondence_sinkhorn_iterations: int = 32
     correspondence_dustbin_logit: float = 0.0
     correspondence_residual_scale: float = 0.1
+    correspondence_logit_clip: float = 4.0
+    correspondence_mass_tolerance: float = 5e-4
 
     def __post_init__(self) -> None:
         positive = {
@@ -213,6 +215,10 @@ class AdaptiveGaussianWMConfig:
             raise ValueError("correspondence_temperature must be positive")
         if self.correspondence_residual_scale < 0.0:
             raise ValueError("correspondence_residual_scale must be non-negative")
+        if self.correspondence_logit_clip <= 0.0:
+            raise ValueError("correspondence_logit_clip must be positive")
+        if not 0.0 < self.correspondence_mass_tolerance < 1.0:
+            raise ValueError("correspondence_mass_tolerance must be in (0, 1)")
         if self.prior_effect_weight < 0.0:
             raise ValueError("prior_effect_weight must be non-negative")
         if self.flow_source_scale <= 0.0:
@@ -464,7 +470,9 @@ class AdaptiveGaussianWMConfig:
             architecture="object_memory_v3",
             causal_object_correspondence=True,
             track_presence_semantics=True,
-            correspondence_sinkhorn_iterations=64,
+            correspondence_sinkhorn_iterations=256,
+            correspondence_logit_clip=4.0,
+            correspondence_mass_tolerance=5e-4,
         )
 
     @classmethod

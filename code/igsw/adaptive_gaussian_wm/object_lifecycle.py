@@ -121,6 +121,30 @@ def balanced_continuous_focal_loss(
     ) / (positive_valid + negative_valid).clamp_min(1.0)
 
 
+def balanced_continuous_probability_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    prediction = prediction.float().clamp(0.0, 1.0)
+    target = target.float().clamp(0.0, 1.0)
+    error = F.smooth_l1_loss(
+        prediction,
+        target,
+        beta=0.05,
+        reduction="none",
+    )
+    positive = weight.float() * target
+    negative = weight.float() * (1.0 - target)
+    positive_loss = _weighted_mean(error, positive)
+    negative_loss = _weighted_mean(error, negative)
+    positive_valid = (positive.sum() > 0).to(error.dtype)
+    negative_valid = (negative.sum() > 0).to(error.dtype)
+    return (
+        positive_loss * positive_valid + negative_loss * negative_valid
+    ) / (positive_valid + negative_valid).clamp_min(1.0)
+
+
 def object_lifecycle_loss(
     output: dict,
     gamma: float,
@@ -148,14 +172,14 @@ def object_lifecycle_loss(
     horizon = output["future_horizon_valid"].detach().float()[..., None]
     survival_weight = current * horizon
     birth_weight = (1.0 - current) * horizon
-    presence = balanced_continuous_focal_loss(
-        output.get(
-            "predicted_future_track_presence_logits",
-            output["predicted_future_existence_logits"],
-        ),
+    prediction = output.get(
+        "predicted_future_track_presence",
+        output["predicted_future_existence"],
+    ).float()
+    presence = balanced_continuous_probability_loss(
+        prediction,
         target_presence,
         horizon,
-        gamma,
     )
     survival = balanced_continuous_focal_loss(
         output["predicted_future_survival_logits"],
@@ -180,10 +204,28 @@ def object_lifecycle_loss(
         observable_weight,
         gamma,
     )
-    prediction = output.get(
-        "predicted_future_track_presence",
-        output["predicted_future_existence"],
+    history_prediction = output.get(
+        "online_history_track_presence",
+        output["online_history_existence"],
     ).float()
+    history_target = output.get(
+        "target_history_track_presence",
+        output["target_history_existence"],
+    ).detach().float()
+    history_anchor = balanced_continuous_probability_loss(
+        history_prediction,
+        history_target,
+        torch.ones_like(history_target),
+    )
+    presence_mass = _weighted_mean(
+        F.smooth_l1_loss(
+            prediction.mean(dim=-1),
+            target_presence.mean(dim=-1),
+            beta=0.05,
+            reduction="none",
+        ),
+        horizon.squeeze(-1),
+    )
     retention = _weighted_mean(
         F.relu(target_presence - prediction),
         survival_weight * target_presence,
@@ -196,10 +238,14 @@ def object_lifecycle_loss(
         + 0.5 * survival
         + 0.5 * birth
         + 0.5 * observability
+        + history_anchor
+        + presence_mass
         + retention
     )
     return total, {
         "geometry_track_presence": presence,
+        "lifecycle_history_presence_anchor": history_anchor,
+        "lifecycle_presence_mass_calibration": presence_mass,
         "lifecycle_track_retention": survival,
         "lifecycle_track_discovery": birth,
         "lifecycle_observation": observability,

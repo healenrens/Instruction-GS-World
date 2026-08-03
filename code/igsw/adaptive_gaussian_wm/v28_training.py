@@ -15,11 +15,11 @@ from .v40_stage_contracts import (
     validate_v40_initialization,
     validate_v40_warm_start_report,
 )
-from .v41_stage_contracts import (
-    validate_v41_initialization,
-    validate_v41_warm_start_report,
+from .v42_stage_contracts import (
+    validate_v42_initialization,
+    validate_v42_warm_start_report,
 )
-from .v41_runtime_contracts import gate_contract_fields, runtime_contract_fields
+from .v42_runtime_contracts import gate_contract_fields, runtime_contract_fields
 
 
 ARCHITECTURE = "object_memory_v1"
@@ -84,7 +84,7 @@ def is_v28(args) -> bool:
 
 def validate_v28_initialization(checkpoint: dict, args) -> None:
     if args.architecture == CORRESPONDENCE_ARCHITECTURE:
-        validate_v41_initialization(checkpoint, args)
+        validate_v42_initialization(checkpoint, args)
     elif args.architecture == LIFECYCLE_ARCHITECTURE:
         validate_v40_initialization(checkpoint, args)
     elif args.architecture == ARCHITECTURE:
@@ -93,7 +93,7 @@ def validate_v28_initialization(checkpoint: dict, args) -> None:
 
 def validate_v28_warm_start_report(report: dict, args) -> None:
     if args.architecture == CORRESPONDENCE_ARCHITECTURE:
-        validate_v41_warm_start_report(report, args)
+        validate_v42_warm_start_report(report, args)
     elif args.architecture == LIFECYCLE_ARCHITECTURE:
         validate_v40_warm_start_report(report, args)
     elif args.architecture == ARCHITECTURE and any(

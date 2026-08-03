@@ -34,6 +34,10 @@ def _pairwise_cosine(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
     return torch.einsum("bkd,bjd->bkj", left, right)
 
 
+def _soft_clip(value: torch.Tensor, limit: float) -> torch.Tensor:
+    return limit * torch.tanh(value.float() / limit)
+
+
 def _log_sinkhorn(
     scores: torch.Tensor,
     log_row_mass: torch.Tensor,
@@ -110,6 +114,7 @@ class CausalObjectCorrespondence(nn.Module):
         self.temperature = config.correspondence_temperature
         self.iterations = config.correspondence_sinkhorn_iterations
         self.residual_scale = config.correspondence_residual_scale
+        self.logit_clip = config.correspondence_logit_clip
         self.dustbin_logit = nn.Parameter(
             torch.tensor(float(config.correspondence_dustbin_logit))
         )
@@ -143,15 +148,16 @@ class CausalObjectCorrespondence(nn.Module):
             observed_geometry.center[:, None].float()
             - predicted.center[:, :, None].float()
         ) / support[..., None]
-        distance = displacement.square().sum(dim=-1).add(1e-6).sqrt()
+        displacement = displacement.clamp(-8.0, 8.0)
+        distance = displacement.square().sum(dim=-1).add(1e-6).sqrt().clamp_max(8.0)
         scale_difference = (
             observed_geometry.relative_scale[:, None, :].float().clamp_min(1e-6).log()
             - predicted.relative_scale[:, :, None].float().clamp_min(1e-6).log()
-        ).abs()
+        ).abs().clamp_max(8.0)
         disparity_difference = (
             observed_geometry.relative_disparity[:, None, :].float()
             - predicted.relative_disparity[:, :, None].float()
-        ).abs()
+        ).abs().clamp_max(8.0)
         presence = predicted.existence[:, :, None].float().clamp(0.0, 1.0)
         observed = observation.activity[:, None, :].float().clamp(0.0, 1.0)
         pair_features = torch.stack(
@@ -180,10 +186,16 @@ class CausalObjectCorrespondence(nn.Module):
         )
         score = presence * tracked_score + (1.0 - presence) * discovery_score
         score = score + 0.25 * observed.clamp_min(1e-4).log()
-        score = score + self.residual_scale * self.residual(pair_features).squeeze(-1)
+        learned_residual = torch.tanh(self.residual(pair_features).squeeze(-1).float())
+        score = score + self.residual_scale * learned_residual
+        score = _soft_clip(score / self.temperature, self.logit_clip)
+        dustbin = _soft_clip(
+            self.dustbin_logit.float() / self.temperature,
+            self.logit_clip,
+        ).reshape(1, 1, 1)
         transport, unmatched, discovery = _augmented_optimal_transport(
-            score / self.temperature,
-            (self.dustbin_logit.float() / self.temperature).reshape(1, 1, 1),
+            score,
+            dustbin,
             self.iterations,
         )
         match = transport.sum(dim=-1).clamp(0.0, 1.0)
