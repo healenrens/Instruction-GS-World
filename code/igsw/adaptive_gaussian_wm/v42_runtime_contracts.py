@@ -8,7 +8,7 @@ def gate_contract_fields(architecture: str) -> dict[str, object]:
         return {
             "identity_contract": "causal_sinkhorn_identity_v2",
             "correspondence_contract": (
-                "bounded_augmented_sinkhorn_current_only_v2"
+                "bounded_identity_preserving_sinkhorn_current_only_v3"
             ),
             "transport_contract": "support_normalized_relative_transport_v1",
             "lifecycle_contract": "track_presence_anchored_calibrated_v3",

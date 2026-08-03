@@ -182,7 +182,10 @@ class CausalObjectCorrespondence(nn.Module):
             - 0.1 * disparity_difference
         )
         discovery_score = (
-            0.5 * appearance - 0.25 * distance + observed
+            2.0 * identity
+            + 0.5 * appearance
+            - 0.25 * distance
+            + observed
         )
         score = presence * tracked_score + (1.0 - presence) * discovery_score
         score = score + 0.25 * observed.clamp_min(1e-4).log()

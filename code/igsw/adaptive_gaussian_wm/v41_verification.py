@@ -197,28 +197,63 @@ def verify_v41_correspondence_contracts(
         "correspondence is not translation/scale invariant",
     )
 
+    batch_size, object_count, identity_dim = predicted.identity_key.shape
+    feature_dim = predicted.decoded_feature.shape[-1]
+    _require(
+        min(identity_dim, feature_dim) >= object_count,
+        "synthetic retrieval basis is smaller than the object set",
+    )
+    identity_basis = torch.eye(
+        object_count,
+        identity_dim,
+        device=predicted.identity_key.device,
+        dtype=torch.float32,
+    )[None].expand(batch_size, -1, -1)
+    feature_basis = torch.eye(
+        object_count,
+        feature_dim,
+        device=predicted.decoded_feature.device,
+        dtype=predicted.decoded_feature.dtype,
+    )[None].expand(batch_size, -1, -1)
+    synthetic_prediction = replace(
+        predicted,
+        identity_key=identity_basis,
+        decoded_feature=feature_basis,
+        existence=torch.zeros_like(predicted.existence),
+    )
     synthetic_observation = replace(
         observation,
-        tracking_slots=predicted.identity_key[:, permutation],
-        decoded_feature=predicted.decoded_feature[:, permutation],
+        tracking_slots=identity_basis[:, permutation].to(
+            observation.tracking_slots.dtype
+        ),
+        decoded_feature=feature_basis[:, permutation].to(
+            observation.decoded_feature.dtype
+        ),
         activity=torch.ones_like(observation.activity),
     )
     synthetic_geometry = _permute_geometry(
         ObjectGeometryState(
-            center=predicted.center,
-            relative_scale=predicted.relative_scale,
-            relative_disparity=predicted.relative_disparity,
-            relations=predicted.relations,
+            center=synthetic_prediction.center,
+            relative_scale=synthetic_prediction.relative_scale,
+            relative_disparity=synthetic_prediction.relative_disparity,
+            relations=synthetic_prediction.relations,
         ),
         permutation,
     )
     with amp_context():
-        synthetic = module(predicted, synthetic_observation, synthetic_geometry)
+        synthetic = module(
+            synthetic_prediction,
+            synthetic_observation,
+            synthetic_geometry,
+        )
     expected = permutation[None].expand(synthetic.transport.shape[0], -1)
     retrieval_accuracy = float(
         (synthetic.transport.argmax(dim=-1) == expected).float().mean()
     )
-    _require(retrieval_accuracy == 1.0, "identity reappearance retrieval failed")
+    _require(
+        retrieval_accuracy == 1.0,
+        f"identity reappearance retrieval failed: accuracy={retrieval_accuracy:.6f}",
+    )
 
     expected_birth = (
         1.0 - predicted.existence
