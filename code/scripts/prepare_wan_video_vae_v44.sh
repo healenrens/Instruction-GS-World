@@ -37,8 +37,10 @@ command -v "${PIP}" >/dev/null || {
 mkdir -p "${MODEL_ROOT}" "${PYTHON_ROOT}"
 if ! PYTHONPATH="${PYTHON_ROOT}" "${PY}" -c \
     'import diffusers; from diffusers import AutoencoderKLWan; assert diffusers.__version__ == "0.35.2"'; then
-    "${PIP}" --python "${PY}" install --no-deps --target "${PYTHON_ROOT}" \
-        'diffusers==0.35.2'
+    "${PIP}" --python "${PY}" install --no-deps --no-compile \
+        --only-binary=:all: --index-url https://pypi.org/simple \
+        --report "${PYTHON_ROOT}/.pip-install-report.json" \
+        --target "${PYTHON_ROOT}" 'diffusers==0.35.2'
 fi
 PYTHONPATH="${PYTHON_ROOT}" "${PY}" -c \
     'import diffusers; from diffusers import AutoencoderKLWan; assert diffusers.__version__ == "0.35.2"'
