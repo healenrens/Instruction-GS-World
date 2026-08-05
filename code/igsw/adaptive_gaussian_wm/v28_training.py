@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 
 import torch
@@ -10,6 +9,7 @@ import torch
 from .checkpointing import CHECKPOINT_VERSION
 from .dense_readout_contracts import file_sha256
 from .loss_weights import AdaptiveGaussianLossWeights
+from .v28_runtime_metadata import build_v28_runtime_metadata
 from .v39_stage_contracts import validate_v39_initialization
 from .v40_stage_contracts import (
     validate_v40_initialization,
@@ -19,16 +19,22 @@ from .v42_stage_contracts import (
     validate_v42_initialization,
     validate_v42_warm_start_report,
 )
-from .v42_runtime_contracts import gate_contract_fields, runtime_contract_fields
+from .v42_runtime_contracts import gate_contract_fields
+from .v43_stage_contracts import (
+    validate_v43_initialization,
+    validate_v43_warm_start_report,
+)
 
 
 ARCHITECTURE = "object_memory_v1"
 LIFECYCLE_ARCHITECTURE = "object_memory_v2"
 CORRESPONDENCE_ARCHITECTURE = "object_memory_v3"
+OBJECT_REGION_ARCHITECTURE = "object_region_memory_v1"
 OBJECT_MEMORY_ARCHITECTURES = (
     ARCHITECTURE,
     LIFECYCLE_ARCHITECTURE,
     CORRESPONDENCE_ARCHITECTURE,
+    OBJECT_REGION_ARCHITECTURE,
 )
 DEFAULT_TARGET_GLOBAL_BATCH = 256
 def add_v28_arguments(parser) -> None:
@@ -45,6 +51,8 @@ def add_v28_arguments(parser) -> None:
     parser.add_argument("--core_lr", type=float, default=2e-4)
     parser.add_argument("--action_lr", type=float, default=2e-4)
     parser.add_argument("--readout_lr", type=float, default=2e-4)
+    parser.add_argument("--dino_lr", type=float, default=2e-6)
+    parser.add_argument("--new_module_lr", type=float, default=2e-4)
     parser.add_argument(
         "--readout_scope",
         choices=("off", "isolated", "joint"),
@@ -83,7 +91,9 @@ def is_v28(args) -> bool:
 
 
 def validate_v28_initialization(checkpoint: dict, args) -> None:
-    if args.architecture == CORRESPONDENCE_ARCHITECTURE:
+    if args.architecture == OBJECT_REGION_ARCHITECTURE:
+        validate_v43_initialization(checkpoint, args)
+    elif args.architecture == CORRESPONDENCE_ARCHITECTURE:
         validate_v42_initialization(checkpoint, args)
     elif args.architecture == LIFECYCLE_ARCHITECTURE:
         validate_v40_initialization(checkpoint, args)
@@ -92,7 +102,9 @@ def validate_v28_initialization(checkpoint: dict, args) -> None:
 
 
 def validate_v28_warm_start_report(report: dict, args) -> None:
-    if args.architecture == CORRESPONDENCE_ARCHITECTURE:
+    if args.architecture == OBJECT_REGION_ARCHITECTURE:
+        validate_v43_warm_start_report(report, args)
+    elif args.architecture == CORRESPONDENCE_ARCHITECTURE:
         validate_v42_warm_start_report(report, args)
     elif args.architecture == LIFECYCLE_ARCHITECTURE:
         validate_v40_warm_start_report(report, args)
@@ -150,7 +162,13 @@ def validate_v28_arguments(args, world_size: int) -> None:
         raise ValueError("object_memory_v1 forbids canonical action overrides")
     if args.posterior_dynamics_gate or args.posterior_core_training:
         raise ValueError("object_memory_v1 uses training_stage, not legacy modes")
-    if min(args.core_lr, args.action_lr, args.readout_lr) <= 0.0:
+    if min(
+        args.core_lr,
+        args.action_lr,
+        args.readout_lr,
+        args.dino_lr,
+        args.new_module_lr,
+    ) <= 0.0:
         raise ValueError("v39 learning rates must be positive")
     if args.goal_rollout_weight <= 0.0 or args.path_consistency_weight <= 0.0:
         raise ValueError("v39 requires positive rollout and path objectives")
@@ -217,6 +235,23 @@ def validate_v28_arguments(args, world_size: int) -> None:
             raise ValueError("v39 per-rank batch must be 2, 4, or 8")
         if not args.gate_report:
             raise ValueError("v39 training requires --gate_report")
+    if args.architecture == OBJECT_REGION_ARCHITECTURE:
+        if args.training_stage != "representation":
+            raise ValueError("v43 uses one representation run with an internal curriculum")
+        if args.representation_steps != 50000 or args.joint_steps != 0:
+            raise ValueError("v43 requires exactly 50000 single-run steps")
+        if (
+            args.target_global_batch != 256
+            or args.effective_global_batch != 256
+        ):
+            raise ValueError("v43 requires an effective global batch of 256")
+        if (args.core_lr, args.dino_lr, args.new_module_lr, args.action_lr) != (
+            2e-5,
+            2e-6,
+            2e-4,
+            2e-4,
+        ):
+            raise ValueError("v43 learning-rate groups differ from the fixed contract")
 
 
 def validate_v28_gate(args, dataset, project_root: str) -> dict:
@@ -245,8 +280,16 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         "architecture": args.architecture,
         "checkpoint_version": CHECKPOINT_VERSION,
         "checkpoint_contract": "rolling_recovery_v1",
-        "readout_backend": "change_only_object_residual",
-        "feature_contract": "jit_backbone_native_dinov2_l_1024",
+        "readout_backend": (
+            "offline_probe_only"
+            if args.architecture == OBJECT_REGION_ARCHITECTURE
+            else "change_only_object_residual"
+        ),
+        "feature_contract": (
+            "model_owned_trainable_dinov2_l_1024_region_768"
+            if args.architecture == OBJECT_REGION_ARCHITECTURE
+            else "jit_backbone_native_dinov2_l_1024"
+        ),
         "jit_dino_model": "vit_large_patch14_dinov2.lvd142m",
         "jit_dino_image_size": 518,
         "jit_dino_frame_batch": args.jit_dino_batch,
@@ -312,6 +355,8 @@ def _action_modules(model) -> tuple:
 def configure_v28_stage(model, args) -> None:
     if not is_v28(args):
         return
+    if args.architecture == OBJECT_REGION_ARCHITECTURE:
+        return
     if args.training_stage == "prior":
         model.requires_grad_(False)
         model.latent_actions.prior.requires_grad_(True)
@@ -344,19 +389,63 @@ def build_optimizer(model, args) -> torch.optim.AdamW:
         "dynamics.routing_query.",
         "dynamics.action_",
         "effect_composer.",
+        "region_effect_posterior.",
+        "region_dynamics.action_",
+        "region_dynamics.factor_keys",
+        "region_dynamics.route_query.",
+    )
+    dino_prefixes = (
+        "online_dino.backbone.blocks.12.",
+        "online_dino.backbone.blocks.13.",
+        "online_dino.backbone.blocks.14.",
+        "online_dino.backbone.blocks.15.",
+        "online_dino.backbone.blocks.16.",
+        "online_dino.backbone.blocks.17.",
+        "online_dino.backbone.blocks.18.",
+        "online_dino.backbone.blocks.19.",
+        "online_dino.backbone.blocks.20.",
+        "online_dino.backbone.blocks.21.",
+        "online_dino.backbone.blocks.22.",
+        "online_dino.backbone.blocks.23.",
+        "online_dino.backbone.norm.",
+    )
+    new_prefixes = (
+        "online_dino.projector.",
+        "region_transformer.",
+        "region_memory.",
+        "region_dynamics.",
     )
     core = []
     action = []
+    dino = []
+    new_modules = []
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        target = action if name.startswith(action_prefixes) else core
+        if name.startswith(action_prefixes):
+            target = action
+        elif name.startswith(dino_prefixes):
+            target = dino
+        elif name.startswith(new_prefixes):
+            target = new_modules
+        else:
+            target = core
         target.append(parameter)
     groups = []
     if core:
         groups.append({"params": core, "lr": args.core_lr, "group_name": "core"})
     if action:
         groups.append({"params": action, "lr": args.action_lr, "group_name": "action"})
+    if dino:
+        groups.append({"params": dino, "lr": args.dino_lr, "group_name": "dino"})
+    if new_modules:
+        groups.append(
+            {
+                "params": new_modules,
+                "lr": args.new_module_lr,
+                "group_name": "new_modules",
+            }
+        )
     if not groups:
         raise ValueError("v39 optimizer has no trainable parameters")
     return torch.optim.AdamW(groups, weight_decay=args.weight_decay)
@@ -406,85 +495,4 @@ def v28_loss_weights(args) -> AdaptiveGaussianLossWeights | None:
 
 
 def v28_runtime_metadata(args, dataset, gate: dict) -> dict:
-    if not is_v28(args):
-        return {}
-    return {
-        "checkpoint_version": CHECKPOINT_VERSION,
-        "checkpoint_contract": "rolling_recovery_v1",
-        "architecture": args.architecture,
-        "training_stage": args.training_stage,
-        **runtime_contract_fields(args.architecture),
-        "language_condition": "off",
-        "rgb_supervision": "off",
-        "latent_action_shape": [4, 32],
-        "temporal_contract": "dynamic_dual_horizon_v1",
-        "history_lengths": [1, 2, 3, 4],
-        "history_span_frames": list(dataset.history_span_frames),
-        "short_horizon_frames": args.short_horizon_frames,
-        "goal_query_seconds": args.goal_query_seconds,
-        "goal_tail_guard_frames": args.goal_tail_guard_frames,
-        "goal_probe_frames": args.goal_probe_frames,
-        "goal_stability_threshold": args.goal_stability_threshold,
-        "goal_rollout_weight": args.goal_rollout_weight,
-        "path_consistency_weight": args.path_consistency_weight,
-        "data_manifest_sha256": dataset.data_sha256,
-        "feature_source": args.feature_source,
-        "feature_contract": "jit_backbone_native_dinov2_l_1024",
-        "jit_dino_model": "vit_large_patch14_dinov2.lvd142m",
-        "jit_dino_image_size": 518,
-        "jit_dino_frame_batch": args.jit_dino_batch,
-        "control_hz": float(dataset.control_hz),
-        "core_lr": args.core_lr,
-        "action_lr": args.action_lr,
-        "readout_lr": args.readout_lr,
-        "readout_scope": args.readout_scope,
-        "current_readout_weight": args.current_readout_weight,
-        "readout_regularization_weight": args.readout_regularization_weight,
-        "carrier_support_weight": args.carrier_support_weight,
-        "carrier_compact_weight": args.carrier_compact_weight,
-        "gaussian_children": args.gaussian_children,
-        "readout_backend": "change_only_object_residual",
-        "basis_gate_report": (
-            os.path.abspath(args.basis_gate_report) if args.basis_gate_report else ""
-        ),
-        "carrier_preflight_report": (
-            os.path.abspath(args.carrier_preflight_report)
-            if args.carrier_preflight_report
-            else ""
-        ),
-        "dense_preflight_report": (
-            os.path.abspath(args.dense_preflight_report)
-            if args.dense_preflight_report
-            else ""
-        ),
-        "dense_preflight_report_sha256": args.dense_preflight_report_sha256,
-        "readout_gate_report": (
-            os.path.abspath(args.readout_gate_report)
-            if args.readout_gate_report
-            else ""
-        ),
-        "readout_gate_report_sha256": args.readout_gate_report_sha256,
-        "representation_gate_report": (
-            os.path.abspath(args.representation_gate_report)
-            if args.representation_gate_report
-            else ""
-        ),
-        "representation_gate_report_sha256": (args.representation_gate_report_sha256),
-        "posterior_gate_report": (
-            os.path.abspath(args.posterior_gate_report)
-            if args.posterior_gate_report
-            else ""
-        ),
-        "posterior_gate_report_sha256": args.posterior_gate_report_sha256,
-        "gpu_policy": "auto",
-        "target_global_batch": args.target_global_batch,
-        "effective_global_batch": args.effective_global_batch,
-        "teacher_sidecar": "enabled" if args.teacher_sidecar else "disabled",
-        "teacher_sidecar_sha256": getattr(dataset, "teacher_sidecar_sha256", ""),
-        "disabled_teacher_losses": (
-            [] if args.teacher_sidecar else ["relative_disparity", "visibility"]
-        ),
-        "gate_report": os.path.abspath(args.gate_report) if args.gate_report else "",
-        "gate_report_sha256": args.gate_report_sha256,
-        "gate_git_commit": gate.get("git_commit", ""),
-    }
+    return build_v28_runtime_metadata(args, dataset, gate, enabled=is_v28(args))

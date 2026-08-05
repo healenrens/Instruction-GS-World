@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import copy
+
 import torch
 import torch.nn as nn
+
+from .causal_region_transformer import CausalRegionTransformer
+from .change_residual_readout import ChangeResidualReadout
 from .conditioning import LanguageConditionProjector
 from .config import AdaptiveGaussianWMConfig
-from .change_residual_readout import ChangeResidualReadout
 from .decoder import GaussianReadout
 from .dense_object_readout import DenseObjectReadout
 from .dynamics import JointObjectLatentDynamics
@@ -30,6 +33,12 @@ from .object_slots import ObjectSlotAggregator
 from .rgb_supervision import residual_future_rgb, render_current_rgb, render_future_rgb
 from .scale import signed_gap_scale
 from .sequence_encoding import encode_visual_sequence
+from .hierarchical_region_dynamics import HierarchicalRegionDynamics
+from .object_region_memory import ObjectRegionMemory
+from .region_effect_posterior import RegionEffectPosterior
+from .trainable_dino_encoder import TrainableDinoRegionEncoder
+
+
 class AdaptiveGaussianObjectWorldModel(nn.Module):
     def __init__(self, config: AdaptiveGaussianWMConfig):
         super().__init__()
@@ -55,7 +64,9 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         if self.target_object_memory is not None:
             for parameter in self.target_object_memory.parameters():
                 parameter.requires_grad_(False)
-        self.latent_actions = LatentActionModel(config)
+        self.latent_actions = (
+            None if config.object_region_memory else LatentActionModel(config)
+        )
         self.effect_composer = (
             LatentEffectComposer(config) if config.dual_horizon_dynamics else None
         )
@@ -65,7 +76,9 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             else JointObjectLatentDynamics(config)
         )
         self.gaussian_readout = (
-            None if config.change_residual_readout else GaussianReadout(config)
+            None
+            if config.change_residual_readout or config.object_region_memory
+            else GaussianReadout(config)
         )
         self.dense_readout = (
             DenseObjectReadout(config) if config.dense_object_readout else None
@@ -83,13 +96,53 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             if config.language_effect_weight > 0.0
             else None
         )
+        self.online_dino = None
+        self.target_dino = None
+        self.region_transformer = None
+        self.target_region_transformer = None
+        self.region_memory = None
+        self.target_region_memory = None
+        self.region_dynamics = None
+        self.region_effect_posterior = None
+        if config.object_region_memory:
+            self.online_dino = TrainableDinoRegionEncoder(
+                config, config.dino_frame_batch
+            )
+            self.target_dino = copy.deepcopy(self.online_dino)
+            self.target_dino.freeze_as_target()
+            self.region_transformer = CausalRegionTransformer(config)
+            self.target_region_transformer = copy.deepcopy(self.region_transformer)
+            self.target_region_transformer.requires_grad_(False)
+            self.region_memory = ObjectRegionMemory(config)
+            self.target_region_memory = copy.deepcopy(self.region_memory)
+            self.target_region_memory.requires_grad_(False)
+            self.region_dynamics = HierarchicalRegionDynamics(config)
+            self.region_effect_posterior = RegionEffectPosterior(config)
+            self.gaussian_readout = None
+            self.dense_readout = None
+            self.change_readout = None
+            self.register_buffer(
+                "curriculum_step", torch.zeros((), dtype=torch.long), persistent=True
+            )
+
     def train(self, mode: bool = True):
         super().train(mode)
         self.target_allocator.eval()
         self.target_object_aggregator.eval()
         if self.target_object_memory is not None:
             self.target_object_memory.eval()
+        if self.target_dino is not None:
+            self.target_dino.eval()
+            self.target_region_transformer.eval()
+            self.target_region_memory.eval()
         return self
+
+    def set_curriculum_step(self, step: int) -> None:
+        if not self.config.object_region_memory:
+            return
+        if step < 0:
+            raise ValueError("curriculum step must be non-negative")
+        self.curriculum_step.fill_(step)
 
     @torch.no_grad()
     def update_target(self, momentum: float | None = None) -> None:
@@ -102,6 +155,12 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         )
         if self.object_memory is not None and self.target_object_memory is not None:
             pairs = pairs + ((self.target_object_memory, self.object_memory),)
+        if self.config.object_region_memory:
+            pairs = pairs + (
+                (self.target_dino, self.online_dino),
+                (self.target_region_transformer, self.region_transformer),
+                (self.target_region_memory, self.region_memory),
+            )
         for target, online in pairs:
             for target_parameter, online_parameter in zip(
                 target.parameters(),
@@ -187,6 +246,8 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         condition_tokens: torch.Tensor | None = None,
         condition_token_valid: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.latent_actions is None:
+            raise ValueError("v43 has no history-only latent-effect prior")
         return self.latent_actions.prior_context(
             history["slots"],
             history["activity"],
@@ -208,6 +269,12 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         actions_override: torch.Tensor | None = None,
         collect_diagnostics: bool = False,
     ) -> dict:
+        if self.config.object_region_memory:
+            if actions_override is not None or not use_posterior:
+                raise ValueError("v43 uses its internal curriculum posterior contract")
+            from .v43_model_runtime import forward_v43
+
+            return forward_v43(self, batch, collect_diagnostics)
         if phase == "representation":
             from .training import representation_pretrain_loss
 

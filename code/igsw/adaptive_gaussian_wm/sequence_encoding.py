@@ -1,11 +1,14 @@
 """Shared causal sequence encoding for legacy slots and persistent memory."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import torch
 
 from .gpstoken import GPSTokenState, LearnableGPSTokenAllocator
 from .object_memory import ObjectMemoryState, ObjectMemoryTransition
 from .object_slots import ObjectSlotAggregator, ObjectSlotState
+from .hierarchical_world_state import stack_region_states
 
 
 def validate_visual_sequence(
@@ -146,3 +149,139 @@ def encode_visual_sequence(
                 raise ValueError("memory encoder returned a legacy slot state")
             previous_memory = slot_state
     return _stack_states(token_states, slot_states, previous_memory)
+
+
+def _pool_projected_features(
+    token_state: GPSTokenState,
+    projected: torch.Tensor,
+) -> torch.Tensor:
+    mass = token_state.assignment.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+    normalized = token_state.assignment / mass
+    return torch.einsum("brn,bnd->brd", normalized, projected)
+
+
+def encode_object_region_sequence(
+    native_features: torch.Tensor,
+    projected_features: torch.Tensor,
+    coordinates: torch.Tensor,
+    valid: torch.Tensor,
+    times: torch.Tensor,
+    allocator,
+    temporal_regions,
+    aggregator,
+    root_memory,
+    region_memory,
+    make_masked_prediction: bool = False,
+) -> dict:
+    """Encode roots and persistent regions without reading any future fields."""
+    validate_visual_sequence(native_features, coordinates, valid, times)
+    if projected_features.shape[:3] != native_features.shape[:3]:
+        raise ValueError("projected DINO sequence shape differs from native features")
+    token_states = [
+        allocator(
+            native_features[:, index],
+            coordinates[:, index],
+            valid[:, index],
+        )
+        for index in range(native_features.shape[1])
+    ]
+    pooled_projected = torch.stack(
+        [
+            _pool_projected_features(state, projected_features[:, index])
+            for index, state in enumerate(token_states)
+        ],
+        dim=1,
+    )
+    latent = torch.stack([state.latent for state in token_states], dim=1)
+    center = torch.stack([state.center for state in token_states], dim=1)
+    covariance = torch.stack([state.covariance for state in token_states], dim=1)
+    activation = torch.stack(
+        [state.activation.squeeze(-1) for state in token_states], dim=1
+    )
+    contextual, transformer_inputs = temporal_regions(
+        latent,
+        pooled_projected,
+        center,
+        covariance,
+        activation,
+        times,
+    )
+    masked_prediction = None
+    masked_positions = None
+    if make_masked_prediction:
+        masked_prediction, masked_positions = temporal_regions.masked_prediction(
+            transformer_inputs,
+            activation,
+            0.4,
+        )
+
+    root_states = []
+    region_states = []
+    root_environment_weights = []
+    previous_root = None
+    previous_region = None
+    for index, original_tokens in enumerate(token_states):
+        tokens = replace(original_tokens, latent=contextual[:, index])
+        environment_weight = region_memory.environment_weight(
+            contextual[:, index],
+            tokens.activation.squeeze(-1),
+        )
+        root_tokens = replace(
+            tokens,
+            activation=tokens.activation * environment_weight[..., None],
+        )
+        if previous_root is None:
+            observation = aggregator(root_tokens)
+            roots = root_memory.initialize(observation, root_tokens)
+        else:
+            predicted_root = root_memory.predict(
+                previous_root, times[:, index] - times[:, index - 1]
+            )
+            observation = aggregator(
+                root_tokens,
+                predicted_root.tracking_slots,
+                predicted_root.center,
+                predicted_root.identity_key,
+            )
+            roots = root_memory.correct(predicted_root, observation, root_tokens)
+        region_observation = region_memory.observe(
+            tokens,
+            contextual[:, index],
+            pooled_projected[:, index],
+            roots,
+        )
+        if previous_region is None:
+            regions = region_observation
+        else:
+            predicted_region = region_memory.predict(
+                previous_region,
+                times[:, index] - times[:, index - 1],
+                predicted_root,
+            )
+            regions = region_memory.correct(predicted_region, region_observation)
+        root_states.append(roots)
+        region_states.append(regions)
+        root_environment_weights.append(environment_weight)
+        token_states[index] = tokens
+        previous_root = roots
+        previous_region = regions
+    roots = _stack_states(token_states, root_states, previous_root)
+    regions = stack_region_states(region_states)
+    return {
+        "roots": roots,
+        "regions": regions,
+        "token_states": token_states,
+        "root_states": root_states,
+        "region_states": region_states,
+        "last_root": previous_root,
+        "last_region": previous_region,
+        "contextual_regions": contextual,
+        "transformer_inputs": transformer_inputs,
+        "masked_region_prediction": masked_prediction,
+        "masked_region_positions": masked_positions,
+        "root_environment_weight": torch.stack(
+            root_environment_weights, dim=1
+        ),
+        "native_features": native_features,
+        "projected_features": projected_features,
+    }

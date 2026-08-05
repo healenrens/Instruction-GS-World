@@ -109,6 +109,9 @@ class LearnableGPSTokenAllocator(nn.Module):
         soft = torch.sigmoid(logits)
         budget_fraction = torch.sigmoid(self.budget_head(context)).squeeze(-1)
         available = self.config.max_micro_tokens - self.config.min_active_tokens
+        continuous_count = (
+            self.config.min_active_tokens + available * budget_fraction
+        )
         active_count = (
             self.config.min_active_tokens
             + torch.round(available * budget_fraction.detach()).long()
@@ -125,7 +128,14 @@ class LearnableGPSTokenAllocator(nn.Module):
         )[None].expand_as(order)
         ranks.scatter_(1, order, indices)
         hard = (ranks < active_count[:, None]).to(soft.dtype)[..., None]
-        activation = hard.detach() + soft - soft.detach()
+        if self.config.object_region_memory:
+            rank_gate = torch.sigmoid(
+                continuous_count[:, None] - ranks.to(continuous_count.dtype) - 0.5
+            )[..., None]
+            surrogate = soft * rank_gate
+            activation = hard.detach() + surrogate - surrogate.detach()
+        else:
+            activation = hard.detach() + soft - soft.detach()
         return activation, active_count, budget_fraction
 
     def forward(

@@ -24,6 +24,9 @@ def build_config(
         "object_memory_v3": (
             AdaptiveGaussianWMConfig.object_memory_correspondence_full
         ),
+        "object_region_memory_v1": (
+            AdaptiveGaussianWMConfig.object_region_memory_full
+        ),
     }
     constructor = object_memory_constructors.get(
         args.architecture,
@@ -55,18 +58,25 @@ def apply_architecture_args(
         "object_memory_v1",
         "object_memory_v2",
         "object_memory_v3",
+        "object_region_memory_v1",
     ):
         overrides.update(
             gaussian_children=args.gaussian_children,
             hierarchical_gaussian_carrier=args.gaussian_children > 1,
             dense_object_readout=False,
-            change_residual_readout=args.gaussian_children == 1,
+            change_residual_readout=(
+                args.gaussian_children == 1
+                and args.architecture != "object_region_memory_v1"
+            ),
             dual_horizon_dynamics=(
                 args.temporal_contract == "dynamic_dual_horizon_v1"
             ),
             goal_rollout_weight=args.goal_rollout_weight,
             path_consistency_weight=args.path_consistency_weight,
         )
+        if args.architecture == "object_region_memory_v1":
+            overrides["dino_frame_batch"] = args.jit_dino_batch
+            overrides["goal_stability_threshold"] = args.goal_stability_threshold
     if args.aggregation_mode != "auto":
         overrides["aggregation_mode"] = args.aggregation_mode
     if args.density_mode != "auto":

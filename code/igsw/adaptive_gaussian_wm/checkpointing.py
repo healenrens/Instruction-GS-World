@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 
 from .v40_warm_start import record_v40_transform
-CHECKPOINT_VERSION = 42
+CHECKPOINT_VERSION = 43
 def collect_rng_states(context) -> list[dict]:
     device = torch.device(context.device)
     local_state = {
@@ -36,7 +36,6 @@ def restore_rng_state(checkpoint: dict, context) -> None:
             raise ValueError("resume checkpoint has no CUDA RNG state")
         torch.cuda.set_rng_state(state["cuda"], device=device)
     random.setstate(state["python"])
-
 
 def save_checkpoint(
     path: str,
@@ -191,6 +190,8 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         "core_lr",
         "action_lr",
         "readout_lr",
+        "dino_lr",
+        "new_module_lr",
         "readout_scope",
         "current_readout_weight",
         "readout_regularization_weight",

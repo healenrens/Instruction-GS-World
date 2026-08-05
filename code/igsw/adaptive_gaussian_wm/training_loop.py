@@ -71,6 +71,8 @@ def train_phase(
             batch = move_to_device(cpu_batch, device)
             if feature_runtime is not None:
                 batch = feature_runtime(batch)
+            if model.config.object_region_memory:
+                model.set_curriculum_step(global_step)
             micro_count += 1
             synchronize = micro_count == args.grad_accum
             collect_diagnostics = (
@@ -159,6 +161,8 @@ def train_phase(
             )
             step += 1
             global_step += 1
+            if model.config.object_region_memory:
+                model.set_curriculum_step(global_step)
             metrics = finalize_diagnostic_metrics(
                 reduce_metrics(
                     {
@@ -207,6 +211,8 @@ def train_phase(
                     "updates_per_epoch": updates_per_epoch,
                     **metrics,
                 }
+                if model.config.object_region_memory:
+                    record["curriculum_phase"] = result["curriculum"].phase
                 record.update(
                     {
                         f"lr_{group.get('group_name', index)}": group["lr"]

@@ -7,6 +7,7 @@ import os
 
 _PROGRESS_KEYS = {
     "phase",
+    "curriculum_phase",
     "phase_step",
     "global_step",
     "sampler_epoch",
@@ -56,6 +57,10 @@ _DIAGNOSTIC_PREFIXES = (
     "short_",
     "goal_",
     "history_h",
+    "region_",
+    "temporal_",
+    "dino_",
+    "diagnostic_",
 )
 
 

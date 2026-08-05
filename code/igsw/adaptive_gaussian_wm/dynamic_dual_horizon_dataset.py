@@ -272,18 +272,23 @@ class DynamicDualHorizonEpisodeDataset(CausalVisualEpisodeDataset):
         short_seconds = self.short_horizon_frames / self.control_hz
         observation_times = (future_controls - anchor).float() / self.control_hz
         history_times = (history_controls - anchor).float() / self.control_hz
-        history_rgb, _ = self._decode_rgb(cache["rgb"], history_controls)
-        future_rgb, _ = self._decode_rgb(cache["rgb"], future_controls)
+        history_rgb, history_valid = self._decode_rgb(
+            cache["rgb"], history_controls
+        )
+        future_rgb, future_valid = self._decode_rgb(cache["rgb"], future_controls)
         probe_controls = torch.arange(
             goal_control - self.goal_probe_frames + 1,
             goal_control,
             dtype=torch.long,
         )
-        probe_rgb, _ = self._decode_rgb(cache["rgb"], probe_controls)
+        probe_rgb, probe_valid = self._decode_rgb(cache["rgb"], probe_controls)
         result = {
             "history_jit_rgb": history_rgb,
             "future_jit_rgb": future_rgb,
             "goal_probe_jit_rgb": probe_rgb,
+            "history_jit_valid": history_valid,
+            "future_jit_valid": future_valid,
+            "goal_probe_jit_valid": probe_valid,
             "history_times": history_times,
             "future_times": torch.tensor(
                 [short_seconds, self.goal_query_seconds], dtype=torch.float32

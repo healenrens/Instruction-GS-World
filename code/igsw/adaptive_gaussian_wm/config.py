@@ -1,7 +1,7 @@
 """Configuration for the adaptive GPSToken object-latent world model."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 
 from .config_validation import validate_action_and_prior_contracts
 
@@ -128,6 +128,22 @@ class AdaptiveGaussianWMConfig:
     correspondence_residual_scale: float = 0.1
     correspondence_logit_clip: float = 4.0
     correspondence_mass_tolerance: float = 5e-4
+    object_region_memory: bool = False
+    region_dim: int = 768
+    region_identity_dim: int = 128
+    region_owners: int = 18
+    region_temporal_layers: int = 4
+    region_dynamics_layers: int = 8
+    region_scene_fraction: float = 0.25
+    dino_model_name: str = "vit_large_patch14_dinov2.lvd142m"
+    dino_image_size: int = 518
+    dino_trainable_blocks: int = 12
+    dino_projector_dim: int = 768
+    dino_frame_batch: int = 16
+    curriculum_spatial_steps: int = 5000
+    curriculum_posterior_steps: int = 20000
+    curriculum_ramp_steps: int = 2000
+    goal_stability_threshold: float = 0.05
 
     def __post_init__(self) -> None:
         positive = {
@@ -154,6 +170,18 @@ class AdaptiveGaussianWMConfig:
             "correspondence_sinkhorn_iterations": (
                 self.correspondence_sinkhorn_iterations
             ),
+            "region_dim": self.region_dim,
+            "region_identity_dim": self.region_identity_dim,
+            "region_owners": self.region_owners,
+            "region_temporal_layers": self.region_temporal_layers,
+            "region_dynamics_layers": self.region_dynamics_layers,
+            "dino_image_size": self.dino_image_size,
+            "dino_trainable_blocks": self.dino_trainable_blocks,
+            "dino_projector_dim": self.dino_projector_dim,
+            "dino_frame_batch": self.dino_frame_batch,
+            "curriculum_spatial_steps": self.curriculum_spatial_steps,
+            "curriculum_posterior_steps": self.curriculum_posterior_steps,
+            "curriculum_ramp_steps": self.curriculum_ramp_steps,
         }
         for name, value in positive.items():
             if value <= 0:
@@ -165,9 +193,11 @@ class AdaptiveGaussianWMConfig:
             "object_memory_v1",
             "object_memory_v2",
             "object_memory_v3",
+            "object_region_memory_v1",
         ):
             raise ValueError(
-                "architecture must be legacy or an object_memory_v1-v3 variant"
+                "architecture must be legacy, object_memory_v1-v3, or "
+                "object_region_memory_v1"
             )
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
@@ -276,6 +306,7 @@ class AdaptiveGaussianWMConfig:
             "object_memory_v1",
             "object_memory_v2",
             "object_memory_v3",
+            "object_region_memory_v1",
         ):
             if not self.persistent_object_memory or not self.hard_token_gate:
                 raise ValueError(
@@ -293,7 +324,10 @@ class AdaptiveGaussianWMConfig:
                 raise ValueError("object_memory_v1 is language-free and feature-only")
             if not self.full_dino_features or self.feature_dim != 1024:
                 raise ValueError("backbone-native DINOv2-L requires feature_dim=1024")
-            if not self.change_residual_readout or not self.explicit_background_state:
+            if (
+                self.architecture != "object_region_memory_v1"
+                and (not self.change_residual_readout or not self.explicit_background_state)
+            ):
                 raise ValueError(
                     "object_memory_v1 requires change-only readout and background state"
                 )
@@ -310,6 +344,54 @@ class AdaptiveGaussianWMConfig:
                 )
             ):
                 raise ValueError("object_memory_v1 forbids explicit action anchors")
+        if self.architecture == "object_region_memory_v1":
+            if not self.object_region_memory:
+                raise ValueError("v43 requires persistent object-region memory")
+            state_shape = (
+                self.feature_dim,
+                self.token_dim,
+                self.object_dim,
+                self.model_dim,
+                self.object_slots,
+                self.region_dim,
+                self.region_identity_dim,
+                self.region_owners,
+            )
+            if state_shape != (1024, 768, 1536, 1536, 16, 768, 128, 18):
+                raise ValueError("v43 root/region state dimensions differ")
+            if not 0.0 < self.region_scene_fraction <= 0.25:
+                raise ValueError("region_scene_fraction must be in (0, 0.25]")
+            if self.region_owners != self.object_slots + 2:
+                raise ValueError(
+                    "region owners must be object slots plus scene/transient"
+                )
+            if self.dino_trainable_blocks != 12:
+                raise ValueError("v43 requires exactly 12 trainable DINO blocks")
+            if self.dino_model_name != "vit_large_patch14_dinov2.lvd142m":
+                raise ValueError("v43 requires the DINOv2-L/14 backbone")
+            if self.dino_image_size != 518:
+                raise ValueError("v43 requires the 518px DINO patch grid")
+            if self.dino_projector_dim != self.region_dim:
+                raise ValueError("DINO projector output must equal region_dim")
+            if self.curriculum_spatial_steps >= self.curriculum_posterior_steps:
+                raise ValueError("v43 curriculum boundaries are not ordered")
+            if self.goal_stability_threshold <= 0.0:
+                raise ValueError("goal stability threshold must be positive")
+            if self.change_residual_readout or self.dense_object_readout:
+                raise ValueError("v43 excludes dense future readout from the core model")
+            if self.gaussian_feature_residual or self.rgb_supervision:
+                raise ValueError("v43 excludes Gaussian/RGB core supervision")
+            if not all(
+                (
+                    self.persistent_identity_key,
+                    self.relative_transport_dynamics,
+                    self.factorized_lifecycle,
+                    self.causal_object_correspondence,
+                    self.track_presence_semantics,
+                    self.dual_horizon_dynamics,
+                )
+            ):
+                raise ValueError("v43 requires v42 root lifecycle and dual-horizon state")
         if self.architecture == "object_memory_v2" and not all(
             (
                 self.persistent_identity_key,
@@ -337,6 +419,7 @@ class AdaptiveGaussianWMConfig:
             "object_memory_v1",
             "object_memory_v2",
             "object_memory_v3",
+            "object_region_memory_v1",
         ):
             raise ValueError("dual-horizon Dynamics requires Object Memory")
 
@@ -357,145 +440,51 @@ class AdaptiveGaussianWMConfig:
 
     @classmethod
     def tiny(cls, feature_dim: int) -> "AdaptiveGaussianWMConfig":
-        return cls(
-            feature_dim=feature_dim,
-            token_dim=48,
-            object_dim=48,
-            model_dim=64,
-            max_micro_tokens=24,
-            object_slots=4,
-            slot_iterations=2,
-            dynamics_layers=2,
-            heads=4,
-            action_tokens=2,
-            action_dim=12,
-            flow_hidden_dim=96,
-            flow_steps=8,
-            density_mode="adaptive",
-            joint_flow=True,
-            normalize_posterior=True,
-            slot_auxiliary=True,
-            structured_action=True,
-            center_conditioned_posterior=True,
-            temporal_prior_context=True,
-        )
+        from .config_profiles import tiny_profile
+
+        return tiny_profile(cls, feature_dim)
 
     @classmethod
     def full(cls, feature_dim: int) -> "AdaptiveGaussianWMConfig":
-        return cls(
-            feature_dim=feature_dim,
-            token_dim=768,
-            object_dim=1536,
-            model_dim=1536,
-            max_micro_tokens=256,
-            object_slots=16,
-            slot_iterations=3,
-            dynamics_layers=28,
-            heads=16,
-            action_tokens=4,
-            action_dim=64,
-            flow_hidden_dim=2048,
-            flow_steps=32,
-            density_mode="adaptive",
-            joint_flow=True,
-            normalize_posterior=True,
-            slot_auxiliary=True,
-            structured_action=True,
-            center_conditioned_posterior=True,
-            temporal_prior_context=True,
-        )
+        from .config_profiles import full_profile
+
+        return full_profile(cls, feature_dim)
 
     @classmethod
     def object_memory_full(cls, feature_dim: int) -> "AdaptiveGaussianWMConfig":
-        return cls(
-            feature_dim=feature_dim,
-            token_dim=768,
-            object_dim=1536,
-            model_dim=1536,
-            max_micro_tokens=256,
-            min_active_tokens=64,
-            object_slots=16,
-            slot_iterations=3,
-            dynamics_layers=28,
-            heads=16,
-            action_tokens=4,
-            action_dim=32,
-            flow_hidden_dim=2048,
-            flow_steps=32,
-            density_mode="adaptive",
-            joint_flow=True,
-            normalize_posterior=True,
-            slot_auxiliary=True,
-            structured_action=True,
-            decoupled_jepa_slots=True,
-            temporal_prior_context=True,
-            spatial_slot_attention=True,
-            architecture="object_memory_v1",
-            persistent_object_memory=True,
-            relative_geometry=True,
-            hard_token_gate=True,
-            continuous_effect_action=True,
-            factorized_dynamics=True,
-            gaussian_feature_residual=True,
-            gaussian_children=1,
-            hierarchical_gaussian_carrier=False,
-            dense_object_readout=False,
-            dense_readout_dim=256,
-            full_dino_features=True,
-            explicit_background_state=True,
-            change_residual_readout=True,
-            change_readout_dim=256,
-        )
+        from .config_profiles import object_memory_profile
+
+        return object_memory_profile(cls, feature_dim)
 
     @classmethod
     def object_memory_lifecycle_full(
         cls,
         feature_dim: int,
     ) -> "AdaptiveGaussianWMConfig":
-        return replace(
-            cls.object_memory_full(feature_dim),
-            architecture="object_memory_v2",
-            persistent_identity_key=True,
-            relative_transport_dynamics=True,
-            factorized_lifecycle=True,
-        )
+        from .config_profiles import lifecycle_profile
+
+        return lifecycle_profile(cls, feature_dim)
 
     @classmethod
     def object_memory_correspondence_full(
         cls,
         feature_dim: int,
     ) -> "AdaptiveGaussianWMConfig":
-        return replace(
-            cls.object_memory_lifecycle_full(feature_dim),
-            architecture="object_memory_v3",
-            causal_object_correspondence=True,
-            track_presence_semantics=True,
-            correspondence_sinkhorn_iterations=256,
-            correspondence_logit_clip=4.0,
-            correspondence_mass_tolerance=5e-4,
-        )
+        from .config_profiles import correspondence_profile
+
+        return correspondence_profile(cls, feature_dim)
+
+    @classmethod
+    def object_region_memory_full(
+        cls,
+        feature_dim: int,
+    ) -> "AdaptiveGaussianWMConfig":
+        from .config_profiles import object_region_profile
+
+        return object_region_profile(cls, feature_dim)
 
     @classmethod
     def probe(cls, feature_dim: int) -> "AdaptiveGaussianWMConfig":
-        return cls(
-            feature_dim=feature_dim,
-            token_dim=96,
-            object_dim=96,
-            model_dim=128,
-            max_micro_tokens=64,
-            object_slots=8,
-            slot_iterations=3,
-            dynamics_layers=3,
-            heads=8,
-            action_tokens=4,
-            action_dim=24,
-            flow_hidden_dim=256,
-            flow_steps=12,
-            density_mode="adaptive",
-            joint_flow=True,
-            normalize_posterior=True,
-            slot_auxiliary=True,
-            structured_action=True,
-            center_conditioned_posterior=True,
-            temporal_prior_context=True,
-        )
+        from .config_profiles import probe_profile
+
+        return probe_profile(cls, feature_dim)

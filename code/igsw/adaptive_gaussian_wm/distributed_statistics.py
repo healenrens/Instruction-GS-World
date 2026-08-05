@@ -32,6 +32,16 @@ def gather_batch_without_grad(value: torch.Tensor) -> torch.Tensor:
     return torch.cat(gathered, dim=0)
 
 
+def roll_batch_with_grad(value: torch.Tensor) -> torch.Tensor:
+    """Use the preceding cross-rank sample while preserving action gradients."""
+    gathered = gather_batch_with_grad(value)
+    shifted = gathered.roll(1, dims=0)
+    if not dist.is_available() or not dist.is_initialized():
+        return shifted
+    start = dist.get_rank() * value.shape[0]
+    return shifted[start : start + value.shape[0]]
+
+
 def statistical_batch_size(local_count: int, device: torch.device) -> torch.Tensor:
     world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
     return torch.tensor(float(local_count * world_size), device=device)

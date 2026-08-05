@@ -1,0 +1,56 @@
+"""Cross-rank anti-collapse statistics over supported compact features."""
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+
+from .distributed_statistics import (
+    gather_batch_with_grad,
+    gather_batch_without_grad,
+)
+
+
+def feature_statistics_regularizer(
+    feature: torch.Tensor,
+    valid: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if valid.shape != feature.shape[:-1]:
+        raise ValueError("feature regularizer validity shape differs")
+    global_feature = gather_batch_with_grad(feature).float()
+    global_valid = gather_batch_without_grad(valid).bool()
+    supported = global_feature.reshape(-1, feature.shape[-1])[
+        global_valid.reshape(-1)
+    ]
+    if supported.shape[0] < 2:
+        raise ValueError("feature regularizer needs at least two valid vectors")
+    standard_deviation = supported.std(dim=0, unbiased=False)
+    variance = F.relu(0.5 - standard_deviation).mean()
+    sampled = supported[:, ::6]
+    sampled = sampled - sampled.mean(dim=0, keepdim=True)
+    covariance = sampled.T @ sampled / (sampled.shape[0] - 1)
+    off_diagonal = covariance - torch.diag_embed(covariance.diagonal())
+    return variance, off_diagonal.square().mean()
+
+
+def action_statistics_regularizer(
+    actions: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    global_actions = gather_batch_with_grad(actions).float().flatten(0, -2)
+    standard_deviation = global_actions.std(dim=0, unbiased=False)
+    variance = F.relu(0.05 - standard_deviation).mean()
+    centered = global_actions - global_actions.mean(dim=0, keepdim=True)
+    covariance = centered.T @ centered / max(1, centered.shape[0] - 1)
+    off_diagonal = covariance - torch.diag_embed(covariance.diagonal())
+    return variance, off_diagonal.square().mean()
+
+
+def transient_owner_regularizer(
+    owner: torch.Tensor,
+    association_confidence: torch.Tensor,
+    presence: torch.Tensor,
+) -> torch.Tensor:
+    evidence = (1.0 - association_confidence.float()).detach()
+    logits = torch.logit(owner[..., -1].float().clamp(1e-5, 1.0 - 1e-5))
+    loss = F.binary_cross_entropy_with_logits(logits, evidence, reduction="none")
+    weight = presence.float()
+    return (loss * weight).sum() / weight.sum().clamp_min(1.0)
