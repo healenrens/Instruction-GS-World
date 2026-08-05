@@ -32,7 +32,12 @@ def validate_v44_initialization(checkpoint: dict, args) -> None:
 def validate_v44_warm_start_report(report: dict, args) -> None:
     if args.architecture != ARCHITECTURE:
         raise ValueError("v44 warm-start report used by another architecture")
-    allowed_missing = ("region_memory.video_", "target_region_memory.video_")
+    allowed_missing = (
+        "region_memory.video_",
+        "target_region_memory.video_",
+        "region_memory.structural_",
+        "target_region_memory.structural_",
+    )
     invalid_missing = [
         name for name in report["missing"] if not name.startswith(allowed_missing)
     ]

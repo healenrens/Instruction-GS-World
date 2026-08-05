@@ -54,6 +54,8 @@ class ObjectRegionMemory(nn.Module):
         self.video_projection = None
         self.video_gate = None
         self.video_decoder = None
+        self.structural_motion_input = None
+        self.structural_correction_gate = None
         if config.video_vae_feature_dim > 0:
             self.video_projection = nn.Sequential(
                 nn.LayerNorm(config.video_vae_feature_dim),
@@ -72,6 +74,25 @@ class ObjectRegionMemory(nn.Module):
                 nn.Linear(dim, dim),
                 nn.GELU(approximate="tanh"),
                 nn.Linear(dim, config.video_vae_feature_dim),
+            )
+            structural_dim = (
+                config.region_identity_dim + config.region_owners + 4
+            )
+            self.structural_motion_input = nn.Sequential(
+                nn.LayerNorm(structural_dim),
+                nn.Linear(structural_dim, dim),
+                nn.SiLU(),
+                nn.Linear(dim, dim),
+            )
+            correction_dim = (
+                2 * config.region_identity_dim
+                + 2 * config.region_owners
+                + 7
+            )
+            self.structural_correction_gate = nn.Sequential(
+                nn.Linear(correction_dim, dim),
+                nn.SiLU(),
+                nn.Linear(dim, 1),
             )
 
     def decode_video_feature(self, feature: torch.Tensor) -> torch.Tensor:
@@ -276,10 +297,24 @@ class ObjectRegionMemory(nn.Module):
         feature = previous.feature + 0.05 * self.feature_predictor(
             previous.feature + time_feature
         )
+        motion_feature = previous.feature
+        if self.structural_motion_input is not None:
+            motion_feature = self.structural_motion_input(
+                torch.cat(
+                    (
+                        previous.identity_key,
+                        previous.owner,
+                        previous.relative_center,
+                        previous.presence[..., None],
+                        previous.visibility[..., None],
+                    ),
+                    dim=-1,
+                )
+            )
         center = (
             previous.center
             + 0.25
-            * torch.tanh(self.motion_head(previous.feature + time_feature))
+            * torch.tanh(self.motion_head(motion_feature + time_feature))
             * delta_time[:, None, None]
         ).clamp(-1.25, 1.25)
         object_owner = previous.owner[..., : self.config.object_slots]
@@ -351,17 +386,36 @@ class ObjectRegionMemory(nn.Module):
             ),
         }
         confidence = matched.confidence.to(predicted.presence.dtype)
-        gate_input = torch.cat(
-            (
-                predicted.feature,
-                aligned["feature"],
-                confidence[..., None].to(predicted.feature.dtype),
-                predicted.presence[..., None].to(predicted.feature.dtype),
-                aligned["visibility"][..., None].to(predicted.feature.dtype),
-            ),
-            dim=-1,
-        )
-        gate = torch.sigmoid(self.correction_gate(gate_input)).squeeze(-1)
+        if self.structural_correction_gate is None:
+            gate_input = torch.cat(
+                (
+                    predicted.feature,
+                    aligned["feature"],
+                    confidence[..., None].to(predicted.feature.dtype),
+                    predicted.presence[..., None].to(predicted.feature.dtype),
+                    aligned["visibility"][..., None].to(predicted.feature.dtype),
+                ),
+                dim=-1,
+            )
+            gate_logits = self.correction_gate(gate_input)
+        else:
+            structural_dtype = predicted.feature.dtype
+            gate_input = torch.cat(
+                (
+                    predicted.identity_key,
+                    aligned["identity"],
+                    predicted.owner,
+                    aligned["owner"],
+                    predicted.relative_center,
+                    aligned["relative_center"],
+                    confidence[..., None],
+                    predicted.presence[..., None],
+                    aligned["visibility"][..., None],
+                ),
+                dim=-1,
+            ).to(structural_dtype)
+            gate_logits = self.structural_correction_gate(gate_input)
+        gate = torch.sigmoid(gate_logits).squeeze(-1)
         gate = gate.to(predicted.presence.dtype)
         gate = gate * aligned["visibility"] * confidence
         birth = (
