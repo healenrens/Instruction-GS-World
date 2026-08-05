@@ -188,7 +188,6 @@ def build_model(dataset, args, device):
         path_consistency_weight=args.path_consistency_weight,
         video_vae_model=args.video_vae_model,
         video_vae_contract=args.video_vae_contract,
-        video_vae_pythonpath=args.video_vae_pythonpath,
         video_vae_batch=args.video_vae_batch,
     )
     model = AdaptiveGaussianObjectWorldModel(config).to(device)
