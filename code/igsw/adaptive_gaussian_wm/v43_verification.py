@@ -397,7 +397,11 @@ def verify_v43_action_factorization(
         f"max_difference={region_base_difference:.9g}",
     )
     _require(root_zero_residual == 0.0, "zero root effect has a residual")
-    _require(region_zero_residual == 0.0, "zero region effect has a residual")
+    _require(
+        region_zero_residual == 0.0,
+        "zero region effect has a residual: "
+        f"max_difference={region_zero_residual:.9g}",
+    )
     _require(region_zero_presence < 1e-6, "zero effect changed region presence")
     _require(region_zero_visibility < 1e-6, "zero effect changed region visibility")
     _require(

@@ -121,12 +121,15 @@ class HierarchicalRegionDynamics(nn.Module):
         self,
         owner: torch.Tensor,
         root_slots: torch.Tensor,
+        *,
+        include_bias: bool = True,
     ) -> torch.Tensor:
         object_owner = owner[..., : self.config.object_slots]
         object_context = torch.einsum(
             "brk,bqkd->bqrd", object_owner, root_slots
         )
-        return self.root_input(object_context)
+        bias = self.root_input.bias if include_bias else None
+        return F.linear(object_context, self.root_input.weight, bias)
 
     def _enforce_scene_quota(
         self,
@@ -249,6 +252,7 @@ class HierarchicalRegionDynamics(nn.Module):
         root_effect = self._root_context(
             current_owner,
             root_future_slots - base_root_future_slots,
+            include_bias=False,
         )
         action_hidden = self.action_input(region_effect) + root_effect
         action_feature = torch.tanh(
