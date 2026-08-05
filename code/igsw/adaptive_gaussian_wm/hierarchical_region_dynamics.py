@@ -231,7 +231,9 @@ class HierarchicalRegionDynamics(nn.Module):
                 src_key_padding_mask=key_padding,
             )
         ).reshape(batch, queries, regions, dim)
-        hidden = hidden * active[:, None, :, None].to(hidden.dtype)
+        hidden = torch.where(
+            active[:, None, :, None], hidden, torch.zeros_like(hidden)
+        )
         base_feature = current_feature[:, None] + self.base_feature_head(hidden)
         base_geometry = self.base_geometry_head(hidden)
         base_center = current_center[:, None] + 0.25 * torch.tanh(

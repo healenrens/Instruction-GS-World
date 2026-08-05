@@ -35,17 +35,27 @@ class CausalRegionCorrespondence(nn.Module):
     def forward(self, previous, observation) -> RegionAssociation:
         if previous.feature.shape != observation.feature.shape:
             raise ValueError("region correspondence feature shapes differ")
+        observed = observation.presence > 1e-4
+
+        def observed_value(value: torch.Tensor) -> torch.Tensor:
+            mask = observed
+            while mask.ndim < value.ndim:
+                mask = mask[..., None]
+            return torch.where(mask, value, torch.zeros_like(value))
+
         identity = torch.einsum(
             "brd,bsd->brs",
             F.normalize(previous.identity_key.float(), dim=-1),
-            F.normalize(observation.identity_key.float(), dim=-1),
+            F.normalize(observed_value(observation.identity_key).float(), dim=-1),
         )
         geometry = (
             previous.relative_center[:, :, None]
-            - observation.relative_center[:, None]
+            - observed_value(observation.relative_center)[:, None]
         ).square().sum(dim=-1)
         owner = torch.einsum(
-            "bro,bso->brs", previous.owner.float(), observation.owner.float()
+            "bro,bso->brs",
+            previous.owner.float(),
+            observed_value(observation.owner).float(),
         )
         score = (
             self.identity_weight.abs() * identity
@@ -60,7 +70,9 @@ class CausalRegionCorrespondence(nn.Module):
         confidence = matrix.max(dim=-1).values * previous.presence
 
         def align(value: torch.Tensor) -> torch.Tensor:
-            return torch.einsum("brs,bs...->br...", matrix, value)
+            return torch.einsum(
+                "brs,bs...->br...", matrix, observed_value(value)
+            )
 
         return RegionAssociation(
             matrix=matrix,

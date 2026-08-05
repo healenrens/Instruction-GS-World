@@ -112,7 +112,7 @@ class CausalRegionTransformer(nn.Module):
             tokens.reshape(batch * frames, regions, dim),
             src_key_padding_mask=~active.reshape(batch * frames, regions),
         ).reshape(batch, frames, regions, dim)
-        spatial = spatial * active[..., None].to(spatial.dtype)
+        spatial = torch.where(active[..., None], spatial, torch.zeros_like(spatial))
         temporal = spatial.permute(0, 2, 1, 3).reshape(
             batch * regions, frames, dim
         )
@@ -120,8 +120,8 @@ class CausalRegionTransformer(nn.Module):
             batch * regions, frames
         )
         safe_temporal_active = temporal_active.clone()
-        entirely_inactive = ~safe_temporal_active.any(dim=1)
-        safe_temporal_active[entirely_inactive, 0] = True
+        # A zero sentinel at t=0 prevents all-masked causal attention rows.
+        safe_temporal_active[:, 0] = True
         causal_mask = torch.triu(
             torch.ones(frames, frames, device=tokens.device, dtype=torch.bool),
             diagonal=1,
@@ -131,14 +131,18 @@ class CausalRegionTransformer(nn.Module):
             mask=causal_mask,
             src_key_padding_mask=~safe_temporal_active,
         )
-        contextual = contextual * (~entirely_inactive)[:, None, None].to(
-            contextual.dtype
+        contextual = torch.where(
+            temporal_active[..., None],
+            contextual,
+            torch.zeros_like(contextual),
         )
         contextual = contextual.reshape(batch, regions, frames, dim).permute(
             0, 2, 1, 3
         )
         contextual = self.output_norm(contextual)
-        return contextual * active[..., None].to(contextual.dtype)
+        return torch.where(
+            active[..., None], contextual, torch.zeros_like(contextual)
+        )
 
     def forward(
         self,

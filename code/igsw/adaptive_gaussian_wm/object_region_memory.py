@@ -131,8 +131,7 @@ class ObjectRegionMemory(nn.Module):
             (dim,),
         )
         active = tokens.activation.squeeze(-1) > 0.5
-        active_weight = active.to(feature.dtype)
-        feature = feature * active_weight[..., None]
+        feature = torch.where(active[..., None], feature, torch.zeros_like(feature))
         object_logits = roots.assignment.float().clamp_min(1e-6).log()
         scene_logit = roots.background_assignment.float().clamp_min(1e-6).log()
         scene_allowed = self._scene_quota(scene_logit, active)
@@ -160,7 +159,9 @@ class ObjectRegionMemory(nn.Module):
             object_owner / object_mass.clamp_min(1e-6),
             roots.center,
         )
-        center = tokens.center * active_weight[..., None]
+        center = torch.where(
+            active[..., None], tokens.center, torch.zeros_like(tokens.center)
+        )
         relative_center = object_mass * (center - object_center)
         relative_center = relative_center + (1.0 - object_mass) * center
         identity = F.normalize(
@@ -172,10 +173,12 @@ class ObjectRegionMemory(nn.Module):
         presence = activation
         visibility = activation
         covariance_eye = torch.eye(2, device=feature.device, dtype=feature.dtype)
-        covariance = tokens.covariance * active_weight[..., None, None]
-        covariance = covariance + (
-            1.0 - active_weight
-        )[..., None, None] * self.config.covariance_floor * covariance_eye
+        inactive_covariance = self.config.covariance_floor * covariance_eye
+        covariance = torch.where(
+            active[..., None, None],
+            tokens.covariance,
+            inactive_covariance,
+        )
         association = self._identity_association(feature)
         state = RegionMemoryState(
             feature=feature,
