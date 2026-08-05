@@ -79,6 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal_tail_guard_frames", type=int, default=0)
     parser.add_argument("--goal_probe_frames", type=int, default=3)
     parser.add_argument("--goal_stability_threshold", type=float, default=0.05)
+    parser.add_argument("--goal_gate_candidates", type=int, default=32)
     parser.add_argument("--goal_rollout_weight", type=float, default=1.0)
     parser.add_argument("--path_consistency_weight", type=float, default=0.25)
     args = parser.parse_args()
@@ -88,6 +89,7 @@ def parse_args() -> argparse.Namespace:
         value = getattr(args, name)
         require(not value or os.path.isabs(value), f"--{name} must be absolute")
     require(args.jit_dino_batch > 0, "DINO frame batch must be positive")
+    require(args.goal_gate_candidates >= 4, "goal gate requires four candidates")
     return args
 
 
@@ -425,6 +427,7 @@ def main() -> None:
         "region_feature_dim": 768,
         "curriculum_boundaries": [5000, 20000, 50000],
         "goal_stability_threshold": args.goal_stability_threshold,
+        "goal_gate_candidates": args.goal_gate_candidates,
         "goal_rollout_weight": args.goal_rollout_weight,
         "path_consistency_weight": args.path_consistency_weight,
         "control_hz": float(dataset.control_hz),

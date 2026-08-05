@@ -94,6 +94,7 @@ run_verifier() {
         --goal_tail_guard_frames "${GOAL_TAIL_GUARD_FRAMES:-0}"
         --goal_probe_frames "${GOAL_PROBE_FRAMES:-3}"
         --goal_stability_threshold "${GOAL_STABILITY_THRESHOLD:-0.05}"
+        --goal_gate_candidates "${GOAL_GATE_CANDIDATES:-32}"
         --goal_rollout_weight "${GOAL_ROLLOUT_WEIGHT:-1.0}"
         --path_consistency_weight "${PATH_CONSISTENCY_WEIGHT:-0.25}"
     )
