@@ -310,6 +310,14 @@ def verify_v43_action_factorization(
             conditioned_actions,
             base_root_future_slots=conditioned_root.base_future_slots,
         )
+        isolated_base_region = model.region_dynamics(
+            online["regions"],
+            conditioned_root.base_future_slots,
+            conditioned_root.future_centers,
+            future_scale,
+            zero_actions,
+            base_root_future_slots=conditioned_root.base_future_slots,
+        )
         zero_root = model.dynamics(
             roots["slots"],
             roots["activity"],
@@ -350,7 +358,8 @@ def verify_v43_action_factorization(
         zero_root.future_slots, conditioned_root.base_future_slots
     )
     region_base_difference = _difference(
-        zero_region.future_feature, conditioned_region.base_future_feature
+        isolated_base_region.future_feature,
+        conditioned_region.base_future_feature,
     )
     root_zero_residual = float(zero_root.action_slot_residual.float().abs().max())
     region_zero_residual = _difference(
