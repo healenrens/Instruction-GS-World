@@ -89,8 +89,8 @@ class CausalRegionTransformer(nn.Module):
             (
                 center,
                 self._covariance_features(covariance),
-                activation[..., None],
-                torch.logit(activation.clamp(1e-4, 1.0 - 1e-4))[..., None],
+                activation.float()[..., None],
+                torch.logit(activation.float(), eps=1e-4)[..., None],
             ),
             dim=-1,
         )

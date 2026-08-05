@@ -31,7 +31,7 @@ class RegionDynamicsOutput:
 
 
 def _stable_logit(value: torch.Tensor) -> torch.Tensor:
-    return torch.logit(value.clamp(1e-4, 1.0 - 1e-4))
+    return torch.logit(value.float(), eps=1e-4)
 
 
 class HierarchicalRegionDynamics(nn.Module):
