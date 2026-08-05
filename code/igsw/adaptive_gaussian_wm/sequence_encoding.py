@@ -172,11 +172,20 @@ def encode_object_region_sequence(
     root_memory,
     region_memory,
     make_masked_prediction: bool = False,
+    auxiliary_features: torch.Tensor | None = None,
+    auxiliary_valid: torch.Tensor | None = None,
 ) -> dict:
     """Encode roots and persistent regions without reading any future fields."""
     validate_visual_sequence(native_features, coordinates, valid, times)
     if projected_features.shape[:3] != native_features.shape[:3]:
         raise ValueError("projected DINO sequence shape differs from native features")
+    if auxiliary_features is not None:
+        if auxiliary_features.shape[:3] != native_features.shape[:3]:
+            raise ValueError("auxiliary video feature grid differs from DINO")
+        if auxiliary_valid is None or auxiliary_valid.shape != native_features.shape[:2]:
+            raise ValueError("auxiliary video validity must have shape [B,T]")
+    elif auxiliary_valid is not None:
+        raise ValueError("auxiliary validity requires auxiliary features")
     token_states = [
         allocator(
             native_features[:, index],
@@ -192,6 +201,15 @@ def encode_object_region_sequence(
         ],
         dim=1,
     )
+    pooled_auxiliary = None
+    if auxiliary_features is not None:
+        pooled_auxiliary = torch.stack(
+            [
+                _pool_projected_features(state, auxiliary_features[:, index])
+                for index, state in enumerate(token_states)
+            ],
+            dim=1,
+        )
     latent = torch.stack([state.latent for state in token_states], dim=1)
     center = torch.stack([state.center for state in token_states], dim=1)
     covariance = torch.stack([state.covariance for state in token_states], dim=1)
@@ -249,6 +267,12 @@ def encode_object_region_sequence(
             contextual[:, index],
             pooled_projected[:, index],
             roots,
+            (
+                pooled_auxiliary[:, index]
+                if pooled_auxiliary is not None
+                else None
+            ),
+            auxiliary_valid[:, index] if auxiliary_valid is not None else None,
         )
         if previous_region is None:
             regions = region_observation

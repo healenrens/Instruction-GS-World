@@ -147,7 +147,10 @@ class JitDinoFeatureRuntime:
 
 
 def build_feature_runtime(args, dataset, device: torch.device):
-    if getattr(args, "architecture", "") == "object_region_memory_v1":
+    if getattr(args, "architecture", "") in (
+        "object_region_memory_v1",
+        "object_region_dual_encoder_v1",
+    ):
         return None
     source = getattr(args, "feature_source", "cached")
     if source == "cached":

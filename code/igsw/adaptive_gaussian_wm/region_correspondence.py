@@ -22,6 +22,9 @@ class RegionAssociation:
     aligned_presence: torch.Tensor
     aligned_visibility: torch.Tensor
     aligned_identity: torch.Tensor
+    aligned_detail_latent: torch.Tensor
+    aligned_detail_valid: torch.Tensor
+    aligned_detail_gate: torch.Tensor
 
 
 class CausalRegionCorrespondence(nn.Module):
@@ -85,4 +88,7 @@ class CausalRegionCorrespondence(nn.Module):
             aligned_presence=align(observation.presence),
             aligned_visibility=align(observation.visibility),
             aligned_identity=align(observation.identity_key),
+            aligned_detail_latent=align(observation.detail_latent),
+            aligned_detail_valid=align(observation.detail_valid),
+            aligned_detail_gate=align(observation.detail_gate),
         )

@@ -1,4 +1,4 @@
-"""Persistent object, scene, and transient region memory for v43."""
+"""Persistent object, scene, and transient region memory for v43/v44."""
 from __future__ import annotations
 
 import torch
@@ -51,6 +51,33 @@ class ObjectRegionMemory(nn.Module):
         nn.init.zeros_(self.motion_head[-1].weight)
         nn.init.zeros_(self.motion_head[-1].bias)
         self.correspondence = CausalRegionCorrespondence(config)
+        self.video_projection = None
+        self.video_gate = None
+        self.video_decoder = None
+        if config.video_vae_feature_dim > 0:
+            self.video_projection = nn.Sequential(
+                nn.LayerNorm(config.video_vae_feature_dim),
+                nn.Linear(config.video_vae_feature_dim, dim),
+                nn.GELU(approximate="tanh"),
+                nn.Linear(dim, dim),
+            )
+            self.video_gate = nn.Sequential(
+                nn.Linear(dim * 2, dim // 2),
+                nn.SiLU(),
+                nn.Linear(dim // 2, 1),
+            )
+            nn.init.constant_(self.video_gate[-1].bias, -1.5)
+            self.video_decoder = nn.Sequential(
+                nn.LayerNorm(dim),
+                nn.Linear(dim, dim),
+                nn.GELU(approximate="tanh"),
+                nn.Linear(dim, config.video_vae_feature_dim),
+            )
+
+    def decode_video_feature(self, feature: torch.Tensor) -> torch.Tensor:
+        if self.video_decoder is None:
+            raise ValueError("region memory has no video-detail decoder")
+        return self.video_decoder(feature)
 
     def environment_weight(
         self,
@@ -120,18 +147,49 @@ class ObjectRegionMemory(nn.Module):
         contextual_feature: torch.Tensor,
         projected_feature: torch.Tensor,
         roots,
+        auxiliary_feature: torch.Tensor | None = None,
+        auxiliary_valid: torch.Tensor | None = None,
     ) -> RegionMemoryState:
         batch, regions, dim = contextual_feature.shape
         if projected_feature.shape != contextual_feature.shape:
             raise ValueError("projected region observations have an invalid shape")
         if roots.assignment.shape[:2] != (batch, regions):
             raise ValueError("root assignment and region count differ")
-        feature = F.layer_norm(
+        semantic_feature = F.layer_norm(
             contextual_feature + projected_feature,
             (dim,),
         )
         active = tokens.activation.squeeze(-1) > 0.5
+        if self.config.video_vae_feature_dim > 0:
+            expected = (batch, regions, self.config.video_vae_feature_dim)
+            if auxiliary_feature is None or auxiliary_feature.shape != expected:
+                raise ValueError(f"v44 auxiliary region feature must have {expected}")
+            if auxiliary_valid is None or auxiliary_valid.shape != (batch,):
+                raise ValueError("v44 auxiliary validity must have shape [B]")
+            valid_weight = auxiliary_valid[:, None, None].to(
+                semantic_feature.dtype
+            )
+            detail_latent = auxiliary_feature.to(semantic_feature.dtype) * valid_weight
+            detail = self.video_projection(detail_latent)
+            gate = torch.sigmoid(
+                self.video_gate(torch.cat((semantic_feature, detail), dim=-1))
+            ) * valid_weight
+            feature = F.layer_norm(semantic_feature + gate * detail, (dim,))
+            detail_valid = active.to(feature.dtype) * auxiliary_valid[:, None].to(
+                feature.dtype
+            )
+            detail_gate = gate.squeeze(-1) * active.to(gate.dtype)
+        else:
+            if auxiliary_feature is not None or auxiliary_valid is not None:
+                raise ValueError("v43 cannot receive video VAE features")
+            feature = semantic_feature
+            detail_latent = feature.new_zeros((batch, regions, 0))
+            detail_valid = feature.new_zeros((batch, regions))
+            detail_gate = feature.new_zeros((batch, regions))
         feature = torch.where(active[..., None], feature, torch.zeros_like(feature))
+        detail_latent = torch.where(
+            active[..., None], detail_latent, torch.zeros_like(detail_latent)
+        )
         object_logits = roots.assignment.float().clamp_min(1e-6).log()
         scene_logit = roots.background_assignment.float().clamp_min(1e-6).log()
         scene_allowed = self._scene_quota(scene_logit, active)
@@ -165,7 +223,9 @@ class ObjectRegionMemory(nn.Module):
         relative_center = object_mass * (center - object_center)
         relative_center = relative_center + (1.0 - object_mass) * center
         identity = F.normalize(
-            self.identity_head(torch.cat((feature, relative_center), dim=-1)).float(),
+            self.identity_head(
+                torch.cat((semantic_feature, relative_center), dim=-1)
+            ).float(),
             dim=-1,
         ).to(feature.dtype)
         identity = identity * object_mass.to(identity.dtype)
@@ -194,6 +254,9 @@ class ObjectRegionMemory(nn.Module):
             update_gate=torch.ones_like(presence),
             association=association,
             association_confidence=presence,
+            detail_latent=detail_latent,
+            detail_valid=detail_valid,
+            detail_gate=detail_gate,
         )
         state.validate(self.config.object_slots)
         return state
@@ -251,6 +314,9 @@ class ObjectRegionMemory(nn.Module):
             update_gate=torch.zeros_like(previous.update_gate),
             association=previous.association,
             association_confidence=torch.zeros_like(previous.association_confidence),
+            detail_latent=previous.detail_latent,
+            detail_valid=previous.detail_valid * survival,
+            detail_gate=previous.detail_gate * survival,
         )
 
     def correct(
@@ -274,6 +340,15 @@ class ObjectRegionMemory(nn.Module):
                 predicted.visibility.dtype
             ),
             "identity": matched.aligned_identity.to(predicted.identity_key.dtype),
+            "detail_latent": matched.aligned_detail_latent.to(
+                predicted.detail_latent.dtype
+            ),
+            "detail_valid": matched.aligned_detail_valid.to(
+                predicted.detail_valid.dtype
+            ),
+            "detail_gate": matched.aligned_detail_gate.to(
+                predicted.detail_gate.dtype
+            ),
         }
         confidence = matched.confidence.to(predicted.presence.dtype)
         gate_input = torch.cat(
@@ -308,6 +383,10 @@ class ObjectRegionMemory(nn.Module):
         relative_center = blend(
             predicted.relative_center, aligned["relative_center"], gate
         )
+        detail_latent = blend(
+            predicted.detail_latent, aligned["detail_latent"], gate
+        )
+        detail_gate = blend(predicted.detail_gate, aligned["detail_gate"], gate)
         feature = blend(feature, aligned["feature"], birth)
         center = blend(center, aligned["center"], birth)
         covariance = blend(covariance, aligned["covariance"], birth)
@@ -315,6 +394,10 @@ class ObjectRegionMemory(nn.Module):
         relative_center = blend(
             relative_center, aligned["relative_center"], birth
         )
+        detail_latent = blend(
+            detail_latent, aligned["detail_latent"], birth
+        )
+        detail_gate = blend(detail_gate, aligned["detail_gate"], birth)
         presence = torch.maximum(
             predicted.presence * (1.0 - gate) + aligned["presence"] * gate,
             birth,
@@ -344,4 +427,10 @@ class ObjectRegionMemory(nn.Module):
             update_gate=torch.maximum(gate, birth),
             association=matched.matrix,
             association_confidence=matched.confidence,
+            detail_latent=detail_latent,
+            detail_valid=torch.maximum(
+                predicted.detail_valid * (1.0 - gate),
+                aligned["detail_valid"] * torch.maximum(gate, birth),
+            ),
+            detail_gate=detail_gate * presence,
         )

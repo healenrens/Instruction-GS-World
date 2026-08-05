@@ -27,6 +27,9 @@ def build_config(
         "object_region_memory_v1": (
             AdaptiveGaussianWMConfig.object_region_memory_full
         ),
+        "object_region_dual_encoder_v1": (
+            AdaptiveGaussianWMConfig.object_region_dual_encoder_full
+        ),
     }
     constructor = object_memory_constructors.get(
         args.architecture,
@@ -59,6 +62,7 @@ def apply_architecture_args(
         "object_memory_v2",
         "object_memory_v3",
         "object_region_memory_v1",
+        "object_region_dual_encoder_v1",
     ):
         overrides.update(
             gaussian_children=args.gaussian_children,
@@ -66,7 +70,8 @@ def apply_architecture_args(
             dense_object_readout=False,
             change_residual_readout=(
                 args.gaussian_children == 1
-                and args.architecture != "object_region_memory_v1"
+                and args.architecture
+                not in ("object_region_memory_v1", "object_region_dual_encoder_v1")
             ),
             dual_horizon_dynamics=(
                 args.temporal_contract == "dynamic_dual_horizon_v1"
@@ -74,9 +79,20 @@ def apply_architecture_args(
             goal_rollout_weight=args.goal_rollout_weight,
             path_consistency_weight=args.path_consistency_weight,
         )
-        if args.architecture == "object_region_memory_v1":
+        if args.architecture in (
+            "object_region_memory_v1",
+            "object_region_dual_encoder_v1",
+        ):
             overrides["dino_frame_batch"] = args.jit_dino_batch
             overrides["goal_stability_threshold"] = args.goal_stability_threshold
+        if args.architecture == "object_region_dual_encoder_v1":
+            overrides.update(
+                video_vae_model=args.video_vae_model,
+                video_vae_contract=args.video_vae_contract,
+                video_vae_short_side=args.video_vae_short_side,
+                video_vae_clip_frames=args.video_vae_clip_frames,
+                video_vae_batch=args.video_vae_batch,
+            )
     if args.aggregation_mode != "auto":
         overrides["aggregation_mode"] = args.aggregation_mode
     if args.density_mode != "auto":

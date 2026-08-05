@@ -24,19 +24,41 @@ from .v43_stage_contracts import (
     validate_v43_initialization,
     validate_v43_warm_start_report,
 )
+from .v44_stage_contracts import (
+    validate_v44_arguments,
+    validate_v44_initialization,
+    validate_v44_warm_start_report,
+    v44_gate_fields,
+)
 
 
 ARCHITECTURE = "object_memory_v1"
 LIFECYCLE_ARCHITECTURE = "object_memory_v2"
 CORRESPONDENCE_ARCHITECTURE = "object_memory_v3"
 OBJECT_REGION_ARCHITECTURE = "object_region_memory_v1"
+DUAL_ENCODER_ARCHITECTURE = "object_region_dual_encoder_v1"
+OBJECT_REGION_ARCHITECTURES = (
+    OBJECT_REGION_ARCHITECTURE,
+    DUAL_ENCODER_ARCHITECTURE,
+)
 OBJECT_MEMORY_ARCHITECTURES = (
     ARCHITECTURE,
     LIFECYCLE_ARCHITECTURE,
     CORRESPONDENCE_ARCHITECTURE,
     OBJECT_REGION_ARCHITECTURE,
+    DUAL_ENCODER_ARCHITECTURE,
 )
 DEFAULT_TARGET_GLOBAL_BATCH = 256
+
+
+def temporal_contract_for(architecture: str) -> str:
+    return (
+        "dynamic_dual_horizon_video_v2"
+        if architecture == DUAL_ENCODER_ARCHITECTURE
+        else "dynamic_dual_horizon_v1"
+    )
+
+
 def add_v28_arguments(parser) -> None:
     parser.add_argument(
         "--architecture",
@@ -91,7 +113,9 @@ def is_v28(args) -> bool:
 
 
 def validate_v28_initialization(checkpoint: dict, args) -> None:
-    if args.architecture == OBJECT_REGION_ARCHITECTURE:
+    if args.architecture == DUAL_ENCODER_ARCHITECTURE:
+        validate_v44_initialization(checkpoint, args)
+    elif args.architecture == OBJECT_REGION_ARCHITECTURE:
         validate_v43_initialization(checkpoint, args)
     elif args.architecture == CORRESPONDENCE_ARCHITECTURE:
         validate_v42_initialization(checkpoint, args)
@@ -102,7 +126,9 @@ def validate_v28_initialization(checkpoint: dict, args) -> None:
 
 
 def validate_v28_warm_start_report(report: dict, args) -> None:
-    if args.architecture == OBJECT_REGION_ARCHITECTURE:
+    if args.architecture == DUAL_ENCODER_ARCHITECTURE:
+        validate_v44_warm_start_report(report, args)
+    elif args.architecture == OBJECT_REGION_ARCHITECTURE:
         validate_v43_warm_start_report(report, args)
     elif args.architecture == CORRESPONDENCE_ARCHITECTURE:
         validate_v42_warm_start_report(report, args)
@@ -142,8 +168,9 @@ def validate_v28_arguments(args, world_size: int) -> None:
         raise ValueError("v39 object_memory_v1 requires per-rank JIT DINO")
     if args.jit_dino_batch < 1:
         raise ValueError("v39 JIT DINO frame batch must be positive")
-    if args.temporal_contract != "dynamic_dual_horizon_v1":
-        raise ValueError("v39 requires the dynamic dual-horizon temporal contract")
+    expected_temporal = temporal_contract_for(args.architecture)
+    if args.temporal_contract != expected_temporal:
+        raise ValueError("object-memory temporal contract differs")
     if (args.history_frames_min, args.history_frames_max, args.future_frames) != (
         1,
         4,
@@ -235,7 +262,7 @@ def validate_v28_arguments(args, world_size: int) -> None:
             raise ValueError("v39 per-rank batch must be 2, 4, or 8")
         if not args.gate_report:
             raise ValueError("v39 training requires --gate_report")
-    if args.architecture == OBJECT_REGION_ARCHITECTURE:
+    if args.architecture in OBJECT_REGION_ARCHITECTURES:
         if args.training_stage != "representation":
             raise ValueError("v43 uses one representation run with an internal curriculum")
         if args.representation_steps != 50000 or args.joint_steps != 0:
@@ -252,6 +279,8 @@ def validate_v28_arguments(args, world_size: int) -> None:
             2e-4,
         ):
             raise ValueError("v43 learning-rate groups differ from the fixed contract")
+    if args.architecture == DUAL_ENCODER_ARCHITECTURE:
+        validate_v44_arguments(args)
 
 
 def validate_v28_gate(args, dataset, project_root: str) -> dict:
@@ -282,11 +311,13 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         "checkpoint_contract": "rolling_recovery_v1",
         "readout_backend": (
             "offline_probe_only"
-            if args.architecture == OBJECT_REGION_ARCHITECTURE
+            if args.architecture in OBJECT_REGION_ARCHITECTURES
             else "change_only_object_residual"
         ),
         "feature_contract": (
-            "model_owned_trainable_dinov2_l_1024_region_768"
+            "model_owned_dinov2_l_plus_frozen_wan_vae_region_768"
+            if args.architecture == DUAL_ENCODER_ARCHITECTURE
+            else "model_owned_trainable_dinov2_l_1024_region_768"
             if args.architecture == OBJECT_REGION_ARCHITECTURE
             else "jit_backbone_native_dinov2_l_1024"
         ),
@@ -294,7 +325,7 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         "jit_dino_image_size": 518,
         "jit_dino_frame_batch": args.jit_dino_batch,
         "control_hz": float(dataset.control_hz),
-        "temporal_contract": "dynamic_dual_horizon_v1",
+        "temporal_contract": temporal_contract_for(args.architecture),
         "history_lengths": [1, 2, 3, 4],
         "history_span_frames": list(dataset.history_span_frames),
         "short_horizon_frames": 30,
@@ -309,6 +340,8 @@ def validate_v28_gate(args, dataset, project_root: str) -> dict:
         "teacher_sidecar_sha256": getattr(dataset, "teacher_sidecar_sha256", ""),
     }
     expected.update(gate_contract_fields(args.architecture))
+    if args.architecture == DUAL_ENCODER_ARCHITECTURE:
+        expected.update(v44_gate_fields(args))
     mismatch = {
         name: {"gate": report.get(name), "current": value}
         for name, value in expected.items()
@@ -355,7 +388,9 @@ def _action_modules(model) -> tuple:
 def configure_v28_stage(model, args) -> None:
     if not is_v28(args):
         return
-    if args.architecture == OBJECT_REGION_ARCHITECTURE:
+    if args.architecture in OBJECT_REGION_ARCHITECTURES:
+        if args.architecture == DUAL_ENCODER_ARCHITECTURE and args.init_from:
+            model.set_curriculum_step(0)
         return
     if args.training_stage == "prior":
         model.requires_grad_(False)
@@ -380,75 +415,9 @@ def build_optimizer(model, args) -> torch.optim.AdamW:
             lr=args.lr,
             weight_decay=args.weight_decay,
         )
-    action_prefixes = (
-        "latent_actions.posterior.",
-        "latent_actions.effect_head.",
-        "latent_actions.prior.",
-        "latent_actions.prior_",
-        "dynamics.factor_keys",
-        "dynamics.routing_query.",
-        "dynamics.action_",
-        "effect_composer.",
-        "region_effect_posterior.",
-        "region_dynamics.action_",
-        "region_dynamics.factor_keys",
-        "region_dynamics.route_query.",
-    )
-    dino_prefixes = (
-        "online_dino.backbone.blocks.12.",
-        "online_dino.backbone.blocks.13.",
-        "online_dino.backbone.blocks.14.",
-        "online_dino.backbone.blocks.15.",
-        "online_dino.backbone.blocks.16.",
-        "online_dino.backbone.blocks.17.",
-        "online_dino.backbone.blocks.18.",
-        "online_dino.backbone.blocks.19.",
-        "online_dino.backbone.blocks.20.",
-        "online_dino.backbone.blocks.21.",
-        "online_dino.backbone.blocks.22.",
-        "online_dino.backbone.blocks.23.",
-        "online_dino.backbone.norm.",
-    )
-    new_prefixes = (
-        "online_dino.projector.",
-        "region_transformer.",
-        "region_memory.",
-        "region_dynamics.",
-    )
-    core = []
-    action = []
-    dino = []
-    new_modules = []
-    for name, parameter in model.named_parameters():
-        if not parameter.requires_grad:
-            continue
-        if name.startswith(action_prefixes):
-            target = action
-        elif name.startswith(dino_prefixes):
-            target = dino
-        elif name.startswith(new_prefixes):
-            target = new_modules
-        else:
-            target = core
-        target.append(parameter)
-    groups = []
-    if core:
-        groups.append({"params": core, "lr": args.core_lr, "group_name": "core"})
-    if action:
-        groups.append({"params": action, "lr": args.action_lr, "group_name": "action"})
-    if dino:
-        groups.append({"params": dino, "lr": args.dino_lr, "group_name": "dino"})
-    if new_modules:
-        groups.append(
-            {
-                "params": new_modules,
-                "lr": args.new_module_lr,
-                "group_name": "new_modules",
-            }
-        )
-    if not groups:
-        raise ValueError("v39 optimizer has no trainable parameters")
-    return torch.optim.AdamW(groups, weight_decay=args.weight_decay)
+    from .object_memory_optimizer import build_object_memory_optimizer
+
+    return build_object_memory_optimizer(model, args)
 
 
 def v28_loss_weights(args) -> AdaptiveGaussianLossWeights | None:

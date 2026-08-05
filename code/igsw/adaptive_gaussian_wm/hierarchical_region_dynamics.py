@@ -349,4 +349,7 @@ def region_state_from_prediction(
         update_gate=torch.zeros_like(visibility),
         association=identity,
         association_confidence=torch.zeros_like(visibility),
+        detail_latent=feature[..., :0],
+        detail_valid=torch.zeros_like(visibility),
+        detail_gate=torch.zeros_like(visibility),
     )

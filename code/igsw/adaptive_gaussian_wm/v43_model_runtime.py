@@ -20,6 +20,8 @@ def _encode_sequence(
     times,
     target: bool,
     masked: bool,
+    auxiliary_features: torch.Tensor | None = None,
+    auxiliary_valid: torch.Tensor | None = None,
 ):
     prefix = "target_" if target else ""
     return encode_object_region_sequence(
@@ -34,6 +36,8 @@ def _encode_sequence(
         getattr(model, f"{prefix}object_memory"),
         getattr(model, f"{prefix}region_memory"),
         make_masked_prediction=masked,
+        auxiliary_features=auxiliary_features,
+        auxiliary_valid=auxiliary_valid,
     )
 
 

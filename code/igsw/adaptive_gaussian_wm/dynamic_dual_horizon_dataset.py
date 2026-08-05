@@ -76,6 +76,7 @@ class DynamicDualHorizonEpisodeDataset(CausalVisualEpisodeDataset):
         goal_query_seconds: float = 6.0,
         goal_tail_guard_frames: int = 0,
         goal_probe_frames: int = 3,
+        minimum_goal_tail_frames: int = 1,
         max_items: int = 0,
         teacher_sidecar: str = "",
         feature_source: str = "jit",
@@ -92,6 +93,8 @@ class DynamicDualHorizonEpisodeDataset(CausalVisualEpisodeDataset):
             raise ValueError("short horizon must be positive")
         if goal_tail_guard_frames < 0 or goal_probe_frames < 2:
             raise ValueError("invalid terminal target configuration")
+        if minimum_goal_tail_frames < 1:
+            raise ValueError("minimum goal tail must be positive")
 
         super().__init__(
             cache_root=cache_root,
@@ -123,6 +126,9 @@ class DynamicDualHorizonEpisodeDataset(CausalVisualEpisodeDataset):
         self.history_span_frames = spans
         self.short_horizon_frames = short_horizon_frames
         self.goal_query_seconds = float(goal_query_seconds)
+        self.minimum_goal_horizon_frames = (
+            short_horizon_frames + minimum_goal_tail_frames
+        )
         self.goal_tail_guard_frames = goal_tail_guard_frames
         self.goal_probe_frames = goal_probe_frames
         self.contract_label = (
@@ -148,7 +154,7 @@ class DynamicDualHorizonEpisodeDataset(CausalVisualEpisodeDataset):
             for episode_index, path, frame_count in group_episodes:
                 goal = frame_count - 1 - self.goal_tail_guard_frames
                 first = max_history_span
-                last = goal - self.short_horizon_frames - 1
+                last = goal - self.minimum_goal_horizon_frames
                 if last < first or goal - (self.goal_probe_frames - 1) < 0:
                     continue
                 regular = (last - first) // self.sample_stride + 1

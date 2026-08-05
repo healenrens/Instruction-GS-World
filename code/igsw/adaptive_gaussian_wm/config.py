@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from .config_validation import validate_action_and_prior_contracts
+from .object_region_config import validate_object_region_config
 
 
 @dataclass
@@ -144,6 +145,15 @@ class AdaptiveGaussianWMConfig:
     curriculum_posterior_steps: int = 20000
     curriculum_ramp_steps: int = 2000
     goal_stability_threshold: float = 0.05
+    dual_visual_encoder: bool = False
+    video_vae_model: str = ""
+    video_vae_contract: str = ""
+    video_vae_latent_dim: int = 0
+    video_vae_feature_dim: int = 0
+    video_vae_short_side: int = 256
+    video_vae_clip_frames: int = 5
+    video_vae_batch: int = 1
+    video_detail_loss_weight: float = 0.0
 
     def __post_init__(self) -> None:
         positive = {
@@ -182,6 +192,9 @@ class AdaptiveGaussianWMConfig:
             "curriculum_spatial_steps": self.curriculum_spatial_steps,
             "curriculum_posterior_steps": self.curriculum_posterior_steps,
             "curriculum_ramp_steps": self.curriculum_ramp_steps,
+            "video_vae_short_side": self.video_vae_short_side,
+            "video_vae_clip_frames": self.video_vae_clip_frames,
+            "video_vae_batch": self.video_vae_batch,
         }
         for name, value in positive.items():
             if value <= 0:
@@ -194,10 +207,11 @@ class AdaptiveGaussianWMConfig:
             "object_memory_v2",
             "object_memory_v3",
             "object_region_memory_v1",
+            "object_region_dual_encoder_v1",
         ):
             raise ValueError(
                 "architecture must be legacy, object_memory_v1-v3, or "
-                "object_region_memory_v1"
+                "object_region_memory_v1, or object_region_dual_encoder_v1"
             )
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
@@ -307,6 +321,7 @@ class AdaptiveGaussianWMConfig:
             "object_memory_v2",
             "object_memory_v3",
             "object_region_memory_v1",
+            "object_region_dual_encoder_v1",
         ):
             if not self.persistent_object_memory or not self.hard_token_gate:
                 raise ValueError(
@@ -325,7 +340,8 @@ class AdaptiveGaussianWMConfig:
             if not self.full_dino_features or self.feature_dim != 1024:
                 raise ValueError("backbone-native DINOv2-L requires feature_dim=1024")
             if (
-                self.architecture != "object_region_memory_v1"
+                self.architecture
+                not in ("object_region_memory_v1", "object_region_dual_encoder_v1")
                 and (not self.change_residual_readout or not self.explicit_background_state)
             ):
                 raise ValueError(
@@ -344,54 +360,7 @@ class AdaptiveGaussianWMConfig:
                 )
             ):
                 raise ValueError("object_memory_v1 forbids explicit action anchors")
-        if self.architecture == "object_region_memory_v1":
-            if not self.object_region_memory:
-                raise ValueError("v43 requires persistent object-region memory")
-            state_shape = (
-                self.feature_dim,
-                self.token_dim,
-                self.object_dim,
-                self.model_dim,
-                self.object_slots,
-                self.region_dim,
-                self.region_identity_dim,
-                self.region_owners,
-            )
-            if state_shape != (1024, 768, 1536, 1536, 16, 768, 128, 18):
-                raise ValueError("v43 root/region state dimensions differ")
-            if not 0.0 < self.region_scene_fraction <= 0.25:
-                raise ValueError("region_scene_fraction must be in (0, 0.25]")
-            if self.region_owners != self.object_slots + 2:
-                raise ValueError(
-                    "region owners must be object slots plus scene/transient"
-                )
-            if self.dino_trainable_blocks != 12:
-                raise ValueError("v43 requires exactly 12 trainable DINO blocks")
-            if self.dino_model_name != "vit_large_patch14_dinov2.lvd142m":
-                raise ValueError("v43 requires the DINOv2-L/14 backbone")
-            if self.dino_image_size != 518:
-                raise ValueError("v43 requires the 518px DINO patch grid")
-            if self.dino_projector_dim != self.region_dim:
-                raise ValueError("DINO projector output must equal region_dim")
-            if self.curriculum_spatial_steps >= self.curriculum_posterior_steps:
-                raise ValueError("v43 curriculum boundaries are not ordered")
-            if self.goal_stability_threshold <= 0.0:
-                raise ValueError("goal stability threshold must be positive")
-            if self.change_residual_readout or self.dense_object_readout:
-                raise ValueError("v43 excludes dense future readout from the core model")
-            if self.gaussian_feature_residual or self.rgb_supervision:
-                raise ValueError("v43 excludes Gaussian/RGB core supervision")
-            if not all(
-                (
-                    self.persistent_identity_key,
-                    self.relative_transport_dynamics,
-                    self.factorized_lifecycle,
-                    self.causal_object_correspondence,
-                    self.track_presence_semantics,
-                    self.dual_horizon_dynamics,
-                )
-            ):
-                raise ValueError("v43 requires v42 root lifecycle and dual-horizon state")
+        validate_object_region_config(self)
         if self.architecture == "object_memory_v2" and not all(
             (
                 self.persistent_identity_key,
@@ -420,6 +389,7 @@ class AdaptiveGaussianWMConfig:
             "object_memory_v2",
             "object_memory_v3",
             "object_region_memory_v1",
+            "object_region_dual_encoder_v1",
         ):
             raise ValueError("dual-horizon Dynamics requires Object Memory")
 
@@ -482,6 +452,15 @@ class AdaptiveGaussianWMConfig:
         from .config_profiles import object_region_profile
 
         return object_region_profile(cls, feature_dim)
+
+    @classmethod
+    def object_region_dual_encoder_full(
+        cls,
+        feature_dim: int,
+    ) -> "AdaptiveGaussianWMConfig":
+        from .config_profiles import dual_encoder_region_profile
+
+        return dual_encoder_region_profile(cls, feature_dim)
 
     @classmethod
     def probe(cls, feature_dim: int) -> "AdaptiveGaussianWMConfig":

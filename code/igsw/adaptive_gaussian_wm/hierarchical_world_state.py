@@ -21,6 +21,9 @@ class RegionMemoryState:
     update_gate: torch.Tensor
     association: torch.Tensor
     association_confidence: torch.Tensor
+    detail_latent: torch.Tensor
+    detail_valid: torch.Tensor
+    detail_gate: torch.Tensor
 
     def validate(self, object_count: int) -> None:
         batch, region_count, feature_dim = self.feature.shape
@@ -37,12 +40,16 @@ class RegionMemoryState:
             "update_gate": (batch, region_count),
             "association": (batch, region_count, region_count),
             "association_confidence": (batch, region_count),
+            "detail_valid": (batch, region_count),
+            "detail_gate": (batch, region_count),
         }
         for name, shape in expected.items():
             if getattr(self, name).shape != shape:
                 raise ValueError(f"region {name} must have shape {shape}")
         if feature_dim <= 0:
             raise ValueError("region feature dimension must be positive")
+        if self.detail_latent.shape[:2] != (batch, region_count):
+            raise ValueError("region detail latent has invalid leading dimensions")
 
 
 def stack_region_states(states: list[RegionMemoryState]) -> dict[str, torch.Tensor]:
@@ -61,6 +68,9 @@ def stack_region_states(states: list[RegionMemoryState]) -> dict[str, torch.Tens
         "observed",
         "update_gate",
         "association_confidence",
+        "detail_latent",
+        "detail_valid",
+        "detail_gate",
     )
     return {
         name: torch.stack([getattr(state, name) for state in states], dim=1)
@@ -91,4 +101,7 @@ def select_region_state(
         update_gate=sequence["update_gate"][:, index],
         association=association,
         association_confidence=sequence["association_confidence"][:, index],
+        detail_latent=sequence["detail_latent"][:, index],
+        detail_valid=sequence["detail_valid"][:, index],
+        detail_gate=sequence["detail_gate"][:, index],
     )

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 
 def gate_contract_fields(architecture: str) -> dict[str, object]:
-    if architecture == "object_region_memory_v1":
+    if architecture in (
+        "object_region_memory_v1",
+        "object_region_dual_encoder_v1",
+    ):
         return {
             "identity_contract": "causal_sinkhorn_identity_v2",
             "correspondence_contract": (
@@ -43,7 +46,10 @@ def gate_contract_fields(architecture: str) -> dict[str, object]:
 
 def runtime_contract_fields(architecture: str) -> dict[str, object]:
     fields = gate_contract_fields(architecture)
-    if architecture == "object_region_memory_v1":
+    if architecture in (
+        "object_region_memory_v1",
+        "object_region_dual_encoder_v1",
+    ):
         fields.update(
             diagnostics_contract="compact_object_region_jepa_v1",
             dense_diagnostic_contract="offline_frozen_probe_only_v1",

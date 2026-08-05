@@ -104,6 +104,7 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         self.target_region_memory = None
         self.region_dynamics = None
         self.region_effect_posterior = None
+        self.video_vae = None
         if config.object_region_memory:
             self.online_dino = TrainableDinoRegionEncoder(
                 config, config.dino_frame_batch
@@ -124,6 +125,10 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
             self.register_buffer(
                 "curriculum_step", torch.zeros((), dtype=torch.long), persistent=True
             )
+            if config.dual_visual_encoder:
+                from .v44_model_components import build_frozen_video_vae
+
+                self.video_vae = build_frozen_video_vae(config)
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -272,8 +277,11 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         if self.config.object_region_memory:
             if actions_override is not None or not use_posterior:
                 raise ValueError("v43 uses its internal curriculum posterior contract")
-            from .v43_model_runtime import forward_v43
+            if self.config.dual_visual_encoder:
+                from .v44_model_runtime import forward_v44
 
+                return forward_v44(self, batch, collect_diagnostics)
+            from .v43_model_runtime import forward_v43
             return forward_v43(self, batch, collect_diagnostics)
         if phase == "representation":
             from .training import representation_pretrain_loss

@@ -8,13 +8,18 @@ from .v42_runtime_contracts import runtime_contract_fields
 
 
 OBJECT_REGION_ARCHITECTURE = "object_region_memory_v1"
+DUAL_ENCODER_ARCHITECTURE = "object_region_dual_encoder_v1"
 
 
 def build_v28_runtime_metadata(args, dataset, gate: dict, enabled: bool) -> dict:
     if not enabled:
         return {}
-    is_region = args.architecture == OBJECT_REGION_ARCHITECTURE
-    return {
+    is_region = args.architecture in (
+        OBJECT_REGION_ARCHITECTURE,
+        DUAL_ENCODER_ARCHITECTURE,
+    )
+    is_dual = args.architecture == DUAL_ENCODER_ARCHITECTURE
+    metadata = {
         "checkpoint_version": CHECKPOINT_VERSION,
         "checkpoint_contract": "rolling_recovery_v1",
         "architecture": args.architecture,
@@ -23,7 +28,11 @@ def build_v28_runtime_metadata(args, dataset, gate: dict, enabled: bool) -> dict
         "language_condition": "off",
         "rgb_supervision": "off",
         "latent_action_shape": [4, 32],
-        "temporal_contract": "dynamic_dual_horizon_v1",
+        "temporal_contract": (
+            "dynamic_dual_horizon_video_v2"
+            if is_dual
+            else "dynamic_dual_horizon_v1"
+        ),
         "history_lengths": [1, 2, 3, 4],
         "history_span_frames": list(dataset.history_span_frames),
         "short_horizon_frames": args.short_horizon_frames,
@@ -36,7 +45,9 @@ def build_v28_runtime_metadata(args, dataset, gate: dict, enabled: bool) -> dict
         "data_manifest_sha256": dataset.data_sha256,
         "feature_source": args.feature_source,
         "feature_contract": (
-            "model_owned_trainable_dinov2_l_1024_region_768"
+            "model_owned_dinov2_l_plus_frozen_wan_vae_region_768"
+            if is_dual
+            else "model_owned_trainable_dinov2_l_1024_region_768"
             if is_region
             else "jit_backbone_native_dinov2_l_1024"
         ),
@@ -91,6 +102,24 @@ def build_v28_runtime_metadata(args, dataset, gate: dict, enabled: bool) -> dict
         "gate_report_sha256": args.gate_report_sha256,
         "gate_git_commit": gate.get("git_commit", ""),
     }
+    if is_dual:
+        metadata.update(
+            video_vae_model=_absolute(args.video_vae_model),
+            video_vae_contract_path=_absolute(args.video_vae_contract),
+            video_vae_pythonpath=_absolute(args.video_vae_pythonpath),
+            video_vae_contract_sha256=args.video_vae_contract_sha256,
+            video_vae_revision=gate.get("video_vae_revision", ""),
+            video_vae_diffusers_version=gate.get(
+                "video_vae_diffusers_version", ""
+            ),
+            video_vae_clip_frames=args.video_vae_clip_frames,
+            video_vae_short_side=args.video_vae_short_side,
+            video_vae_batch=args.video_vae_batch,
+            video_vae_trainable=False,
+            video_vae_checkpointed=False,
+            dual_encoder_contract="dino_semantic_wan_detail_motion_v1",
+        )
+    return metadata
 
 
 def _absolute(path: str) -> str:

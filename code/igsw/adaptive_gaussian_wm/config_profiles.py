@@ -130,6 +130,20 @@ def object_region_profile(config_type, feature_dim: int):
     )
 
 
+def dual_encoder_region_profile(config_type, feature_dim: int):
+    return replace(
+        object_region_profile(config_type, feature_dim),
+        architecture="object_region_dual_encoder_v1",
+        dual_visual_encoder=True,
+        video_vae_latent_dim=48,
+        video_vae_feature_dim=96,
+        video_vae_clip_frames=5,
+        video_vae_short_side=256,
+        video_vae_batch=1,
+        video_detail_loss_weight=0.5,
+    )
+
+
 def probe_profile(config_type, feature_dim: int):
     return config_type(
         feature_dim=feature_dim,

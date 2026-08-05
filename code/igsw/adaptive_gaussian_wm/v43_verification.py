@@ -250,7 +250,10 @@ def _region_persistence(model, output, amp_context) -> dict[str, float]:
 @torch.no_grad()
 def verify_v43_persistence_contracts(model, output, amp_context) -> dict[str, float]:
     _require(
-        model.config.architecture == "object_region_memory_v1",
+        model.config.architecture in (
+            "object_region_memory_v1",
+            "object_region_dual_encoder_v1",
+        ),
         "v43 persistence verifier received another architecture",
     )
     model.eval()

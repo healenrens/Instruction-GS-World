@@ -234,6 +234,7 @@ def gradient_contract(model, batch, amp_context) -> tuple[dict, dict]:
         "region": [],
         "posterior": [],
         "root_dynamics": [],
+        "video_detail": [],
     }
     nonfinite = []
     for name, parameter in model.named_parameters():
@@ -248,6 +249,8 @@ def gradient_contract(model, batch, amp_context) -> tuple[dict, dict]:
             groups["allocator_budget"].append(parameter)
         elif name.startswith("target_"):
             groups["target"].append(parameter)
+        elif name.startswith(("region_memory.video_", "target_region_memory.video_")):
+            groups["video_detail"].append(parameter)
         elif name.startswith(("region_transformer.", "region_memory.", "region_dynamics.")):
             groups["region"].append(parameter)
         elif name.startswith("region_effect_posterior."):
@@ -270,6 +273,11 @@ def gradient_contract(model, batch, amp_context) -> tuple[dict, dict]:
     ):
         require(any(parameter.grad is not None for parameter in groups[name]),
                 f"{name} received no gradients")
+    if model.config.dual_visual_encoder:
+        require(
+            any(parameter.grad is not None for parameter in groups["video_detail"]),
+            "v44 video-detail adapter received no gradients",
+        )
     result = {
         f"{name}_gradient_tensors": sum(
             parameter.grad is not None for parameter in parameters
