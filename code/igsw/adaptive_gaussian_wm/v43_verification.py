@@ -281,8 +281,32 @@ def verify_v43_action_factorization(
     zero_actions = torch.zeros_like(output["short_action"])[:, None].expand(
         -1, future_scale.shape[1], -1, -1
     )
+    conditioned_actions = torch.stack(
+        (output["short_action"], output["composed_action"]), dim=1
+    )
     model.eval()
     with amp_context():
+        conditioned_root = model.dynamics(
+            roots["slots"],
+            roots["activity"],
+            history_scale,
+            future_scale,
+            conditioned_actions,
+            history_mask=torch.zeros_like(roots["activity"], dtype=torch.bool),
+            history_centers=roots["center"],
+            history_relative_scale=roots["relative_scale"],
+            history_relative_disparity=roots["relative_disparity"],
+            history_relations=roots["relations"],
+            history_existence=roots["existence"],
+        )
+        conditioned_region = model.region_dynamics(
+            online["regions"],
+            conditioned_root.future_slots,
+            conditioned_root.future_centers,
+            future_scale,
+            conditioned_actions,
+            base_root_future_slots=conditioned_root.base_future_slots,
+        )
         zero_root = model.dynamics(
             roots["slots"],
             roots["activity"],
@@ -320,10 +344,10 @@ def verify_v43_action_factorization(
             base_root_future_slots=zero_root.base_future_slots,
         )
     root_base_difference = _difference(
-        zero_root.future_slots, root.base_future_slots
+        zero_root.future_slots, conditioned_root.base_future_slots
     )
     region_base_difference = _difference(
-        zero_region.future_feature, region.base_future_feature
+        zero_region.future_feature, conditioned_region.base_future_feature
     )
     root_zero_residual = float(zero_root.action_slot_residual.float().abs().max())
     region_zero_residual = _difference(
@@ -345,12 +369,12 @@ def verify_v43_action_factorization(
             * active.float()
         ).max()
     )
-    predicted_active = region.future_presence > 0.5
+    predicted_active = conditioned_region.future_presence > 0.5
     predicted_active_count = predicted_active.sum(dim=-1)
     predicted_scene_fraction = float(
         (
-            region.future_owner[..., -2]
-            * predicted_active.to(region.future_owner.dtype)
+            conditioned_region.future_owner[..., -2]
+            * predicted_active.to(conditioned_region.future_owner.dtype)
         ).sum()
         / predicted_active.float().sum().clamp_min(1.0)
     )

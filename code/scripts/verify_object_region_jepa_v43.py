@@ -370,10 +370,10 @@ def state_contract(model, output, amp_context) -> dict:
     )
     require(inactive_leakage < 1e-6, "inactive regions leaked into active states")
     return {
-        "active_region_count": float(active_count.mean()),
-        "scene_region_fraction": float(scene_fraction.mean()),
+        "active_region_count": float(active_count.detach().mean()),
+        "scene_region_fraction": float(scene_fraction.detach().mean()),
         "transient_root_exclusion_fraction": float(
-            transient_exclusion_fraction.mean()
+            transient_exclusion_fraction.detach().mean()
         ),
         "region_feature_shape": list(regions["feature"].shape),
         "root_feature_shape": list(output["online"]["roots"]["slots"].shape),
