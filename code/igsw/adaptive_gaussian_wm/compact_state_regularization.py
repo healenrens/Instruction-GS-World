@@ -18,11 +18,15 @@ def feature_statistics_regularizer(
         raise ValueError("feature regularizer validity shape differs")
     global_feature = gather_batch_with_grad(feature).float()
     global_valid = gather_batch_without_grad(valid).bool()
+    if not bool(torch.isfinite(global_feature).all()):
+        raise ValueError("feature regularizer received non-finite features")
     supported = global_feature.reshape(-1, feature.shape[-1])[
         global_valid.reshape(-1)
     ]
     if supported.shape[0] < 2:
-        raise ValueError("feature regularizer needs at least two valid vectors")
+        # Covariance is undefined; retain a finite maximum variance penalty.
+        zero = global_feature.sum() * 0.0
+        return zero + 0.5, zero
     standard_deviation = supported.std(dim=0, unbiased=False)
     variance = F.relu(0.5 - standard_deviation).mean()
     sampled = supported[:, ::6]
