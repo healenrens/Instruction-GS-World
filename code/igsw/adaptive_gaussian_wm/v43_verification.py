@@ -358,7 +358,7 @@ def verify_v43_action_factorization(
         zero_root.future_slots, conditioned_root.base_future_slots
     )
     region_base_difference = _difference(
-        isolated_base_region.future_feature,
+        isolated_base_region.base_future_feature,
         conditioned_region.base_future_feature,
     )
     root_zero_residual = float(zero_root.action_slot_residual.float().abs().max())
@@ -391,7 +391,11 @@ def verify_v43_action_factorization(
         / predicted_active.float().sum().clamp_min(1.0)
     )
     _require(root_base_difference < 1e-6, "root base depends on latent effect")
-    _require(region_base_difference < 1e-6, "region base reads conditioned roots")
+    _require(
+        region_base_difference < 1e-6,
+        "region base reads conditioned roots: "
+        f"max_difference={region_base_difference:.9g}",
+    )
     _require(root_zero_residual == 0.0, "zero root effect has a residual")
     _require(region_zero_residual == 0.0, "zero region effect has a residual")
     _require(region_zero_presence < 1e-6, "zero effect changed region presence")
