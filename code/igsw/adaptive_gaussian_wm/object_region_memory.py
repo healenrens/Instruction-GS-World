@@ -256,63 +256,75 @@ class ObjectRegionMemory(nn.Module):
         observation: RegionMemoryState,
     ) -> RegionMemoryState:
         matched = self.correspondence(predicted, observation)
+        aligned = {
+            "feature": matched.aligned_feature.to(predicted.feature.dtype),
+            "center": matched.aligned_center.to(predicted.center.dtype),
+            "covariance": matched.aligned_covariance.to(
+                predicted.covariance.dtype
+            ),
+            "owner": matched.aligned_owner.to(predicted.owner.dtype),
+            "relative_center": matched.aligned_relative_center.to(
+                predicted.relative_center.dtype
+            ),
+            "presence": matched.aligned_presence.to(predicted.presence.dtype),
+            "visibility": matched.aligned_visibility.to(
+                predicted.visibility.dtype
+            ),
+            "identity": matched.aligned_identity.to(predicted.identity_key.dtype),
+        }
+        confidence = matched.confidence.to(predicted.presence.dtype)
         gate_input = torch.cat(
             (
                 predicted.feature,
-                matched.aligned_feature,
-                matched.confidence[..., None],
-                predicted.presence[..., None],
-                matched.aligned_visibility[..., None],
+                aligned["feature"],
+                confidence[..., None].to(predicted.feature.dtype),
+                predicted.presence[..., None].to(predicted.feature.dtype),
+                aligned["visibility"][..., None].to(predicted.feature.dtype),
             ),
             dim=-1,
         )
         gate = torch.sigmoid(self.correction_gate(gate_input)).squeeze(-1)
-        gate = gate * matched.aligned_visibility * matched.confidence
+        gate = gate.to(predicted.presence.dtype)
+        gate = gate * aligned["visibility"] * confidence
         birth = (
             (predicted.presence < 0.1).to(gate.dtype)
-            * matched.aligned_presence
+            * aligned["presence"]
         )
 
-        def blend(predicted_value, aligned_value):
-            weight = gate
-            while weight.ndim < predicted_value.ndim:
-                weight = weight[..., None]
-            return torch.lerp(predicted_value, aligned_value, weight)
+        def blend(predicted_value, aligned_value, blend_weight):
+            aligned_value = aligned_value.to(predicted_value.dtype)
+            blend_weight = blend_weight.to(predicted_value.dtype)
+            while blend_weight.ndim < predicted_value.ndim:
+                blend_weight = blend_weight[..., None]
+            return torch.lerp(predicted_value, aligned_value, blend_weight)
 
-        feature = blend(predicted.feature, matched.aligned_feature)
-        center = blend(predicted.center, matched.aligned_center)
-        covariance = blend(predicted.covariance, matched.aligned_covariance)
-        owner = blend(predicted.owner, matched.aligned_owner)
+        feature = blend(predicted.feature, aligned["feature"], gate)
+        center = blend(predicted.center, aligned["center"], gate)
+        covariance = blend(predicted.covariance, aligned["covariance"], gate)
+        owner = blend(predicted.owner, aligned["owner"], gate)
         relative_center = blend(
-            predicted.relative_center, matched.aligned_relative_center
+            predicted.relative_center, aligned["relative_center"], gate
         )
-        birth_weight = birth
-        while birth_weight.ndim < feature.ndim:
-            birth_weight = birth_weight[..., None]
-        feature = torch.lerp(feature, matched.aligned_feature, birth_weight)
-        center = torch.lerp(center, matched.aligned_center, birth[..., None])
-        covariance = torch.lerp(
-            covariance, matched.aligned_covariance, birth[..., None, None]
-        )
-        owner = torch.lerp(owner, matched.aligned_owner, birth[..., None])
-        relative_center = torch.lerp(
-            relative_center, matched.aligned_relative_center, birth[..., None]
+        feature = blend(feature, aligned["feature"], birth)
+        center = blend(center, aligned["center"], birth)
+        covariance = blend(covariance, aligned["covariance"], birth)
+        owner = blend(owner, aligned["owner"], birth)
+        relative_center = blend(
+            relative_center, aligned["relative_center"], birth
         )
         presence = torch.maximum(
-            predicted.presence * (1.0 - gate) + matched.aligned_presence * gate,
+            predicted.presence * (1.0 - gate) + aligned["presence"] * gate,
             birth,
         ).clamp(0.0, 1.0)
         presence = self._hard_presence(presence)
         normalized_owner = owner / owner.sum(dim=-1, keepdim=True).clamp_min(1e-6)
         owner = self._enforce_scene_quota(normalized_owner, presence > 0.5)
-        visibility = torch.maximum(matched.aligned_visibility * gate, birth).clamp(
+        visibility = torch.maximum(aligned["visibility"] * gate, birth).clamp(
             0.0, 1.0
         ) * presence
         object_mass = owner[..., : self.config.object_slots].sum(dim=-1)
-        identity_value = blend(predicted.identity_key, matched.aligned_identity)
-        identity_value = torch.lerp(
-            identity_value, matched.aligned_identity, birth[..., None]
-        )
+        identity_value = blend(predicted.identity_key, aligned["identity"], gate)
+        identity_value = blend(identity_value, aligned["identity"], birth)
         identity = F.normalize(identity_value.float(), dim=-1).to(feature.dtype)
         identity = identity * object_mass[..., None]
         return RegionMemoryState(
