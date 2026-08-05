@@ -370,6 +370,7 @@ def main() -> None:
     gate_args = argparse.Namespace(
         video_vae_model=args.video_vae_model,
         video_vae_contract=args.video_vae_contract,
+        video_vae_pythonpath=args.video_vae_pythonpath,
         video_vae_clip_frames=5,
         video_vae_short_side=256,
         video_vae_batch=args.video_vae_batch,
