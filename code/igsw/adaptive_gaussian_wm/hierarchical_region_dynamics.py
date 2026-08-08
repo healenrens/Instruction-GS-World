@@ -44,7 +44,7 @@ class HierarchicalRegionDynamics(nn.Module):
             nn.Linear(9, dim), nn.SiLU(), nn.Linear(dim, dim)
         )
         self.owner_input = nn.Linear(config.region_owners, dim)
-        self.root_input = nn.Linear(config.object_dim, dim)
+        self.root_input = nn.Linear(config.object_dim, dim, bias=False)
         self.time_input = nn.Sequential(
             nn.Linear(1, dim), nn.SiLU(), nn.Linear(dim, dim)
         )
