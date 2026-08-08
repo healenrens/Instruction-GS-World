@@ -320,13 +320,14 @@ def verify_v43_action_factorization(
             history_relations=roots["relations"],
             history_existence=roots["existence"],
         )
+        shared_base_root_slots = conditioned_root.base_future_slots
         zero_region = model.region_dynamics(
             online["regions"],
-            zero_root.future_slots,
+            shared_base_root_slots,
             zero_root.future_centers,
             future_scale,
             zero_actions,
-            base_root_future_slots=zero_root.base_future_slots,
+            base_root_future_slots=shared_base_root_slots,
         )
         perturbed_history = dict(online["regions"])
         inactive = online["regions"]["presence"][:, -1] <= 0.5
@@ -337,11 +338,11 @@ def verify_v43_action_factorization(
         perturbed_history["feature"] = perturbed_feature
         perturbed_region = model.region_dynamics(
             perturbed_history,
-            zero_root.future_slots,
+            shared_base_root_slots,
             zero_root.future_centers,
             future_scale,
             zero_actions,
-            base_root_future_slots=zero_root.base_future_slots,
+            base_root_future_slots=shared_base_root_slots,
         )
     root_base_difference = _difference(
         zero_root.future_slots, conditioned_root.base_future_slots
