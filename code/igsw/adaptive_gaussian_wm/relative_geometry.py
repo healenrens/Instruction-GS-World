@@ -21,11 +21,20 @@ class ObjectGeometryState:
     relations: torch.Tensor
 
 
+def determinant_2x2(matrix: torch.Tensor) -> torch.Tensor:
+    """Compute a batched 2x2 determinant without a CUDA solver handle."""
+    if matrix.shape[-2:] != (2, 2):
+        raise ValueError("matrix must end with [2,2]")
+    value = matrix.float()
+    return (
+        value[..., 0, 0] * value[..., 1, 1]
+        - value[..., 0, 1] * value[..., 1, 0]
+    )
+
+
 def gaussian_linear_scale(covariance: torch.Tensor) -> torch.Tensor:
     """Return ellipse linear support; global image scaling remains factored out."""
-    if covariance.shape[-2:] != (2, 2):
-        raise ValueError("covariance must end with [2,2]")
-    determinant = torch.linalg.det(covariance.float()).clamp_min(1e-12)
+    determinant = determinant_2x2(covariance).clamp_min(1e-12)
     return determinant.pow(0.25).to(covariance.dtype)
 
 

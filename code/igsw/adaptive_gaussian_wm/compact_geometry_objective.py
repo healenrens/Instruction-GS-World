@@ -4,6 +4,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .relative_geometry import determinant_2x2
+
 
 def _weighted_mean(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     weight = weight.to(value.dtype)
@@ -15,8 +17,8 @@ def _relative_covariance_error(
     target: torch.Tensor,
     weight: torch.Tensor,
 ) -> torch.Tensor:
-    predicted_area = torch.linalg.det(predicted.float()).clamp_min(1e-8)
-    target_area = torch.linalg.det(target.float()).clamp_min(1e-8)
+    predicted_area = determinant_2x2(predicted).clamp_min(1e-8)
+    target_area = determinant_2x2(target).clamp_min(1e-8)
     denominator = weight.sum(dim=1, keepdim=True).clamp_min(1.0)
     predicted_log_area = predicted_area.log()
     target_log_area = target_area.log()

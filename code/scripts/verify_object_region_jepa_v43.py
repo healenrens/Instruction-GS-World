@@ -24,6 +24,10 @@ from igsw.adaptive_gaussian_wm.checkpointing import (  # noqa: E402
     CHECKPOINT_VERSION,
     warm_start_model,
 )
+from igsw.adaptive_gaussian_wm.compact_state_diagnostics import (  # noqa: E402
+    EFFECTIVE_RANK_ESTIMATOR,
+    effective_rank_participation_ratio,
+)
 from igsw.adaptive_gaussian_wm.dynamic_dual_horizon_dataset import (  # noqa: E402
     DYNAMIC_DUAL_HORIZON_CONTRACT,
     DynamicDualHorizonEpisodeDataset,
@@ -32,6 +36,9 @@ from igsw.adaptive_gaussian_wm.rgb_episode_cache_contract import (  # noqa: E402
     JIT_DINO_IMAGE_SIZE,
     JIT_DINO_MODEL,
     file_sha256,
+)
+from igsw.adaptive_gaussian_wm.relative_geometry import (  # noqa: E402
+    determinant_2x2,
 )
 from igsw.adaptive_gaussian_wm.train_runtime import move_to_device  # noqa: E402
 from igsw.adaptive_gaussian_wm.v42_runtime_contracts import (  # noqa: E402
@@ -65,6 +72,39 @@ def require(condition: bool, message: str) -> None:
 
 def difference(left: torch.Tensor, right: torch.Tensor) -> float:
     return float((left.detach().float() - right.detach().float()).abs().max())
+
+
+def verify_solver_free_numeric_contract(device: torch.device) -> dict:
+    covariance = torch.tensor(
+        [[[4.0, 1.0], [2.0, 3.0]]],
+        device=device,
+        requires_grad=True,
+    )
+    determinant = determinant_2x2(covariance)
+    require(
+        bool(torch.allclose(determinant, determinant.new_tensor([10.0]))),
+        "explicit 2x2 determinant is incorrect",
+    )
+    determinant.sum().backward()
+    require(
+        covariance.grad is not None and bool(torch.isfinite(covariance.grad).all()),
+        "explicit 2x2 determinant has non-finite gradients",
+    )
+    feature = torch.eye(16, device=device)
+    effective_rank, usable_rank = effective_rank_participation_ratio(feature)
+    require(bool(torch.isfinite(effective_rank)), "effective rank is non-finite")
+    require(
+        0.0 < float(effective_rank) <= float(usable_rank),
+        "effective rank is outside its usable range",
+    )
+    return {
+        "solver_free_linalg_contract": (
+            "explicit_2x2_determinant_and_participation_rank_v1"
+        ),
+        "region_effective_rank_estimator": EFFECTIVE_RANK_ESTIMATOR,
+        "numeric_contract_effective_rank": float(effective_rank),
+        "numeric_contract_usable_rank": usable_rank,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -398,6 +438,7 @@ def main() -> None:
     sample = dataset[(0, 2)]
     batch = move_to_device(default_collate([sample]), torch.device("cuda:0"))
     model, warm_start = build_model(dataset, args, torch.device("cuda:0"))
+    numeric_contract = verify_solver_free_numeric_contract(torch.device("cuda:0"))
     parameter_contract = verify_parameter_contract(model)
     curriculum = verify_curriculum(model)
     amp_context = (
@@ -444,6 +485,7 @@ def main() -> None:
         "gpu_policy": args.expected_local_gpus,
         **gate_contract_fields(ARCHITECTURE),
         **warm_start,
+        **numeric_contract,
         **temporal,
         **parameter_contract,
         **curriculum,

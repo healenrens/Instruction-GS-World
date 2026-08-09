@@ -5,14 +5,24 @@ import torch
 import torch.nn.functional as F
 
 
-def _effective_rank(feature: torch.Tensor) -> tuple[torch.Tensor, int]:
+EFFECTIVE_RANK_ESTIMATOR = "covariance_participation_ratio_v1"
+
+
+def effective_rank_participation_ratio(
+    feature: torch.Tensor,
+) -> tuple[torch.Tensor, int]:
+    """Estimate effective dimension without SVD or a CUDA solver handle."""
     matrix = feature.float().reshape(-1, feature.shape[-1])
+    if matrix.shape[0] < 2:
+        raise ValueError("effective rank needs at least two feature vectors")
     matrix = matrix - matrix.mean(dim=0, keepdim=True)
     sampled = matrix[:, ::4]
-    singular = torch.linalg.svdvals(sampled)
-    probability = singular / singular.sum().clamp_min(1e-8)
-    entropy = -(probability * probability.clamp_min(1e-8).log()).sum()
-    return entropy.exp(), min(sampled.shape)
+    covariance = sampled.transpose(0, 1) @ sampled
+    spectral_sum = sampled.square().sum()
+    spectral_square_sum = covariance.square().sum()
+    effective_rank = spectral_sum.square() / spectral_square_sum.clamp_min(1e-12)
+    usable_rank = min(sampled.shape[0] - 1, sampled.shape[1])
+    return effective_rank.clamp(0.0, float(usable_rank)), usable_rank
 
 
 def _ema_distance(online, target) -> torch.Tensor:
@@ -47,7 +57,7 @@ def compact_state_diagnostics(model, batch: dict, output: dict) -> dict:
     scene = owner[..., -2] * active_weight
     transient = owner[..., -1] * active_weight
     object_owner = owner[..., :-2].sum(dim=-1) * active_weight
-    effective_rank, usable_rank = _effective_rank(
+    effective_rank, usable_rank = effective_rank_participation_ratio(
         regions["feature"][:, -1][active]
     )
     diagnostics = {
