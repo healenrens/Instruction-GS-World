@@ -13,7 +13,7 @@ from .distributed_statistics import (
 def feature_statistics_regularizer(
     feature: torch.Tensor,
     valid: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if valid.shape != feature.shape[:-1]:
         raise ValueError("feature regularizer validity shape differs")
     global_feature = gather_batch_with_grad(feature).float()
@@ -26,14 +26,24 @@ def feature_statistics_regularizer(
     if supported.shape[0] < 2:
         # Covariance is undefined; retain a finite maximum variance penalty.
         zero = global_feature.sum() * 0.0
-        return zero + 0.5, zero
+        return zero + 0.5, zero, zero + 0.2
     standard_deviation = supported.std(dim=0, unbiased=False)
     variance = F.relu(0.5 - standard_deviation).mean()
-    sampled = supported[:, ::6]
+    sampled = supported[:, ::4]
     sampled = sampled - sampled.mean(dim=0, keepdim=True)
-    covariance = sampled.T @ sampled / (sampled.shape[0] - 1)
-    off_diagonal = covariance - torch.diag_embed(covariance.diagonal())
-    return variance, off_diagonal.square().mean()
+    sampled_deviation = sampled.std(dim=0, unbiased=False).clamp_min(0.1)
+    normalized = sampled / sampled_deviation
+    correlation = normalized.T @ normalized / sampled.shape[0]
+    diagonal = correlation.diagonal()
+    off_diagonal = correlation - torch.diag_embed(diagonal)
+    covariance = off_diagonal.square().mean()
+    spectral_sum = diagonal.sum()
+    spectral_square_sum = correlation.square().sum()
+    effective_rank = spectral_sum.square() / spectral_square_sum.clamp_min(1e-12)
+    usable_rank = float(min(sampled.shape[0] - 1, sampled.shape[1]))
+    rank_fraction = effective_rank / max(1.0, usable_rank)
+    rank = F.relu(rank_fraction.new_tensor(0.2) - rank_fraction)
+    return variance, covariance, rank
 
 
 def action_statistics_regularizer(

@@ -6,6 +6,9 @@ _APPROVED_SOURCE_COMMITS = {
     "cea05ac01178cb650cfa4668f3c9b48e46ca007a": (
         "curriculum_ddp_identity_solver_sampler_stability_v4"
     ),
+    "b5b3f1197a88353102ebc7534ba029be1eb30f71": (
+        "soft_lifecycle_relative_geometry_region_rank_v5"
+    ),
 }
 _MIGRATABLE_ARGUMENTS = frozenset(("gate_report", "gate_report_sha256"))
 

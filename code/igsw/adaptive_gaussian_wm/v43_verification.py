@@ -434,6 +434,14 @@ def verify_v43_action_factorization(
     region_zero_visibility = _difference(
         zero_region.future_visibility, zero_region.base_future_visibility
     )
+    region_zero_presence_logits = _difference(
+        zero_region.future_presence_logits,
+        zero_region.base_future_presence_logits,
+    )
+    region_zero_visibility_logits = _difference(
+        zero_region.future_visibility_logits,
+        zero_region.base_future_visibility_logits,
+    )
     active = (~inactive)[:, None, :, None].to(zero_region.future_feature.dtype)
     inactive_dynamics_leakage = float(
         (
@@ -460,6 +468,14 @@ def verify_v43_action_factorization(
     _require(region_zero_presence < 1e-6, "zero effect changed region presence")
     _require(region_zero_visibility < 1e-6, "zero effect changed region visibility")
     _require(
+        region_zero_presence_logits < 1e-6,
+        "zero effect changed region presence logits",
+    )
+    _require(
+        region_zero_visibility_logits < 1e-6,
+        "zero effect changed region visibility logits",
+    )
+    _require(
         inactive_dynamics_leakage < 1e-6,
         "inactive region content leaked through Dynamics",
     )
@@ -483,6 +499,12 @@ def verify_v43_action_factorization(
         "region_zero_effect_residual_max": region_zero_residual,
         "region_zero_effect_presence_max_difference": region_zero_presence,
         "region_zero_effect_visibility_max_difference": region_zero_visibility,
+        "region_zero_effect_presence_logit_max_difference": (
+            region_zero_presence_logits
+        ),
+        "region_zero_effect_visibility_logit_max_difference": (
+            region_zero_visibility_logits
+        ),
         "inactive_region_dynamics_leakage_max_difference": (
             inactive_dynamics_leakage
         ),

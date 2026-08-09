@@ -8,8 +8,10 @@ from .compact_geometry_objective import (
     path_geometry_error,
     path_region_identity_error,
     region_geometry_error,
+    region_geometry_terms,
     region_identity_error,
     root_geometry_error,
+    root_geometry_terms,
 )
 from .compact_state_regularization import (
     action_statistics_regularizer,
@@ -69,6 +71,35 @@ def _delta_state_error(
         weight,
     )
     return direction + magnitude
+
+
+def _geometry_metric_parts(
+    root_terms: dict[str, torch.Tensor],
+    region_terms: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    return {
+        **{
+            f"loss_geometry_root_{name}": value
+            for name, value in root_terms.items()
+        },
+        **{
+            f"loss_geometry_region_{name}": value
+            for name, value in region_terms.items()
+        },
+    }
+
+
+def _zero_geometry_metric_parts(zero: torch.Tensor) -> dict[str, torch.Tensor]:
+    return {
+        "loss_geometry_root_relation": zero,
+        "loss_geometry_root_presence": zero,
+        "loss_geometry_root_visibility": zero,
+        "loss_geometry_region_center": zero,
+        "loss_geometry_region_relative_scale": zero,
+        "loss_geometry_region_correlation": zero,
+        "loss_geometry_region_presence": zero,
+        "loss_geometry_region_visibility": zero,
+    }
 
 
 def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
@@ -190,22 +221,29 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
     representation = (
         representation + 0.25 * correspondence + 0.1 * owner_regularization
     )
-    region_variance, region_covariance = feature_statistics_regularizer(
-        online_region,
-        online["regions"]["presence"][:, current_index] > 0.5,
+    region_variance, region_covariance, region_rank = (
+        feature_statistics_regularizer(
+            online_region,
+            online["regions"]["presence"][:, current_index] > 0.5,
+        )
     )
-    dino_variance, dino_covariance = feature_statistics_regularizer(
-        online["native_features"][:, current_index, ::8],
-        target["valid"][:, current_index, ::8],
+    dino_variance, dino_covariance, dino_rank = (
+        feature_statistics_regularizer(
+            online["native_features"][:, current_index, ::8],
+            target["valid"][:, current_index, ::8],
+        )
     )
     representation_variance = region_variance + 0.5 * dino_variance
     representation_covariance = region_covariance + 0.5 * dino_covariance
+    representation_rank = region_rank + 0.5 * dino_rank
     zero = representation * 0.0
+    zero_geometry_parts = _zero_geometry_metric_parts(zero)
     if output["root_prediction"] is None:
         total = (
             representation
             + 0.05 * representation_variance
             + 0.01 * representation_covariance
+            + 0.05 * representation_rank
         )
         return total, {
             "total": total,
@@ -230,6 +268,7 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
             "loss_delta_root": zero,
             "loss_delta_region": zero,
             "loss_geometry_lifecycle": zero,
+            **zero_geometry_parts,
             "loss_region_identity": zero,
             "loss_goal": zero,
             "loss_path_root": zero,
@@ -237,6 +276,8 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
             "loss_effect_margin": zero,
             "loss_variance": representation_variance,
             "loss_covariance": representation_covariance,
+            "loss_rank": representation_rank,
+            "diagnostic_geometry_weighted_fraction_of_total": zero,
             "diagnostic_short_persistence_root": zero,
             "diagnostic_short_persistence_region": zero,
             "diagnostic_zero_effect": zero,
@@ -284,10 +325,16 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
         target_region_delta,
         short_region_weight,
     )
-    geometry = root_geometry_error(root_prediction, target_short_root, 0)
-    geometry = geometry + region_geometry_error(
+    short_root_geometry = root_geometry_terms(
+        root_prediction, target_short_root, 0
+    )
+    short_region_geometry = region_geometry_terms(
         region_prediction, target_short_region, 0
     )
+    geometry_parts = _geometry_metric_parts(
+        short_root_geometry, short_region_geometry
+    )
+    geometry = torch.stack(tuple(geometry_parts.values())).sum()
     identity = region_identity_error(
         region_prediction, target_short_region, 0
     )
@@ -311,6 +358,11 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
             total
             + 0.05 * representation_variance
             + 0.01 * representation_covariance
+            + 0.05 * representation_rank
+        )
+        geometry_fraction = (
+            curriculum.dynamics_weight * geometry.detach()
+            / total.detach().abs().clamp_min(1e-6)
         )
         return total, {
             "total": total,
@@ -335,6 +387,7 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
             "loss_delta_root": root_delta,
             "loss_delta_region": region_delta,
             "loss_geometry_lifecycle": geometry,
+            **geometry_parts,
             "loss_region_identity": identity,
             "loss_goal": zero,
             "loss_path_root": zero,
@@ -342,6 +395,8 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
             "loss_effect_margin": zero,
             "loss_variance": representation_variance,
             "loss_covariance": representation_covariance,
+            "loss_rank": representation_rank,
+            "diagnostic_geometry_weighted_fraction_of_total": geometry_fraction,
             "diagnostic_short_persistence_root": persistence_root,
             "diagnostic_short_persistence_region": persistence_region,
             "diagnostic_zero_effect": short_root + short_region,
@@ -482,10 +537,15 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
     )
     variance = representation_variance + effect_variance
     covariance = representation_covariance + effect_covariance
+    rank = representation_rank
     total = representation
     total = total + curriculum.dynamics_weight * dynamics
     total = total + curriculum.posterior_weight * (effect_margin + goal)
-    total = total + 0.05 * variance + 0.01 * covariance
+    total = total + 0.05 * variance + 0.01 * covariance + 0.05 * rank
+    geometry_fraction = (
+        curriculum.dynamics_weight * geometry.detach()
+        / total.detach().abs().clamp_min(1e-6)
+    )
     parts = {
         "total": total,
         "curriculum_step": total.new_tensor(float(curriculum.step)),
@@ -505,6 +565,7 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
         "loss_delta_root": root_delta,
         "loss_delta_region": region_delta,
         "loss_geometry_lifecycle": geometry,
+        **geometry_parts,
         "loss_region_identity": identity + goal_identity,
         "loss_goal": goal,
         "loss_goal_geometry": direct_geometry + rollout_geometry,
@@ -514,6 +575,8 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
         "loss_effect_margin": effect_margin,
         "loss_variance": variance,
         "loss_covariance": covariance,
+        "loss_rank": rank,
+        "diagnostic_geometry_weighted_fraction_of_total": geometry_fraction,
         "diagnostic_short_persistence_root": persistence_root,
         "diagnostic_short_persistence_region": persistence_region,
         "diagnostic_zero_effect": zero_root + zero_region,

@@ -126,10 +126,12 @@ class ObjectRegionMemory(nn.Module):
             raise ValueError("projected region observations have an invalid shape")
         if roots.assignment.shape[:2] != (batch, regions):
             raise ValueError("root assignment and region count differ")
+        contextual_anchor = F.layer_norm(contextual_feature.float(), (dim,))
+        visual_anchor = F.layer_norm(projected_feature.float(), (dim,))
         feature = F.layer_norm(
-            contextual_feature + projected_feature,
+            contextual_anchor + visual_anchor,
             (dim,),
-        )
+        ).to(contextual_feature.dtype)
         active = tokens.activation.squeeze(-1) > 0.5
         feature = torch.where(active[..., None], feature, torch.zeros_like(feature))
         object_logits = roots.assignment.float().clamp_min(1e-6).log()

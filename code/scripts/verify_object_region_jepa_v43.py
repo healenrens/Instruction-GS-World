@@ -28,6 +28,9 @@ from igsw.adaptive_gaussian_wm.compact_state_diagnostics import (  # noqa: E402
     EFFECTIVE_RANK_ESTIMATOR,
     effective_rank_participation_ratio,
 )
+from igsw.adaptive_gaussian_wm.compact_state_regularization import (  # noqa: E402
+    feature_statistics_regularizer,
+)
 from igsw.adaptive_gaussian_wm.dynamic_dual_horizon_dataset import (  # noqa: E402
     DYNAMIC_DUAL_HORIZON_CONTRACT,
     DynamicDualHorizonEpisodeDataset,
@@ -108,6 +111,37 @@ def verify_solver_free_numeric_contract(device: torch.device) -> dict:
         "region_effective_rank_estimator": EFFECTIVE_RANK_ESTIMATOR,
         "numeric_contract_effective_rank": float(effective_rank),
         "numeric_contract_usable_rank": usable_rank,
+    }
+
+
+def verify_region_rank_regularizer_contract(device: torch.device) -> dict:
+    diverse = torch.eye(32, 64, device=device, requires_grad=True)
+    sample = torch.arange(32, device=device, dtype=torch.float32)
+    channel = torch.linspace(-1.0, 1.0, 64, device=device)
+    collapsed = (
+        torch.sin(0.3 * sample)[:, None]
+        + 0.02 * torch.cos(0.7 * sample)[:, None] * channel[None]
+    ).requires_grad_()
+    valid = torch.ones(32, device=device, dtype=torch.bool)
+    _, _, diverse_rank = feature_statistics_regularizer(diverse, valid)
+    _, _, collapsed_rank = feature_statistics_regularizer(collapsed, valid)
+    require(
+        float(collapsed_rank.detach()) > float(diverse_rank.detach()),
+        "rank regularizer does not distinguish collapsed features",
+    )
+    collapsed_rank.backward()
+    require(
+        collapsed.grad is not None and bool(torch.isfinite(collapsed.grad).all()),
+        "rank regularizer has non-finite gradients",
+    )
+    require(
+        float(collapsed.grad.abs().max()) > 0.0,
+        "rank regularizer has no recovery gradient",
+    )
+    return {
+        "region_rank_regularizer_contract": "correlation_rank_floor_v1",
+        "diverse_region_rank_loss": float(diverse_rank.detach()),
+        "collapsed_region_rank_loss": float(collapsed_rank.detach()),
     }
 
 
@@ -305,6 +339,34 @@ def gradient_contract(model, batch, amp_context) -> tuple[dict, dict]:
     with amp_context():
         output = model(batch, collect_diagnostics=True)
     require(bool(torch.isfinite(output["loss"])), "v43 loss is non-finite")
+    required_metrics = {
+        "loss_rank",
+        "loss_geometry_root_relation",
+        "loss_geometry_root_presence",
+        "loss_geometry_root_visibility",
+        "loss_geometry_region_center",
+        "loss_geometry_region_relative_scale",
+        "loss_geometry_region_correlation",
+        "loss_geometry_region_presence",
+        "loss_geometry_region_visibility",
+        "diagnostic_geometry_weighted_fraction_of_total",
+    }
+    missing_metrics = required_metrics.difference(output["parts"])
+    require(not missing_metrics, f"v43 metrics are missing: {sorted(missing_metrics)}")
+    require(
+        all(bool(torch.isfinite(output["parts"][name])) for name in required_metrics),
+        "v43 geometry/rank metrics are non-finite",
+    )
+    region_prediction = output["region_prediction"]
+    require(region_prediction is not None, "v43 verifier has no region prediction")
+    lifecycle_logits = (
+        region_prediction.future_presence_logits,
+        region_prediction.future_visibility_logits,
+    )
+    require(
+        all(bool(torch.isfinite(value).all()) for value in lifecycle_logits),
+        "region lifecycle logits are non-finite",
+    )
     output["loss"].backward()
     groups = {
         "dino_lower": [],
@@ -479,6 +541,9 @@ def main() -> None:
     batch = move_to_device(default_collate([sample]), torch.device("cuda:0"))
     model, warm_start = build_model(dataset, args, torch.device("cuda:0"))
     numeric_contract = verify_solver_free_numeric_contract(torch.device("cuda:0"))
+    rank_contract = verify_region_rank_regularizer_contract(
+        torch.device("cuda:0")
+    )
     sampler_resume = verify_direct_sampler_resume_contract()
     parameter_contract = verify_parameter_contract(model)
     curriculum = verify_curriculum(model)
@@ -527,6 +592,7 @@ def main() -> None:
         **gate_contract_fields(ARCHITECTURE),
         **warm_start,
         **numeric_contract,
+        **rank_contract,
         **sampler_resume,
         **temporal,
         **parameter_contract,

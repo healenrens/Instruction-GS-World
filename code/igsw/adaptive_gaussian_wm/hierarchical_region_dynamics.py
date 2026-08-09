@@ -21,17 +21,22 @@ class RegionDynamicsOutput:
     future_activation: torch.Tensor
     future_presence: torch.Tensor
     future_visibility: torch.Tensor
+    future_presence_logits: torch.Tensor
+    future_visibility_logits: torch.Tensor
     future_identity_key: torch.Tensor
     base_future_feature: torch.Tensor
     base_future_center: torch.Tensor
     base_future_presence: torch.Tensor
     base_future_visibility: torch.Tensor
+    base_future_presence_logits: torch.Tensor
+    base_future_visibility_logits: torch.Tensor
     action_feature_residual: torch.Tensor
     action_geometry_residual: torch.Tensor
 
 
 def _stable_logit(value: torch.Tensor) -> torch.Tensor:
-    return torch.logit(value.float(), eps=1e-4)
+    # Hard carrier selection is not calibrated as near-certain future presence.
+    return torch.logit(value.float(), eps=0.05)
 
 
 class HierarchicalRegionDynamics(nn.Module):
@@ -270,18 +275,22 @@ class HierarchicalRegionDynamics(nn.Module):
         )
         base_lifecycle = self.base_lifecycle_head(hidden)
         action_lifecycle = self.action_lifecycle_gate(action_hidden)
-        base_presence_soft = torch.sigmoid(
+        base_presence_logits = (
             _stable_logit(current_presence[:, None]) + base_lifecycle[..., 0]
         )
-        base_visibility_soft = torch.sigmoid(
+        base_visibility_logits = (
             _stable_logit(current_visibility[:, None]) + base_lifecycle[..., 1]
         )
-        future_presence_soft = torch.sigmoid(
-            _stable_logit(base_presence_soft) + action_lifecycle[..., 0]
+        future_presence_logits = (
+            base_presence_logits + action_lifecycle[..., 0]
         )
-        future_visibility_soft = torch.sigmoid(
-            _stable_logit(base_visibility_soft) + action_lifecycle[..., 1]
+        future_visibility_logits = (
+            base_visibility_logits + action_lifecycle[..., 1]
         )
+        base_presence_soft = torch.sigmoid(base_presence_logits)
+        base_visibility_soft = torch.sigmoid(base_visibility_logits)
+        future_presence_soft = torch.sigmoid(future_presence_logits)
+        future_visibility_soft = torch.sigmoid(future_visibility_logits)
         base_presence = self._hard_presence(base_presence_soft)
         future_presence = self._hard_presence(future_presence_soft)
         base_visibility = base_visibility_soft * base_presence
@@ -314,11 +323,15 @@ class HierarchicalRegionDynamics(nn.Module):
             future_activation=future_presence,
             future_presence=future_presence,
             future_visibility=future_visibility,
+            future_presence_logits=future_presence_logits,
+            future_visibility_logits=future_visibility_logits,
             future_identity_key=future_identity,
             base_future_feature=base_feature,
             base_future_center=base_center,
             base_future_presence=base_presence,
             base_future_visibility=base_visibility,
+            base_future_presence_logits=base_presence_logits,
+            base_future_visibility_logits=base_visibility_logits,
             action_feature_residual=action_feature,
             action_geometry_residual=action_geometry,
         )

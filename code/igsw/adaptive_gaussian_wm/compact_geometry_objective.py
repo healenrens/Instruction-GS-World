@@ -4,67 +4,141 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from .relative_geometry import determinant_2x2
-
 
 def _weighted_mean(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     weight = weight.to(value.dtype)
     return (value * weight).sum() / weight.sum().clamp_min(1.0)
 
 
-def _relative_covariance_error(
+def _balanced_binary_error(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    sample_valid: torch.Tensor | None = None,
+) -> torch.Tensor:
+    target = target.float()
+    valid = torch.ones_like(target)
+    if sample_valid is not None:
+        valid = valid * sample_valid[:, None].to(valid.dtype)
+    loss = F.binary_cross_entropy_with_logits(
+        logits.float(), target, reduction="none"
+    )
+    positive = valid * target
+    negative = valid * (1.0 - target)
+    positive_count = positive.sum()
+    negative_count = negative.sum()
+    positive_loss = (loss * positive).sum() / positive_count.clamp_min(1.0)
+    negative_loss = (loss * negative).sum() / negative_count.clamp_min(1.0)
+    positive_available = (positive_count > 0).to(loss.dtype)
+    negative_available = (negative_count > 0).to(loss.dtype)
+    return (
+        positive_available * positive_loss + negative_available * negative_loss
+    ) / (positive_available + negative_available).clamp_min(1.0)
+
+
+def _relative_covariance_terms(
     predicted: torch.Tensor,
     target: torch.Tensor,
     weight: torch.Tensor,
-) -> torch.Tensor:
-    predicted_area = determinant_2x2(predicted).clamp_min(1e-8)
-    target_area = determinant_2x2(target).clamp_min(1e-8)
+) -> tuple[torch.Tensor, torch.Tensor]:
+    predicted = predicted.float()
+    target = target.float()
+    predicted_diagonal = predicted.diagonal(dim1=-2, dim2=-1).clamp_min(1e-6)
+    target_diagonal = target.diagonal(dim1=-2, dim2=-1).clamp_min(1e-6)
+    predicted_log_axis = 0.5 * predicted_diagonal.log()
+    target_log_axis = 0.5 * target_diagonal.log()
     denominator = weight.sum(dim=1, keepdim=True).clamp_min(1.0)
-    predicted_log_area = predicted_area.log()
-    target_log_area = target_area.log()
-    predicted_log_area -= (
-        predicted_log_area * weight
-    ).sum(dim=1, keepdim=True) / denominator
-    target_log_area -= (
-        target_log_area * weight
-    ).sum(dim=1, keepdim=True) / denominator
-    area = F.smooth_l1_loss(predicted_log_area, target_log_area, reduction="none")
-    predicted_shape = predicted / predicted_area.sqrt()[..., None, None]
-    target_shape = target / target_area.sqrt()[..., None, None]
-    shape = F.smooth_l1_loss(
-        predicted_shape, target_shape, reduction="none"
-    ).mean(dim=(-1, -2))
-    return 0.25 * area + 0.1 * shape
+    predicted_log_axis = predicted_log_axis - (
+        predicted_log_axis * weight[..., None]
+    ).sum(dim=1, keepdim=True) / denominator[..., None]
+    target_log_axis = target_log_axis - (
+        target_log_axis * weight[..., None]
+    ).sum(dim=1, keepdim=True) / denominator[..., None]
+    relative_scale = F.smooth_l1_loss(
+        predicted_log_axis,
+        target_log_axis,
+        reduction="none",
+    ).mean(dim=-1)
+    predicted_correlation = predicted[..., 0, 1] / torch.sqrt(
+        predicted_diagonal[..., 0] * predicted_diagonal[..., 1]
+    )
+    target_correlation = target[..., 0, 1] / torch.sqrt(
+        target_diagonal[..., 0] * target_diagonal[..., 1]
+    )
+    correlation = F.smooth_l1_loss(
+        predicted_correlation.clamp(-0.999, 0.999),
+        target_correlation.clamp(-0.999, 0.999),
+        reduction="none",
+    )
+    return 0.25 * relative_scale, 0.1 * correlation
 
 
-def _region_pair_error(
+def _region_pair_terms(
     predicted_relative: torch.Tensor,
     predicted_covariance: torch.Tensor,
-    predicted_presence: torch.Tensor,
-    predicted_visibility: torch.Tensor,
+    predicted_presence_logits: torch.Tensor,
+    predicted_visibility_logits: torch.Tensor,
     target_relative: torch.Tensor,
     target_covariance: torch.Tensor,
     target_presence: torch.Tensor,
     target_visibility: torch.Tensor,
-    weight: torch.Tensor,
-) -> torch.Tensor:
+    geometry_weight: torch.Tensor,
+    sample_valid: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
     center = F.smooth_l1_loss(
         predicted_relative, target_relative, reduction="none"
     ).mean(dim=-1)
-    covariance = _relative_covariance_error(
-        predicted_covariance, target_covariance, weight
+    relative_scale, correlation = _relative_covariance_terms(
+        predicted_covariance, target_covariance, geometry_weight
     )
-    lifecycle = F.binary_cross_entropy_with_logits(
-        torch.logit(predicted_presence.float().clamp(1e-5, 1.0 - 1e-5)),
-        target_presence.float(),
-        reduction="none",
+    presence = _balanced_binary_error(
+        predicted_presence_logits,
+        target_presence,
+        sample_valid,
     )
-    visibility = F.binary_cross_entropy_with_logits(
-        torch.logit(predicted_visibility.float().clamp(1e-5, 1.0 - 1e-5)),
+    visibility_error = F.binary_cross_entropy_with_logits(
+        predicted_visibility_logits.float(),
         target_visibility.float(),
         reduction="none",
     )
-    return _weighted_mean(center + covariance + lifecycle + visibility, weight)
+    visibility_weight = target_presence.float()
+    if sample_valid is not None:
+        visibility_weight = visibility_weight * sample_valid[:, None]
+    return {
+        "center": _weighted_mean(center, geometry_weight),
+        "relative_scale": _weighted_mean(relative_scale, geometry_weight),
+        "correlation": _weighted_mean(correlation, geometry_weight),
+        "presence": presence,
+        "visibility": _weighted_mean(visibility_error, visibility_weight),
+    }
+
+
+def _sum_terms(terms: dict[str, torch.Tensor]) -> torch.Tensor:
+    return torch.stack(tuple(terms.values())).sum()
+
+
+def region_geometry_terms(
+    prediction,
+    target,
+    index: int,
+    sample_valid: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    object_mass = target.owner[..., :-2].sum(dim=-1)
+    scene_mass = target.owner[..., -2]
+    weight = target.presence * (object_mass + 0.1 * scene_mass)
+    if sample_valid is not None:
+        weight = weight * sample_valid[:, None]
+    return _region_pair_terms(
+        prediction.future_relative_center[:, index],
+        prediction.future_covariance[:, index],
+        prediction.future_presence_logits[:, index],
+        prediction.future_visibility_logits[:, index],
+        target.relative_center,
+        target.covariance,
+        target.presence,
+        target.visibility,
+        weight,
+        sample_valid,
+    )
 
 
 def region_geometry_error(
@@ -73,21 +147,8 @@ def region_geometry_error(
     index: int,
     sample_valid: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    object_mass = target.owner[..., :-2].sum(dim=-1)
-    scene_mass = target.owner[..., -2]
-    weight = target.presence * (object_mass + 0.1 * scene_mass)
-    if sample_valid is not None:
-        weight = weight * sample_valid[:, None]
-    return _region_pair_error(
-        prediction.future_relative_center[:, index],
-        prediction.future_covariance[:, index],
-        prediction.future_presence[:, index],
-        prediction.future_visibility[:, index],
-        target.relative_center,
-        target.covariance,
-        target.presence,
-        target.visibility,
-        weight,
+    return _sum_terms(
+        region_geometry_terms(prediction, target, index, sample_valid)
     )
 
 
@@ -109,12 +170,12 @@ def region_identity_error(
     return _weighted_mean(error, weight)
 
 
-def root_geometry_error(
+def root_geometry_terms(
     prediction,
     target,
     index: int,
     sample_valid: torch.Tensor | None = None,
-) -> torch.Tensor:
+) -> dict[str, torch.Tensor]:
     weight = target.existence
     if sample_valid is not None:
         weight = weight * sample_valid[:, None]
@@ -123,17 +184,32 @@ def root_geometry_error(
         target.relations.float(),
         reduction="none",
     ).mean(dim=(-1, -2))
-    lifecycle = F.binary_cross_entropy_with_logits(
-        prediction.future_existence_logits[:, index].float(),
-        target.existence.float(),
-        reduction="none",
+    presence = _balanced_binary_error(
+        prediction.future_existence_logits[:, index],
+        target.existence,
+        sample_valid,
     )
     visibility = F.binary_cross_entropy_with_logits(
         prediction.future_visibility_logits[:, index].float(),
         target.visibility.float(),
         reduction="none",
     )
-    return _weighted_mean(relation + lifecycle + visibility, weight)
+    return {
+        "relation": _weighted_mean(relation, weight),
+        "presence": presence,
+        "visibility": _weighted_mean(visibility, weight),
+    }
+
+
+def root_geometry_error(
+    prediction,
+    target,
+    index: int,
+    sample_valid: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return _sum_terms(
+        root_geometry_terms(prediction, target, index, sample_valid)
+    )
 
 
 def path_geometry_error(
@@ -162,18 +238,18 @@ def path_geometry_error(
     root = _weighted_mean(
         root_relation + root_lifecycle + root_visibility, root_weight
     )
-    region = _region_pair_error(
+    region_terms = _region_pair_terms(
         rollout_region.future_relative_center[:, 0],
         rollout_region.future_covariance[:, 0],
-        rollout_region.future_presence[:, 0],
-        rollout_region.future_visibility[:, 0],
+        rollout_region.future_presence_logits[:, 0],
+        rollout_region.future_visibility_logits[:, 0],
         direct_region.future_relative_center[:, 1].detach(),
         direct_region.future_covariance[:, 1].detach(),
-        direct_region.future_presence[:, 1].detach(),
-        direct_region.future_visibility[:, 1].detach(),
+        torch.sigmoid(direct_region.future_presence_logits[:, 1].detach()),
+        torch.sigmoid(direct_region.future_visibility_logits[:, 1].detach()),
         region_weight,
     )
-    return root + region
+    return root + _sum_terms(region_terms)
 
 
 def path_region_identity_error(
