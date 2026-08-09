@@ -4,7 +4,7 @@ from __future__ import annotations
 
 _APPROVED_SOURCE_COMMITS = {
     "cea05ac01178cb650cfa4668f3c9b48e46ca007a": (
-        "curriculum_boundary_stability_v1"
+        "curriculum_ddp_identity_stability_v2"
     ),
 }
 _MIGRATABLE_ARGUMENTS = frozenset(("gate_report", "gate_report_sha256"))
