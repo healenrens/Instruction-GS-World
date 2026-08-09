@@ -39,6 +39,8 @@ def sqrt_coverage_targets(lengths: tuple[int, ...]) -> tuple[int, ...]:
 class DistributedGroupBalancedSampler(Sampler[int]):
     """Cover every group, then apply deterministic square-root rebalancing."""
 
+    supports_start_index = True
+
     def __init__(
         self,
         dataset,
@@ -188,6 +190,10 @@ class SynchronizedDynamicHistorySampler(Sampler[tuple[int, int]]):
     @property
     def start_index(self) -> int:
         return int(getattr(self.sampler, "start_index", 0))
+
+    @property
+    def supports_start_index(self) -> bool:
+        return bool(getattr(self.sampler, "supports_start_index", False))
 
     def __iter__(self) -> Iterator[tuple[int, int]]:
         rotation = _stable_integer(

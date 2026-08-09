@@ -32,6 +32,10 @@ from igsw.adaptive_gaussian_wm.dynamic_dual_horizon_dataset import (  # noqa: E4
     DYNAMIC_DUAL_HORIZON_CONTRACT,
     DynamicDualHorizonEpisodeDataset,
 )
+from igsw.adaptive_gaussian_wm.group_balanced_sampler import (  # noqa: E402
+    DistributedGroupBalancedSampler,
+    SynchronizedDynamicHistorySampler,
+)
 from igsw.adaptive_gaussian_wm.rgb_episode_cache_contract import (  # noqa: E402
     JIT_DINO_IMAGE_SIZE,
     JIT_DINO_MODEL,
@@ -104,6 +108,42 @@ def verify_solver_free_numeric_contract(device: torch.device) -> dict:
         "region_effective_rank_estimator": EFFECTIVE_RANK_ESTIMATOR,
         "numeric_contract_effective_rank": float(effective_rank),
         "numeric_contract_usable_rank": usable_rank,
+    }
+
+
+def verify_direct_sampler_resume_contract() -> dict:
+    def build_sampler() -> SynchronizedDynamicHistorySampler:
+        balanced = DistributedGroupBalancedSampler(
+            dataset=range(16),
+            group_spans=((0, 8), (8, 16)),
+            group_targets=(8, 8),
+            num_replicas=1,
+            rank=0,
+            seed=17,
+            samples_per_rank=16,
+        )
+        return SynchronizedDynamicHistorySampler(
+            balanced,
+            history_lengths=(1, 2, 3, 4),
+            batch_size=4,
+            seed=17,
+        )
+
+    full_sampler = build_sampler()
+    full_sampler.set_epoch(23)
+    full_sequence = list(full_sampler)
+    resumed_sampler = build_sampler()
+    resumed_sampler.set_epoch(23)
+    resumed_sampler.set_start_index(8)
+    resumed_sequence = list(resumed_sampler)
+    require(
+        resumed_sequence == full_sequence[8:],
+        "direct sampler resume differs from deterministic sequence suffix",
+    )
+    require(len(resumed_sampler) == 8, "resumed sampler length is incorrect")
+    return {
+        "direct_sampler_resume_contract": "deterministic_local_offset_v1",
+        "direct_sampler_resume_verified_samples": len(resumed_sequence),
     }
 
 
@@ -439,6 +479,7 @@ def main() -> None:
     batch = move_to_device(default_collate([sample]), torch.device("cuda:0"))
     model, warm_start = build_model(dataset, args, torch.device("cuda:0"))
     numeric_contract = verify_solver_free_numeric_contract(torch.device("cuda:0"))
+    sampler_resume = verify_direct_sampler_resume_contract()
     parameter_contract = verify_parameter_contract(model)
     curriculum = verify_curriculum(model)
     amp_context = (
@@ -486,6 +527,7 @@ def main() -> None:
         **gate_contract_fields(ARCHITECTURE),
         **warm_start,
         **numeric_contract,
+        **sampler_resume,
         **temporal,
         **parameter_contract,
         **curriculum,

@@ -55,18 +55,41 @@ def train_phase(
     usable_batches = len(loader) // args.grad_accum * args.grad_accum
     updates_per_epoch = usable_batches // args.grad_accum
     epoch, update_offset = divmod(start_step, updates_per_epoch)
-    skip_batches = update_offset * args.grad_accum
+    resume_batch_offset = update_offset * args.grad_accum
+    direct_sampler_seek = bool(
+        getattr(sampler, "supports_start_index", False)
+    )
+    if context.is_main and resume_batch_offset:
+        print(
+            json.dumps(
+                {
+                    "event": "resume_data_position",
+                    "epoch": epoch,
+                    "optimizer_update_offset": update_offset,
+                    "local_batch_offset": resume_batch_offset,
+                    "local_sample_offset": resume_batch_offset * args.batch,
+                    "direct_sampler_seek": direct_sampler_seek,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
     started = time.time()
     optimizer.zero_grad(set_to_none=True)
     while step < phase_steps:
         action_free_phase = phase in ("representation", "readout")
         sampler.set_epoch(args.seed + epoch + (0 if action_free_phase else 100000))
+        direct_batch_offset = 0
+        if direct_sampler_seek:
+            sampler.set_start_index(resume_batch_offset * args.batch)
+            direct_batch_offset = resume_batch_offset
         accumulated: dict[str, torch.Tensor] = {}
         micro_count = 0
         for batch_index, cpu_batch in enumerate(loader):
-            if batch_index < skip_batches:
+            if not direct_sampler_seek and batch_index < resume_batch_offset:
                 continue
-            if batch_index >= usable_batches:
+            effective_batch_index = batch_index + direct_batch_offset
+            if effective_batch_index >= usable_batches:
                 break
             batch = move_to_device(cpu_batch, device)
             if feature_runtime is not None:
@@ -264,7 +287,7 @@ def train_phase(
             if step >= phase_steps:
                 break
         epoch += 1
-        skip_batches = 0
+        resume_batch_offset = 0
     return step, global_step
 
 
