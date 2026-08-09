@@ -20,6 +20,59 @@ def _require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def verify_v43_curriculum_backward_boundaries(
+    model, batch: dict, amp_context
+) -> dict[str, float]:
+    previous_step = int(model.curriculum_step.item())
+    checks = (
+        (4999, False, False),
+        (5000, False, False),
+        (5001, True, False),
+        (20000, True, False),
+        (20001, True, True),
+    )
+    report = {}
+    model.train()
+    for step, expect_dynamics, expect_posterior in checks:
+        model.set_curriculum_step(step)
+        model.zero_grad(set_to_none=True)
+        with amp_context():
+            output = model(batch, collect_diagnostics=False)
+        _require(
+            bool(torch.isfinite(output["loss"])),
+            f"v43 step {step} loss is non-finite",
+        )
+        _require(
+            (output["root_prediction"] is not None) == expect_dynamics,
+            f"v43 step {step} Dynamics activation differs",
+        )
+        _require(
+            (output["rollout_root"] is not None) == expect_posterior,
+            f"v43 step {step} posterior activation differs",
+        )
+        output["loss"].backward()
+        nonfinite = [
+            name for name, parameter in model.named_parameters()
+            if parameter.grad is not None
+            and not bool(torch.isfinite(parameter.grad).all())
+        ]
+        _require(
+            not nonfinite,
+            f"v43 step {step} non-finite gradients: {nonfinite}",
+        )
+        report[f"curriculum_step_{step}_loss"] = float(output["loss"].detach())
+        gradient_tensors = sum(
+            parameter.grad is not None for parameter in model.parameters()
+        )
+        report[f"curriculum_step_{step}_gradient_tensors"] = float(
+            gradient_tensors
+        )
+        model.zero_grad(set_to_none=True)
+        del output
+    model.set_curriculum_step(previous_step)
+    return report
+
+
 def _sinkhorn_stress(model) -> dict[str, float]:
     config = model.config
     slots = config.object_slots

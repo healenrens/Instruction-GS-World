@@ -9,6 +9,7 @@ GATE_REPORT="${GATE_REPORT:-}"
 TEACHER_SIDECAR="${TEACHER_SIDECAR:-}"
 INIT_FROM="${INIT_FROM:-}"
 RESUME="${RESUME:-}"
+RESUME_COMPATIBLE_GIT_COMMIT="${RESUME_COMPATIBLE_GIT_COMMIT:-}"
 AUTO_RESUME="${AUTO_RESUME:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-auto}"
 SEED="${SEED:-17}"
@@ -153,6 +154,7 @@ if [[ -n "${RESUME}" ]]; then
     "${PY}" "${ROOT}/code/scripts/verify_resume_checkpoint_v43.py" \
         --out "${OUT}" --checkpoint "${RESUME}" \
         --git_commit "$(git -C "${ROOT}" rev-parse HEAD)" \
+        --resume_compatible_git_commit "${RESUME_COMPATIBLE_GIT_COMMIT}" \
         --world_size "${RESUME_WORLD_SIZE}"
     init_args=(--resume "${RESUME}")
 else
@@ -211,6 +213,7 @@ cmd=(
     --goal_rollout_weight "${GOAL_ROLLOUT_WEIGHT}"
     --path_consistency_weight "${PATH_CONSISTENCY_WEIGHT}"
     --out "${OUT}" --profile full --architecture object_region_memory_v1
+    --resume_compatible_git_commit "${RESUME_COMPATIBLE_GIT_COMMIT}"
     --training_stage representation --readout_scope off
     --representation_steps "${STEPS}" --joint_steps 0
     --batch "${BATCH_PER_GPU}" --grad_accum "${TRAINER_GRAD_ACCUM}"

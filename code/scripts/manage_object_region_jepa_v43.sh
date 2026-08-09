@@ -141,6 +141,7 @@ start_background() {
         DATA="${DATA}" SEED="${SEED}" RUN_NAME="${RUN_NAME}" \
         OUT="${OUT}" LOG_ROOT="${LOG_ROOT}" AUTO_RESUME="${auto_resume}" \
         RESUME= INIT_FROM="${INIT_FROM:-}" GATE_REPORT="${GATE_REPORT}" \
+        RESUME_COMPATIBLE_GIT_COMMIT="${RESUME_COMPATIBLE_GIT_COMMIT:-}" \
         TEACHER_SIDECAR="${TEACHER_SIDECAR:-}" \
         NPROC_PER_NODE="${NPROC_PER_NODE:-auto}" \
         BATCH_PER_GPU="${BATCH_PER_GPU:-4}" GRAD_ACCUM="${GRAD_ACCUM:-auto}" \
@@ -190,8 +191,9 @@ start_background() {
 }
 
 load_resume_settings() {
-    local checkpoint
+    local checkpoint current_gate
     local -a saved
+    current_gate="${GATE_REPORT}"
     if [[ -f "${OUT}/checkpoint_manifest.json" ]]; then
         checkpoint="$("${PY}" -c 'import json,sys; print(json.load(open(sys.argv[1]))["checkpoint_path"])' "${OUT}/checkpoint_manifest.json")"
     else
@@ -205,7 +207,12 @@ load_resume_settings() {
         echo "[object-region-v43-manager] invalid saved launch settings" >&2
         return 2
     fi
-    DATA="${saved[0]}"; GATE_REPORT="${saved[1]}"; TEACHER_SIDECAR="${saved[2]}"
+    DATA="${saved[0]}"; TEACHER_SIDECAR="${saved[2]}"
+    if [[ -n "${RESUME_COMPATIBLE_GIT_COMMIT:-}" ]]; then
+        GATE_REPORT="${current_gate}"
+    else
+        GATE_REPORT="${saved[1]}"
+    fi
     SEED="${saved[3]}"; BATCH_PER_GPU="${saved[4]}"; GRAD_ACCUM="${saved[5]}"
     TARGET_GLOBAL_BATCH="${saved[6]}"; WORKERS_PER_RANK="${saved[7]}"
     JIT_DINO_BATCH="${saved[8]}"; MAX_TRAIN_ITEMS="${saved[9]}"

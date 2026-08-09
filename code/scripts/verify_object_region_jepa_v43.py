@@ -44,6 +44,7 @@ from igsw.adaptive_gaussian_wm.v43_stage_contracts import (  # noqa: E402
 )
 from igsw.adaptive_gaussian_wm.v43_verification import (  # noqa: E402
     verify_v43_action_factorization,
+    verify_v43_curriculum_backward_boundaries,
     verify_v43_persistence_contracts,
 )
 from verify_object_memory_jepa_v39 import (  # noqa: E402
@@ -404,6 +405,9 @@ def main() -> None:
         if torch.cuda.is_bf16_supported()
         else nullcontext
     )
+    boundary_gradients = verify_v43_curriculum_backward_boundaries(
+        model, batch, amp_context
+    )
     output, gradients = gradient_contract(model, batch, amp_context)
     states = state_contract(model, output, amp_context)
     persistence = verify_v43_persistence_contracts(model, output, amp_context)
@@ -443,6 +447,7 @@ def main() -> None:
         **temporal,
         **parameter_contract,
         **curriculum,
+        **boundary_gradients,
         **gradients,
         **states,
         **persistence,

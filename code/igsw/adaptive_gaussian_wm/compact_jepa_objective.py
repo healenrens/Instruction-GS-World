@@ -56,8 +56,10 @@ def _delta_state_error(
     target: torch.Tensor,
     weight: torch.Tensor,
 ) -> torch.Tensor:
-    predicted_rms = predicted.float().square().mean(dim=-1).sqrt()
-    target_rms = target.float().square().mean(dim=-1).sqrt()
+    predicted_rms = (
+        predicted.float().square().mean(dim=-1).clamp_min(1e-12).sqrt()
+    )
+    target_rms = target.float().square().mean(dim=-1).clamp_min(1e-12).sqrt()
     moving = weight * (target_rms.detach() > 1e-3).to(weight.dtype)
     direction = _weighted_mean(_cosine_error(predicted, target), moving)
     magnitude = _weighted_mean(

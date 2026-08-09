@@ -212,8 +212,8 @@ def forward_v43(model, batch: dict, collect_diagnostics: bool) -> dict:
     future_scale = signed_gap_scale(
         batch["future_times"], model.config.gap_reference
     )
-    if curriculum.step >= model.config.curriculum_spatial_steps:
-        if curriculum.step >= model.config.curriculum_posterior_steps:
+    if curriculum.dynamics_weight > 0.0:
+        if curriculum.posterior_weight > 0.0:
             short_action = model.region_effect_posterior(
                 online["last_root"].slots,
                 target_short_root.slots,
@@ -237,7 +237,7 @@ def forward_v43(model, batch: dict, collect_diagnostics: bool) -> dict:
             actions,
             base_root_future_slots=root_prediction.base_future_slots,
         )
-        if curriculum.step >= model.config.curriculum_posterior_steps:
+        if curriculum.posterior_weight > 0.0:
             rollout_root = _rollout_root(
                 model,
                 root_prediction,

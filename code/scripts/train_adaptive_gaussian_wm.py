@@ -74,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     add_dataset_arguments(parser)
     parser.add_argument("--out", required=True)
     parser.add_argument("--resume", default="")
+    parser.add_argument("--resume_compatible_git_commit", default="")
     parser.add_argument("--init_from", default="")
     parser.add_argument("--condition_cache", default="")
     parser.add_argument("--profile", choices=("tiny", "probe", "full"), default="probe")

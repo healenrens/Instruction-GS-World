@@ -5,8 +5,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 
 import torch
+
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..")
+)
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
+
+from igsw.adaptive_gaussian_wm.v43_resume_compatibility import (  # noqa: E402
+    validate_v43_resume_commit,
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -19,6 +29,7 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--git_commit", required=True)
+    parser.add_argument("--resume_compatible_git_commit", default="")
     parser.add_argument("--world_size", type=int, required=True)
     args = parser.parse_args()
     for name in ("out", "checkpoint"):
@@ -42,7 +53,6 @@ def main() -> None:
     require(os.path.getsize(checkpoint_path) == int(manifest["size_bytes"]),
             "checkpoint size differs")
     require(int(manifest["checkpoint_version"]) == 43, "manifest is not v43")
-    require(manifest["git_commit"] == args.git_commit, "checkpoint commit differs")
     require(int(manifest["world_size"]) == args.world_size, "world size differs")
     require(manifest["phase"] == "representation", "checkpoint phase differs")
     with open(run_id_path, encoding="utf-8") as handle:
@@ -51,6 +61,7 @@ def main() -> None:
     checkpoint = torch.load(
         checkpoint_path, map_location="cpu", weights_only=False, mmap=True
     )
+    validate_v43_resume_commit(checkpoint, args)
     for name in (
         "checkpoint_version",
         "git_commit",
@@ -81,6 +92,8 @@ def main() -> None:
         "global_step": int(manifest["global_step"]),
         "world_size": int(manifest["world_size"]),
         "git_commit": manifest["git_commit"],
+        "current_git_commit": args.git_commit,
+        "resume_compatibility_reason": args.resume_compatibility_reason,
         "wandb_run_id": run_id,
     }, sort_keys=True))
 

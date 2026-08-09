@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 
 from .v40_warm_start import record_v40_transform
+from .v43_resume_compatibility import validate_v43_resume_commit
 CHECKPOINT_VERSION = 43
 def collect_rng_states(context) -> list[dict]:
     device = torch.device(context.device)
@@ -134,8 +135,6 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         )
     if checkpoint.get("parallelism") != "ddp_full_state_dict":
         raise ValueError("resume requires a DDP full-state-dict checkpoint")
-    if checkpoint.get("git_commit") != getattr(args, "git_commit", ""):
-        raise ValueError("resume checkpoint git commit differs")
     required_sections = (
         "model",
         "optimizer",
@@ -153,6 +152,7 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         or len(checkpoint["rng_states"]) != world_size
     ):
         raise ValueError("resume checkpoint world size differs")
+    migratable = validate_v43_resume_commit(checkpoint, args)
     saved = checkpoint["args"]
     immutable = (
         "data",
@@ -271,7 +271,7 @@ def validate_resume(checkpoint: dict, args, world_size: int) -> None:
         ):
             current = os.path.abspath(current)
             previous = os.path.abspath(previous)
-        if current != previous:
+        if current != previous and name not in migratable:
             mismatches[name] = {"checkpoint": previous, "current": current}
     if mismatches:
         raise ValueError(
