@@ -320,3 +320,23 @@ def forward_v43(model, batch: dict, collect_diagnostics: bool) -> dict:
     output["loss"] = loss
     output["parts"] = parts
     return output
+
+
+def v43_training_result(output: dict) -> dict:
+    """Expose only the loss graph to DDP; metrics are logging values."""
+    loss = output.get("loss")
+    parts = output.get("parts")
+    if not isinstance(loss, torch.Tensor) or not loss.requires_grad:
+        raise ValueError("v43 training output requires a differentiable loss")
+    if not isinstance(parts, dict):
+        raise ValueError("v43 training output requires metric parts")
+    detached_parts = {}
+    for name, value in parts.items():
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"v43 metric {name} is not a tensor")
+        detached_parts[name] = value.detach()
+    return {
+        "loss": loss,
+        "parts": detached_parts,
+        "curriculum": output["curriculum"],
+    }

@@ -272,9 +272,12 @@ class AdaptiveGaussianObjectWorldModel(nn.Module):
         if self.config.object_region_memory:
             if actions_override is not None or not use_posterior:
                 raise ValueError("v43 uses its internal curriculum posterior contract")
-            from .v43_model_runtime import forward_v43
+            from .v43_model_runtime import forward_v43, v43_training_result
 
-            return forward_v43(self, batch, collect_diagnostics)
+            result = forward_v43(self, batch, collect_diagnostics)
+            if phase == "representation":
+                return v43_training_result(result)
+            return result
         if phase == "representation":
             from .training import representation_pretrain_loss
 

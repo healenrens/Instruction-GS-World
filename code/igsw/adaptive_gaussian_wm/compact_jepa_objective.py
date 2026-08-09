@@ -6,7 +6,9 @@ import torch.nn.functional as F
 
 from .compact_geometry_objective import (
     path_geometry_error,
+    path_region_identity_error,
     region_geometry_error,
+    region_identity_error,
     root_geometry_error,
 )
 from .compact_state_regularization import (
@@ -228,6 +230,7 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
             "loss_delta_root": zero,
             "loss_delta_region": zero,
             "loss_geometry_lifecycle": zero,
+            "loss_region_identity": zero,
             "loss_goal": zero,
             "loss_path_root": zero,
             "loss_path_region": zero,
@@ -285,7 +288,16 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
     geometry = geometry + region_geometry_error(
         region_prediction, target_short_region, 0
     )
-    dynamics = short_root + short_region + 0.5 * (root_delta + region_delta) + geometry
+    identity = region_identity_error(
+        region_prediction, target_short_region, 0
+    )
+    dynamics = (
+        short_root
+        + short_region
+        + 0.5 * (root_delta + region_delta)
+        + geometry
+        + identity
+    )
 
     persistence_root = _state_error(
         online_root, target_short_root.slots, short_root_weight
@@ -323,6 +335,7 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
             "loss_delta_root": root_delta,
             "loss_delta_region": region_delta,
             "loss_geometry_lifecycle": geometry,
+            "loss_region_identity": identity,
             "loss_goal": zero,
             "loss_path_root": zero,
             "loss_path_region": zero,
@@ -401,12 +414,29 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
         goal_root_weight,
         goal_region_weight,
     )
-    goal = direct_root + direct_region + direct_geometry
+    direct_identity = region_identity_error(
+        region_prediction, target_goal_region, 1, goal_valid
+    )
+    rollout_identity = region_identity_error(
+        output["rollout_region"], target_goal_region, 0, goal_valid
+    )
+    path_identity = path_region_identity_error(
+        region_prediction,
+        output["rollout_region"],
+        goal_region_weight,
+    )
+    goal_identity = direct_identity + model.config.goal_rollout_weight * (
+        rollout_identity
+    )
+    goal_identity = goal_identity + model.config.path_consistency_weight * (
+        path_identity
+    )
+    goal = direct_root + direct_region + direct_geometry + direct_identity
     goal = goal + model.config.goal_rollout_weight * (
-        rollout_root + rollout_region + rollout_geometry
+        rollout_root + rollout_region + rollout_geometry + rollout_identity
     )
     goal = goal + model.config.path_consistency_weight * (
-        path_root + path_region + path_geometry
+        path_root + path_region + path_geometry + path_identity
     )
     goal_persistence = _state_error(
         online_root,
@@ -475,6 +505,7 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
         "loss_delta_root": root_delta,
         "loss_delta_region": region_delta,
         "loss_geometry_lifecycle": geometry,
+        "loss_region_identity": identity + goal_identity,
         "loss_goal": goal,
         "loss_goal_geometry": direct_geometry + rollout_geometry,
         "loss_path_root": path_root,

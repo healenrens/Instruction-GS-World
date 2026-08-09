@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from .object_correspondence import _augmented_optimal_transport
 from .relative_geometry import ObjectGeometryState
 from .scale import signed_gap_scale
+from .v43_model_runtime import v43_training_result
 
 
 def _difference(left: torch.Tensor, right: torch.Tensor) -> float:
@@ -50,6 +51,15 @@ def verify_v43_curriculum_backward_boundaries(
             (output["rollout_root"] is not None) == expect_posterior,
             f"v43 step {step} posterior activation differs",
         )
+        training_result = v43_training_result(output)
+        _require(
+            set(training_result) == {"loss", "parts", "curriculum"},
+            f"v43 step {step} training return keys differ",
+        )
+        _require(
+            not any(value.requires_grad for value in training_result["parts"].values()),
+            f"v43 step {step} exposes metric graphs to DDP",
+        )
         output["loss"].backward()
         nonfinite = [
             name for name, parameter in model.named_parameters()
@@ -60,12 +70,23 @@ def verify_v43_curriculum_backward_boundaries(
             not nonfinite,
             f"v43 step {step} non-finite gradients: {nonfinite}",
         )
+        identity_gradients = sum(
+            parameter.grad is not None
+            for parameter in model.region_dynamics.identity_head.parameters()
+        )
+        _require(
+            identity_gradients == (2 if expect_dynamics else 0),
+            f"v43 step {step} region identity gradient coverage differs",
+        )
         report[f"curriculum_step_{step}_loss"] = float(output["loss"].detach())
         gradient_tensors = sum(
             parameter.grad is not None for parameter in model.parameters()
         )
         report[f"curriculum_step_{step}_gradient_tensors"] = float(
             gradient_tensors
+        )
+        report[f"curriculum_step_{step}_identity_gradient_tensors"] = float(
+            identity_gradients
         )
         model.zero_grad(set_to_none=True)
         del output

@@ -89,6 +89,24 @@ def region_geometry_error(
     )
 
 
+def region_identity_error(
+    prediction,
+    target,
+    index: int,
+    sample_valid: torch.Tensor | None = None,
+) -> torch.Tensor:
+    object_mass = target.owner[..., :-2].sum(dim=-1)
+    weight = target.presence * object_mass
+    if sample_valid is not None:
+        weight = weight * sample_valid[:, None]
+    error = 1.0 - F.cosine_similarity(
+        prediction.future_identity_key[:, index].float(),
+        target.identity_key.float(),
+        dim=-1,
+    )
+    return _weighted_mean(error, weight)
+
+
 def root_geometry_error(
     prediction,
     target,
@@ -154,3 +172,16 @@ def path_geometry_error(
         region_weight,
     )
     return root + region
+
+
+def path_region_identity_error(
+    direct_region,
+    rollout_region,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    error = 1.0 - F.cosine_similarity(
+        rollout_region.future_identity_key[:, 0].float(),
+        direct_region.future_identity_key[:, 1].detach().float(),
+        dim=-1,
+    )
+    return _weighted_mean(error, weight)
