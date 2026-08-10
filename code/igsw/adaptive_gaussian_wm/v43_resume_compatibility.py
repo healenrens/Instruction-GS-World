@@ -9,6 +9,9 @@ _APPROVED_SOURCE_COMMITS = {
     "b5b3f1197a88353102ebc7534ba029be1eb30f71": (
         "soft_lifecycle_relative_geometry_region_rank_v5"
     ),
+    "bd70bc6caa63165aa78e4021a77ab99701ac0187": (
+        "per_sample_rank_budget_factorized_observability_v6"
+    ),
 }
 _MIGRATABLE_ARGUMENTS = frozenset(("gate_report", "gate_report_sha256"))
 

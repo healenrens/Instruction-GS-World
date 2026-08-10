@@ -10,10 +10,74 @@ from .distributed_statistics import (
 )
 
 
+def per_sample_effective_rank_fraction(
+    feature: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    if feature.ndim != 3:
+        raise ValueError("per-sample rank expects feature shape [B,R,D]")
+    if valid.shape != feature.shape[:2]:
+        raise ValueError("per-sample rank validity shape differs")
+    sampled = feature.float()[..., ::4]
+    weight = valid.float()
+    support = weight.sum(dim=1)
+    mean = torch.einsum("br,brd->bd", weight, sampled)
+    mean = mean / support.clamp_min(1.0)[:, None]
+    centered = (sampled - mean[:, None]) * weight.sqrt()[..., None]
+    covariance = centered.transpose(1, 2) @ centered
+    spectral_sum = centered.square().sum(dim=(1, 2))
+    spectral_square_sum = covariance.square().sum(dim=(1, 2))
+    effective_rank = spectral_sum.square() / spectral_square_sum.clamp_min(1e-12)
+    usable_rank = torch.minimum(
+        (support - 1.0).clamp_min(1.0),
+        support.new_full((), float(sampled.shape[-1])),
+    )
+    rank_fraction = effective_rank / usable_rank
+    return torch.where(support >= 2.0, rank_fraction, torch.zeros_like(rank_fraction))
+
+
+def _per_sample_rank_loss(
+    feature: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    rank_fraction = per_sample_effective_rank_fraction(feature, valid)
+    support = valid.float().sum(dim=1)
+    available = (support >= 2.0).to(rank_fraction.dtype)
+    deficit = F.relu(rank_fraction.new_tensor(0.2) - rank_fraction)
+    return (deficit * available).sum() / available.sum().clamp_min(1.0)
+
+
+def owner_conditioned_residual(
+    feature: torch.Tensor,
+    valid: torch.Tensor,
+    owner: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if owner.shape[:2] != feature.shape[:2]:
+        raise ValueError("owner and feature region axes differ")
+    if owner.shape[-1] < 2:
+        raise ValueError("owner tensor requires environment and transient owners")
+    environment_owner = owner[..., :-1].detach().float()
+    environment_mass = environment_owner.sum(dim=-1)
+    weight = environment_owner * valid.float()[..., None]
+    owner_mass = weight.sum(dim=1)
+    owner_mean = torch.einsum("bro,brd->bod", weight, feature.float())
+    owner_mean = owner_mean / owner_mass.clamp_min(1e-6)[..., None]
+    normalized_owner = environment_owner / environment_mass.clamp_min(1e-6)[
+        ..., None
+    ]
+    conditional_mean = torch.einsum("bro,bod->brd", normalized_owner, owner_mean)
+    residual = feature.float() - conditional_mean
+    residual_valid = valid & (environment_mass > 0.25)
+    return residual, residual_valid
+
+
 def feature_statistics_regularizer(
     feature: torch.Tensor,
     valid: torch.Tensor,
+    owner: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if feature.ndim != 3:
+        raise ValueError("feature regularizer expects feature shape [B,R,D]")
     if valid.shape != feature.shape[:-1]:
         raise ValueError("feature regularizer validity shape differs")
     global_feature = gather_batch_with_grad(feature).float()
@@ -37,12 +101,12 @@ def feature_statistics_regularizer(
     diagonal = correlation.diagonal()
     off_diagonal = correlation - torch.diag_embed(diagonal)
     covariance = off_diagonal.square().mean()
-    spectral_sum = diagonal.sum()
-    spectral_square_sum = correlation.square().sum()
-    effective_rank = spectral_sum.square() / spectral_square_sum.clamp_min(1e-12)
-    usable_rank = float(min(sampled.shape[0] - 1, sampled.shape[1]))
-    rank_fraction = effective_rank / max(1.0, usable_rank)
-    rank = F.relu(rank_fraction.new_tensor(0.2) - rank_fraction)
+    rank = _per_sample_rank_loss(feature, valid)
+    if owner is not None:
+        residual, residual_valid = owner_conditioned_residual(
+            feature, valid, owner
+        )
+        rank = rank + 0.5 * _per_sample_rank_loss(residual, residual_valid)
     return variance, covariance, rank
 
 

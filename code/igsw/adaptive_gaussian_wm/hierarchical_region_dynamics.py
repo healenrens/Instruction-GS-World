@@ -273,13 +273,15 @@ class HierarchicalRegionDynamics(nn.Module):
             + self.base_owner_head(hidden)
             + self.action_owner_gate(action_hidden)
         )
-        base_lifecycle = self.base_lifecycle_head(hidden)
+        base_lifecycle = self.base_lifecycle_head(hidden.detach())
         action_lifecycle = self.action_lifecycle_gate(action_hidden)
         base_presence_logits = (
-            _stable_logit(current_presence[:, None]) + base_lifecycle[..., 0]
+            _stable_logit(current_presence[:, None].detach())
+            + base_lifecycle[..., 0]
         )
         base_visibility_logits = (
-            _stable_logit(current_visibility[:, None]) + base_lifecycle[..., 1]
+            _stable_logit(current_visibility[:, None].detach())
+            + base_lifecycle[..., 1]
         )
         future_presence_logits = (
             base_presence_logits + action_lifecycle[..., 0]

@@ -29,6 +29,18 @@ def _weighted_mean(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return (value * weight).sum() / weight.sum().clamp_min(1.0)
 
 
+def _weighted_sample_mean(
+    value: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    weight = weight.to(value.dtype)
+    flattened_value = value.flatten(1)
+    flattened_weight = weight.flatten(1)
+    return (flattened_value * flattened_weight).sum(dim=1) / (
+        flattened_weight.sum(dim=1).clamp_min(1.0)
+    )
+
+
 def _state_error(
     predicted: torch.Tensor,
     target: torch.Tensor,
@@ -94,6 +106,9 @@ def _zero_geometry_metric_parts(zero: torch.Tensor) -> dict[str, torch.Tensor]:
         "loss_geometry_root_relation": zero,
         "loss_geometry_root_presence": zero,
         "loss_geometry_root_visibility": zero,
+        "loss_geometry_root_survival": zero,
+        "loss_geometry_root_birth": zero,
+        "loss_geometry_root_observability": zero,
         "loss_geometry_region_center": zero,
         "loss_geometry_region_relative_scale": zero,
         "loss_geometry_region_correlation": zero,
@@ -109,11 +124,35 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
     current_index = history_count - 1
     current_token = online["token_states"][-1]
     target_native = target["native_features"][:, current_index]
-    allocator = _weighted_mean(
+    current_valid = target["valid"][:, current_index]
+    allocator_per_sample = _weighted_sample_mean(
         _cosine_error(current_token.reconstructed_features, target_native),
-        target["valid"][:, current_index],
+        current_valid,
     )
+    allocator = allocator_per_sample.mean()
     allocator_rate = current_token.budget_fraction.mean()
+    allocator_budget_target = (
+        0.2 + 2.5 * allocator_per_sample.detach()
+    ).clamp(0.25, 0.85)
+    allocator_budget = F.smooth_l1_loss(
+        current_token.budget_fraction.float(),
+        allocator_budget_target.float(),
+        beta=0.05,
+    )
+    dino_anchor = _weighted_mean(
+        _cosine_error(
+            online["native_features"][:, current_index],
+            target_native,
+        ),
+        current_valid,
+    )
+    projected_anchor = _weighted_mean(
+        _cosine_error(
+            online["projected_features"][:, current_index],
+            target["projected_features"][:, current_index],
+        ),
+        current_valid,
+    )
     mask = online["masked_region_positions"]
     if mask is None or online["masked_region_prediction"] is None:
         raise ValueError("v43 training requires masked-region predictions")
@@ -165,7 +204,8 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
             F.relu(ordered + 0.05 - reversed_error), temporal_weight
         )
     online_root = online["roots"]["slots"][:, current_index]
-    target_root_current = target["roots"]["slots"][:, current_index]
+    target_current_root_state = target["root_states"][current_index]
+    target_root_current = target_current_root_state.slots
     current_root = _state_error(
         online_root,
         target_root_current,
@@ -212,7 +252,9 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
     )
     representation = (
         allocator
-        + 0.01 * allocator_rate
+        + 0.25 * allocator_budget
+        + dino_anchor
+        + 0.5 * projected_anchor
         + masked_temporal
         + 0.25 * temporal_order
         + current_root
@@ -225,6 +267,7 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
         feature_statistics_regularizer(
             online_region,
             online["regions"]["presence"][:, current_index] > 0.5,
+            online_owner,
         )
     )
     dino_variance, dino_covariance, dino_rank = (
@@ -256,6 +299,10 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
             ),
             "loss_allocator": allocator,
             "loss_allocator_rate": allocator_rate,
+            "loss_allocator_budget": allocator_budget,
+            "diagnostic_allocator_budget_target": allocator_budget_target.mean(),
+            "loss_dino_anchor": dino_anchor,
+            "loss_projected_anchor": projected_anchor,
             "loss_masked_temporal": masked_temporal,
             "loss_temporal_order": temporal_order,
             "loss_current_root": current_root,
@@ -326,7 +373,11 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
         short_region_weight,
     )
     short_root_geometry = root_geometry_terms(
-        root_prediction, target_short_root, 0
+        root_prediction,
+        target_short_root,
+        0,
+        current=target_current_root_state,
+        lifecycle_gamma=model.config.lifecycle_focal_gamma,
     )
     short_region_geometry = region_geometry_terms(
         region_prediction, target_short_region, 0
@@ -375,6 +426,10 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
             ),
             "loss_allocator": allocator,
             "loss_allocator_rate": allocator_rate,
+            "loss_allocator_budget": allocator_budget,
+            "diagnostic_allocator_budget_target": allocator_budget_target.mean(),
+            "loss_dino_anchor": dino_anchor,
+            "loss_projected_anchor": projected_anchor,
             "loss_masked_temporal": masked_temporal,
             "loss_temporal_order": temporal_order,
             "loss_current_root": current_root,
@@ -440,13 +495,23 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
         goal_region_weight,
     )
     direct_geometry = root_geometry_error(
-        root_prediction, target_goal_root, 1, goal_valid
+        root_prediction,
+        target_goal_root,
+        1,
+        goal_valid,
+        target_current_root_state,
+        model.config.lifecycle_focal_gamma,
     )
     direct_geometry = direct_geometry + region_geometry_error(
         region_prediction, target_goal_region, 1, goal_valid
     )
     rollout_geometry = root_geometry_error(
-        output["rollout_root"], target_goal_root, 0, goal_valid
+        output["rollout_root"],
+        target_goal_root,
+        0,
+        goal_valid,
+        target_short_root,
+        model.config.lifecycle_focal_gamma,
     )
     rollout_geometry = rollout_geometry + region_geometry_error(
         output["rollout_region"], target_goal_region, 0, goal_valid
@@ -553,6 +618,10 @@ def compact_jepa_loss(model, batch: dict, output: dict, curriculum) -> tuple:
         "curriculum_posterior_weight": total.new_tensor(curriculum.posterior_weight),
         "loss_allocator": allocator,
         "loss_allocator_rate": allocator_rate,
+        "loss_allocator_budget": allocator_budget,
+        "diagnostic_allocator_budget_target": allocator_budget_target.mean(),
+        "loss_dino_anchor": dino_anchor,
+        "loss_projected_anchor": projected_anchor,
         "loss_masked_temporal": masked_temporal,
         "loss_temporal_order": temporal_order,
         "loss_current_root": current_root,

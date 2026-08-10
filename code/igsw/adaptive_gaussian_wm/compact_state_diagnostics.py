@@ -4,6 +4,11 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .compact_state_regularization import (
+    owner_conditioned_residual,
+    per_sample_effective_rank_fraction,
+)
+
 
 EFFECTIVE_RANK_ESTIMATOR = "covariance_participation_ratio_v1"
 
@@ -60,6 +65,27 @@ def compact_state_diagnostics(model, batch: dict, output: dict) -> dict:
     effective_rank, usable_rank = effective_rank_participation_ratio(
         regions["feature"][:, -1][active]
     )
+    per_sample_rank_fraction = per_sample_effective_rank_fraction(
+        regions["feature"][:, -1], active
+    )
+    owner_residual, owner_valid = owner_conditioned_residual(
+        regions["feature"][:, -1], active, owner
+    )
+    owner_rank_fraction = per_sample_effective_rank_fraction(
+        owner_residual, owner_valid
+    )
+    current_token = online["token_states"][-1]
+    current_index = int(batch["history_length"][0].item()) - 1
+    current_valid = output["target"]["valid"][:, current_index]
+    allocator_error = 1.0 - F.cosine_similarity(
+        current_token.reconstructed_features.float(),
+        output["target"]["native_features"][:, current_index].float(),
+        dim=-1,
+    )
+    allocator_error = (
+        allocator_error * current_valid.float()
+    ).sum(dim=1) / current_valid.float().sum(dim=1).clamp_min(1.0)
+    budget_target = (0.2 + 2.5 * allocator_error).clamp(0.25, 0.85)
     diagnostics = {
         "region_active_count": active_weight.sum(dim=1).mean(),
         "region_active_count_std": active_weight.sum(dim=1).std(unbiased=False),
@@ -82,6 +108,14 @@ def compact_state_diagnostics(model, batch: dict, output: dict) -> dict:
             "association_confidence"
         ][:, -1].mean(),
         "region_effective_rank": effective_rank,
+        "region_per_sample_effective_rank_fraction": (
+            per_sample_rank_fraction.mean()
+        ),
+        "region_owner_residual_rank_fraction": owner_rank_fraction.mean(),
+        "region_budget_fraction": current_token.budget_fraction.mean(),
+        "region_budget_target_fraction": budget_target.mean(),
+        "region_budget_logit_mean": current_token.budget_logit.float().mean(),
+        "region_budget_logit_abs_max": current_token.budget_logit.float().abs().max(),
         "dino_valid_patch_fraction": target_valid_fraction(
             output["target"]["valid"], batch["history_length"]
         ),

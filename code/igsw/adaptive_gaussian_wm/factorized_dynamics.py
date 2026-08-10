@@ -400,9 +400,10 @@ class FactorizedObjectDynamics(nn.Module):
         future_relative_disparity = current_disparity + 0.25 * torch.tanh(
             base_geometry[..., 3] + action_geometry[..., 3]
         )
-        lifecycle = self.base_lifecycle_output(future_hidden)
-        current_visibility = history_activity[:, -1, None]
-        current_existence = existence[:, -1, None]
+        lifecycle_hidden = future_hidden.detach()
+        lifecycle = self.base_lifecycle_output(lifecycle_hidden)
+        current_visibility = history_activity[:, -1, None].detach()
+        current_existence = existence[:, -1, None].detach()
         lifecycle_prediction = None
         if self.config.factorized_lifecycle:
             current_visible_presence = (
@@ -415,17 +416,20 @@ class FactorizedObjectDynamics(nn.Module):
             ):
                 raise ValueError("factorized lifecycle modules are incomplete")
             action_observability = torch.tanh(
-                self.action_observability_basis(future_hidden)
+                self.action_observability_basis(lifecycle_hidden)
             ).squeeze(-1) * torch.tanh(
                 self.action_observability_gate(action_hidden)
             ).squeeze(-1)
+            lifecycle_action_geometry = torch.tanh(
+                self.action_geometry_basis(lifecycle_hidden)
+            ) * torch.tanh(self.action_geometry_gate(action_hidden))
             lifecycle_prediction = factorized_lifecycle_prediction(
                 current_existence.expand(-1, future_count, -1),
                 current_visible_presence.expand(-1, future_count, -1),
-                future_centers,
-                lifecycle[..., 0] + action_geometry[..., 4],
-                lifecycle[..., 1] + action_geometry[..., 5],
-                self.observability_output(future_hidden).squeeze(-1)
+                future_centers.detach(),
+                lifecycle[..., 0] + lifecycle_action_geometry[..., 4],
+                lifecycle[..., 1] + lifecycle_action_geometry[..., 5],
+                self.observability_output(lifecycle_hidden).squeeze(-1)
                 + action_observability,
                 self.config.lifecycle_survival_prior,
                 self.config.lifecycle_birth_prior,

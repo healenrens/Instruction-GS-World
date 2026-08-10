@@ -4,6 +4,11 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .object_lifecycle import (
+    balanced_continuous_focal_loss,
+    balanced_continuous_probability_loss,
+)
+
 
 def _weighted_mean(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     weight = weight.to(value.dtype)
@@ -175,6 +180,8 @@ def root_geometry_terms(
     target,
     index: int,
     sample_valid: torch.Tensor | None = None,
+    current=None,
+    lifecycle_gamma: float = 2.0,
 ) -> dict[str, torch.Tensor]:
     weight = target.existence
     if sample_valid is not None:
@@ -184,20 +191,72 @@ def root_geometry_terms(
         target.relations.float(),
         reduction="none",
     ).mean(dim=(-1, -2))
-    presence = _balanced_binary_error(
-        prediction.future_existence_logits[:, index],
-        target.existence,
-        sample_valid,
+    factorized = (
+        current is not None
+        and prediction.future_survival_logits is not None
+        and prediction.future_birth_logits is not None
+        and prediction.future_observability_logits is not None
     )
-    visibility = F.binary_cross_entropy_with_logits(
-        prediction.future_visibility_logits[:, index].float(),
-        target.visibility.float(),
-        reduction="none",
-    )
+    if factorized:
+        valid = torch.ones_like(target.existence).float()
+        if sample_valid is not None:
+            valid = valid * sample_valid[:, None].float()
+        current_existence = current.existence.detach().float()
+        presence = balanced_continuous_probability_loss(
+            prediction.future_existence[:, index],
+            target.existence,
+            valid,
+        )
+        visibility = 0.5 * balanced_continuous_probability_loss(
+            prediction.future_visibility[:, index],
+            target.visibility,
+            valid,
+        )
+        survival = 0.25 * balanced_continuous_focal_loss(
+            prediction.future_survival_logits[:, index],
+            target.existence,
+            current_existence * valid,
+            lifecycle_gamma,
+        )
+        birth = 0.25 * balanced_continuous_focal_loss(
+            prediction.future_birth_logits[:, index],
+            target.existence,
+            (1.0 - current_existence) * valid,
+            lifecycle_gamma,
+        )
+        conditional_observation = (
+            target.visibility.float()
+            / (target.existence.float() * target.in_frame.float()).clamp_min(1e-4)
+        ).clamp(0.0, 1.0)
+        observability = 0.5 * balanced_continuous_focal_loss(
+            prediction.future_observability_logits[:, index],
+            conditional_observation,
+            target.existence.float() * target.in_frame.float() * valid,
+            lifecycle_gamma,
+        )
+    else:
+        presence = _balanced_binary_error(
+            prediction.future_existence_logits[:, index],
+            target.existence,
+            sample_valid,
+        )
+        visibility_error = F.binary_cross_entropy_with_logits(
+            prediction.future_visibility_logits[:, index].float(),
+            target.visibility.float(),
+            reduction="none",
+        )
+        visibility = _weighted_mean(visibility_error, weight)
+        zero = presence * 0.0
+        survival = zero
+        birth = zero
+        observability = zero
     return {
         "relation": _weighted_mean(relation, weight),
         "presence": presence,
-        "visibility": _weighted_mean(visibility, weight),
+        "visibility": visibility,
+        "survival": survival,
+        "birth": birth,
+        "observability": observability,
     }
 
 
@@ -206,9 +265,18 @@ def root_geometry_error(
     target,
     index: int,
     sample_valid: torch.Tensor | None = None,
+    current=None,
+    lifecycle_gamma: float = 2.0,
 ) -> torch.Tensor:
     return _sum_terms(
-        root_geometry_terms(prediction, target, index, sample_valid)
+        root_geometry_terms(
+            prediction,
+            target,
+            index,
+            sample_valid,
+            current,
+            lifecycle_gamma,
+        )
     )
 
 

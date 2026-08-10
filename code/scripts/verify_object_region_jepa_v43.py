@@ -115,16 +115,28 @@ def verify_solver_free_numeric_contract(device: torch.device) -> dict:
 
 
 def verify_region_rank_regularizer_contract(device: torch.device) -> dict:
-    diverse = torch.eye(32, 64, device=device, requires_grad=True)
-    sample = torch.arange(32, device=device, dtype=torch.float32)
+    diverse = torch.stack(
+        (
+            torch.eye(32, 64, device=device),
+            torch.roll(torch.eye(32, 64, device=device), shifts=16, dims=1),
+        )
+    ).requires_grad_()
+    sample = torch.arange(32, device=device, dtype=torch.float32)[None, :, None]
     channel = torch.linspace(-1.0, 1.0, 64, device=device)
     collapsed = (
-        torch.sin(0.3 * sample)[:, None]
-        + 0.02 * torch.cos(0.7 * sample)[:, None] * channel[None]
-    ).requires_grad_()
-    valid = torch.ones(32, device=device, dtype=torch.bool)
-    _, _, diverse_rank = feature_statistics_regularizer(diverse, valid)
-    _, _, collapsed_rank = feature_statistics_regularizer(collapsed, valid)
+        torch.sin(0.3 * sample)
+        + 0.02 * torch.cos(0.7 * sample) * channel[None, None]
+    ).expand(2, -1, -1).clone().requires_grad_()
+    valid = torch.ones(2, 32, device=device, dtype=torch.bool)
+    owner = torch.zeros(2, 32, 3, device=device)
+    owner[:, :16, 0] = 1.0
+    owner[:, 16:, 1] = 1.0
+    _, _, diverse_rank = feature_statistics_regularizer(
+        diverse, valid, owner
+    )
+    _, _, collapsed_rank = feature_statistics_regularizer(
+        collapsed, valid, owner
+    )
     require(
         float(collapsed_rank.detach()) > float(diverse_rank.detach()),
         "rank regularizer does not distinguish collapsed features",
@@ -139,7 +151,9 @@ def verify_region_rank_regularizer_contract(device: torch.device) -> dict:
         "rank regularizer has no recovery gradient",
     )
     return {
-        "region_rank_regularizer_contract": "correlation_rank_floor_v1",
+        "region_rank_regularizer_contract": (
+            "per_sample_owner_conditioned_rank_floor_v2"
+        ),
         "diverse_region_rank_loss": float(diverse_rank.detach()),
         "collapsed_region_rank_loss": float(collapsed_rank.detach()),
     }
@@ -341,15 +355,28 @@ def gradient_contract(model, batch, amp_context) -> tuple[dict, dict]:
     require(bool(torch.isfinite(output["loss"])), "v43 loss is non-finite")
     required_metrics = {
         "loss_rank",
+        "loss_allocator_budget",
+        "diagnostic_allocator_budget_target",
+        "loss_dino_anchor",
+        "loss_projected_anchor",
         "loss_geometry_root_relation",
         "loss_geometry_root_presence",
         "loss_geometry_root_visibility",
+        "loss_geometry_root_survival",
+        "loss_geometry_root_birth",
+        "loss_geometry_root_observability",
         "loss_geometry_region_center",
         "loss_geometry_region_relative_scale",
         "loss_geometry_region_correlation",
         "loss_geometry_region_presence",
         "loss_geometry_region_visibility",
         "diagnostic_geometry_weighted_fraction_of_total",
+        "region_per_sample_effective_rank_fraction",
+        "region_owner_residual_rank_fraction",
+        "region_budget_fraction",
+        "region_budget_target_fraction",
+        "region_budget_logit_mean",
+        "region_budget_logit_abs_max",
     }
     missing_metrics = required_metrics.difference(output["parts"])
     require(not missing_metrics, f"v43 metrics are missing: {sorted(missing_metrics)}")
@@ -377,12 +404,23 @@ def gradient_contract(model, batch, amp_context) -> tuple[dict, dict]:
         "region": [],
         "posterior": [],
         "root_dynamics": [],
+        "root_lifecycle": [],
+        "region_lifecycle": [],
     }
     nonfinite = []
     for name, parameter in model.named_parameters():
         if parameter.grad is not None and not bool(torch.isfinite(parameter.grad).all()):
             nonfinite.append(name)
-        if name.startswith("online_dino.backbone.blocks."):
+        if name.startswith((
+            "dynamics.base_lifecycle_output.",
+            "dynamics.observability_output.",
+        )):
+            groups["root_lifecycle"].append(parameter)
+            groups["root_dynamics"].append(parameter)
+        elif name.startswith("region_dynamics.base_lifecycle_head."):
+            groups["region_lifecycle"].append(parameter)
+            groups["region"].append(parameter)
+        elif name.startswith("online_dino.backbone.blocks."):
             block = int(name.split(".")[3])
             groups["dino_lower" if block < 12 else "dino_upper"].append(parameter)
         elif name.startswith("online_dino.projector."):
@@ -410,6 +448,8 @@ def gradient_contract(model, batch, amp_context) -> tuple[dict, dict]:
         "region",
         "posterior",
         "root_dynamics",
+        "root_lifecycle",
+        "region_lifecycle",
     ):
         require(any(parameter.grad is not None for parameter in groups[name]),
                 f"{name} received no gradients")
@@ -470,6 +510,14 @@ def state_contract(model, output, amp_context) -> dict:
     )
     require(bool(((active_count >= 64) & (active_count <= 256)).all()),
             "active region count is outside [64,256]")
+    budget_fraction = output["online"]["token_states"][-1].budget_fraction
+    budget_logit = output["online"]["token_states"][-1].budget_logit
+    require(
+        bool(torch.isfinite(budget_fraction).all())
+        and bool(((budget_fraction > 0.0) & (budget_fraction < 1.0)).all()),
+        "adaptive region budget is non-finite or saturated",
+    )
+    require(bool(torch.isfinite(budget_logit).all()), "budget logits are non-finite")
     require(bool((scene_fraction <= 0.2501).all()), "scene region quota exceeded")
     require(
         bool((transient_exclusion_fraction <= 0.2501).all()),
@@ -514,6 +562,10 @@ def state_contract(model, output, amp_context) -> dict:
     require(inactive_leakage < 1e-6, "inactive regions leaked into active states")
     return {
         "active_region_count": float(active_count.detach().mean()),
+        "region_budget_fraction": float(budget_fraction.detach().mean()),
+        "region_budget_logit_abs_max": float(
+            budget_logit.detach().float().abs().max()
+        ),
         "scene_region_fraction": float(scene_fraction.detach().mean()),
         "transient_root_exclusion_fraction": float(
             transient_exclusion_fraction.detach().mean()

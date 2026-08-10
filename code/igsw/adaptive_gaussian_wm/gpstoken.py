@@ -27,6 +27,7 @@ class GPSTokenState:
     fixed_token_fraction: float
     active_count: torch.Tensor
     budget_fraction: torch.Tensor
+    budget_logit: torch.Tensor
     hard_token_gate: bool
 
 
@@ -105,9 +106,10 @@ class LearnableGPSTokenAllocator(nn.Module):
         self,
         logits: torch.Tensor,
         context: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         soft = torch.sigmoid(logits)
-        budget_fraction = torch.sigmoid(self.budget_head(context)).squeeze(-1)
+        budget_logit = self.budget_head(context).squeeze(-1)
+        budget_fraction = torch.sigmoid(0.25 * budget_logit)
         available = self.config.max_micro_tokens - self.config.min_active_tokens
         continuous_count = (
             self.config.min_active_tokens + available * budget_fraction
@@ -136,7 +138,7 @@ class LearnableGPSTokenAllocator(nn.Module):
             activation = hard.detach() + surrogate - surrogate.detach()
         else:
             activation = hard.detach() + soft - soft.detach()
-        return activation, active_count, budget_fraction
+        return activation, active_count, budget_fraction, budget_logit
 
     def forward(
         self,
@@ -218,14 +220,20 @@ class LearnableGPSTokenAllocator(nn.Module):
             activation = self._fixed_budget_activation(activation_logits)
             active_count = activation.detach().sum(dim=1).squeeze(-1)
             budget_fraction = activation.mean(dim=1).squeeze(-1)
+            budget_logit = torch.logit(
+                budget_fraction.float().clamp(1e-5, 1.0 - 1e-5)
+            )
         elif self.config.hard_token_gate:
-            activation, active_count, budget_fraction = (
+            activation, active_count, budget_fraction, budget_logit = (
                 self._hard_adaptive_activation(activation_logits, context)
             )
         else:
             activation = torch.sigmoid(activation_logits)
             active_count = activation.detach().sum(dim=1).squeeze(-1)
             budget_fraction = activation.mean(dim=1).squeeze(-1)
+            budget_logit = torch.logit(
+                budget_fraction.float().clamp(1e-5, 1.0 - 1e-5)
+            )
         opacity = torch.sigmoid(self.opacity_head(latent))
         depth_order = torch.tanh(self.depth_head(latent))
         decoded = pooled_features + self.feature_decoder(latent)
@@ -264,5 +272,6 @@ class LearnableGPSTokenAllocator(nn.Module):
             fixed_token_fraction=self.config.fixed_token_fraction,
             active_count=active_count,
             budget_fraction=budget_fraction,
+            budget_logit=budget_logit,
             hard_token_gate=self.config.hard_token_gate,
         )
