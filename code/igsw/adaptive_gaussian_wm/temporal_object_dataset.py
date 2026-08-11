@@ -70,7 +70,6 @@ class TemporalObjectVideoDataset(Dataset):
         self.control_hz = validate_manifest(self.manifest, manifest_path)
         self.data_sha256 = file_sha256(manifest_path)
         self.contract_label = "raw-video-only continuous Temporal Object Set chunks"
-        self.feature_dim = int(self.manifest["feature"]["feature_dim"])
         self.condition_dim = 0
         self.teacher_sidecar_sha256 = ""
         self.dynamic_history_lengths = parse_int_choices(chunk_lengths, "chunk lengths")

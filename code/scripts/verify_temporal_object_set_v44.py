@@ -174,6 +174,10 @@ def main() -> None:
         max_items=64,
         seed=args.seed,
     )
+    require(
+        not hasattr(dataset, "feature_dim"),
+        "v44 dataset retained a cached-feature dependency",
+    )
     sample = dataset[(0, args.chunk_length)]
     forbidden = {
         "instruction",
