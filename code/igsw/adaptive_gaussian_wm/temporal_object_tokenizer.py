@@ -95,10 +95,14 @@ class TemporalObjectTokenizer(nn.Module):
         visibility: torch.Tensor,
         delta_time: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        persistent_semantic = feature[..., : self.config.semantic_dim]
         time = torch.stack((delta_time, torch.log1p(delta_time)), dim=-1)
         feature = feature + self.time_projection(time)[:, None]
         for block in self.predictor:
             feature = block(feature)
+        feature = torch.cat(
+            (persistent_semantic, feature[..., self.config.semantic_dim :]), dim=-1
+        )
         geometry = self.geometry_prediction(feature).float()
         lifecycle = self.lifecycle_prediction(feature).float()
         center = (center + 0.10 * torch.tanh(geometry[..., :2])).clamp(-1.25, 1.25)
@@ -243,11 +247,12 @@ class TemporalObjectTokenizer(nn.Module):
             semantic_observation = F.normalize(
                 self.semantic_observation(pooled).float(), dim=-1, eps=1e-6
             ).to(pooled.dtype)
+            update_rate = 1.0 if time == 0 else self.config.semantic_update_rate
             semantic = F.normalize(
                 torch.lerp(
                     semantic_previous.float(),
                     semantic_observation.float(),
-                    self.config.semantic_update_rate,
+                    update_rate,
                 ),
                 dim=-1,
                 eps=1e-6,
