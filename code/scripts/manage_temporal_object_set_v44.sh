@@ -37,7 +37,7 @@ verify_run() {
   "${PY}" "${ROOT}/code/scripts/verify_temporal_object_set_v44.py" \
     --data "${DATA}" \
     --output "${GATE_REPORT}" \
-    --dino_frame_batch "${DINO_FRAME_BATCH:-16}" \
+    --dino_frame_batch "${VERIFY_DINO_FRAME_BATCH:-16}" \
     --amp "${AMP:-bf16}"
 }
 

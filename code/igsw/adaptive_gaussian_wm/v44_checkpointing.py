@@ -65,6 +65,7 @@ def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
         "grad_accum",
         "target_global_batch",
         "workers",
+        "prefetch_factor",
         "dino_frame_batch",
         "steps",
         "lr",

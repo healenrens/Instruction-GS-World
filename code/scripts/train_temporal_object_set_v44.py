@@ -60,11 +60,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk_lengths", default="8,16,24,32")
     parser.add_argument("--temporal_strides", default="1,2,3,4")
     parser.add_argument("--observation_mask_probability", type=float, default=0.20)
-    parser.add_argument("--batch", type=int, default=4)
+    parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--grad_accum", type=int, required=True)
     parser.add_argument("--target_global_batch", type=int, default=256)
-    parser.add_argument("--workers", type=int, default=2)
-    parser.add_argument("--dino_frame_batch", type=int, default=16)
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--prefetch_factor", type=int, default=2)
+    parser.add_argument("--dino_frame_batch", type=int, default=128)
     parser.add_argument("--max_train_items", type=int, default=0)
     parser.add_argument("--steps", type=int, default=50_000)
     parser.add_argument("--object_phase_steps", type=int, default=10_000)
@@ -93,7 +94,13 @@ def _git_commit() -> str:
 def _validate_arguments(args, world_size: int) -> None:
     if args.resume and not os.path.isfile(args.resume):
         raise ValueError(f"v44 resume checkpoint is missing: {args.resume}")
-    if min(args.batch, args.grad_accum, args.workers + 1, args.dino_frame_batch) < 1:
+    if min(
+        args.batch,
+        args.grad_accum,
+        args.workers + 1,
+        args.prefetch_factor,
+        args.dino_frame_batch,
+    ) < 1:
         raise ValueError("v44 batch, accumulation, workers and DINO batch are invalid")
     effective = args.batch * args.grad_accum * world_size
     if effective != args.target_global_batch:
@@ -219,15 +226,18 @@ def main() -> None:
         args.batch,
         args.grad_accum,
     )
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch,
-        sampler=sampler,
-        num_workers=args.workers,
-        pin_memory=True,
-        drop_last=True,
-        persistent_workers=args.workers > 0,
-    )
+    loader_options = {
+        "dataset": dataset,
+        "batch_size": args.batch,
+        "sampler": sampler,
+        "num_workers": args.workers,
+        "pin_memory": True,
+        "drop_last": True,
+        "persistent_workers": args.workers > 0,
+    }
+    if args.workers > 0:
+        loader_options["prefetch_factor"] = args.prefetch_factor
+    loader = DataLoader(**loader_options)
     optimizer = torch.optim.AdamW(
         [
             {
@@ -279,6 +289,10 @@ def main() -> None:
                     "global_step": start_step,
                     "examples": len(dataset),
                     "world_size": context.world_size,
+                    "micro_batch": args.batch,
+                    "grad_accum": args.grad_accum,
+                    "dino_frame_batch": args.dino_frame_batch,
+                    "workers_per_rank": args.workers,
                     "effective_batch": args.target_global_batch,
                     "checkpoint_version": CHECKPOINT_VERSION,
                     "architecture": ARCHITECTURE,

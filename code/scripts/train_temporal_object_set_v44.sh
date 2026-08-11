@@ -38,8 +38,53 @@ if [ "${NPROC_PER_NODE}" -lt 1 ]; then
   exit 2
 fi
 
-BATCH_PER_GPU="${BATCH_PER_GPU:-4}"
 TARGET_GLOBAL_BATCH="${TARGET_GLOBAL_BATCH:-256}"
+BATCH_PER_GPU="${BATCH_PER_GPU:-auto}"
+MIN_GPU_MEMORY_MIB="$("${PY}" -c 'import torch; print(min(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count())) // 2**20)')"
+if [ "${BATCH_PER_GPU}" = auto ]; then
+  if [ "${MIN_GPU_MEMORY_MIB}" -ge 76000 ]; then
+    MAX_BATCH_PER_GPU=32
+  elif [ "${MIN_GPU_MEMORY_MIB}" -ge 45000 ]; then
+    MAX_BATCH_PER_GPU=16
+  elif [ "${MIN_GPU_MEMORY_MIB}" -ge 22000 ]; then
+    MAX_BATCH_PER_GPU=8
+  else
+    MAX_BATCH_PER_GPU=4
+  fi
+  BATCH_PER_GPU=0
+  for CANDIDATE in 32 16 8 4 2 1; do
+    LOCAL_CANDIDATE=$((CANDIDATE * NPROC_PER_NODE))
+    if [ "${CANDIDATE}" -le "${MAX_BATCH_PER_GPU}" ] && \
+       [ "${LOCAL_CANDIDATE}" -le "${TARGET_GLOBAL_BATCH}" ] && \
+       [ $((TARGET_GLOBAL_BATCH % LOCAL_CANDIDATE)) -eq 0 ]; then
+      BATCH_PER_GPU="${CANDIDATE}"
+      break
+    fi
+  done
+  if [ "${BATCH_PER_GPU}" -lt 1 ]; then
+    echo "[temporal-object-v44] cannot derive an exact per-GPU batch"
+    exit 2
+  fi
+fi
+
+DINO_FRAME_BATCH="${DINO_FRAME_BATCH:-auto}"
+if [ "${DINO_FRAME_BATCH}" = auto ]; then
+  if [ "${MIN_GPU_MEMORY_MIB}" -ge 76000 ]; then
+    DINO_FRAME_BATCH=128
+  elif [ "${MIN_GPU_MEMORY_MIB}" -ge 45000 ]; then
+    DINO_FRAME_BATCH=64
+  elif [ "${MIN_GPU_MEMORY_MIB}" -ge 22000 ]; then
+    DINO_FRAME_BATCH=32
+  else
+    DINO_FRAME_BATCH=16
+  fi
+fi
+
+WORKERS_PER_RANK="${WORKERS_PER_RANK:-auto}"
+if [ "${WORKERS_PER_RANK}" = auto ]; then
+  WORKERS_PER_RANK="$("${PY}" -c "import os; print(max(2, min(8, (os.cpu_count() or 8) // (2 * ${NPROC_PER_NODE}))))")"
+fi
+
 GRAD_ACCUM="${GRAD_ACCUM:-auto}"
 LOCAL_BATCH=$((BATCH_PER_GPU * NPROC_PER_NODE))
 if [ "${GRAD_ACCUM}" = auto ]; then
@@ -66,8 +111,9 @@ ARGS=(
   --batch "${BATCH_PER_GPU}"
   --grad_accum "${GRAD_ACCUM}"
   --target_global_batch "${TARGET_GLOBAL_BATCH}"
-  --workers "${WORKERS_PER_RANK:-2}"
-  --dino_frame_batch "${DINO_FRAME_BATCH:-16}"
+  --workers "${WORKERS_PER_RANK}"
+  --prefetch_factor "${PREFETCH_FACTOR:-2}"
+  --dino_frame_batch "${DINO_FRAME_BATCH}"
   --steps "${STEPS:-50000}"
   --object_phase_steps "${OBJECT_PHASE_STEPS:-10000}"
   --effect_phase_steps "${EFFECT_PHASE_STEPS:-30000}"
@@ -103,7 +149,8 @@ fi
 echo "[temporal-object-v44] root=${ROOT}"
 echo "[temporal-object-v44] data=${DATA}"
 echo "[temporal-object-v44] out=${OUT}"
-echo "[temporal-object-v44] world=${NPROC_PER_NODE} effective_batch=${TARGET_GLOBAL_BATCH} grad_accum=${GRAD_ACCUM}"
+echo "[temporal-object-v44] world=${NPROC_PER_NODE} gpu_memory_mib=${MIN_GPU_MEMORY_MIB} batch_per_gpu=${BATCH_PER_GPU} grad_accum=${GRAD_ACCUM} effective_batch=${TARGET_GLOBAL_BATCH}"
+echo "[temporal-object-v44] dino_frame_batch=${DINO_FRAME_BATCH} workers_per_rank=${WORKERS_PER_RANK} prefetch_factor=${PREFETCH_FACTOR:-2}"
 
 cd "${ROOT}" || exit 2
 exec "${TORCHRUN}" --standalone --nproc_per_node "${NPROC_PER_NODE}" \
