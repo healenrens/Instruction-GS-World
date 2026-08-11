@@ -96,6 +96,16 @@ def _object_loss(model, output: dict) -> tuple[torch.Tensor, dict[str, torch.Ten
     masked_state = ((masked_semantic + masked_dynamic) * mask).sum() / (
         masked_count * config.total_slots
     )
+    observed_frames = output["observation_mask"][..., None].float()
+    lifecycle_count = (observed_frames.sum() * config.total_slots).clamp_min(1.0)
+    lifecycle_target = full["observed_presence"].detach().float()
+    lifecycle_prediction = (
+        (
+            (full["predicted_presence"].float() - lifecycle_target).abs()
+            + (full["predicted_visibility"].float() - lifecycle_target).abs()
+        )
+        * observed_frames
+    ).sum() / lifecycle_count
     motion = correspondence.residual_motion.float()
     uncertainty = correspondence.cycle_error.float()
     scene_target = torch.exp(-4.0 * motion) * (1.0 - uncertainty)
@@ -129,6 +139,7 @@ def _object_loss(model, output: dict) -> tuple[torch.Tensor, dict[str, torch.Ten
         + 0.25 * cycle
         + 0.50 * reconstruction
         + 0.50 * masked_state
+        + 0.10 * lifecycle_prediction
         + 0.20 * role
         + 0.05 * diversity
         + role_capacity
@@ -140,6 +151,7 @@ def _object_loss(model, output: dict) -> tuple[torch.Tensor, dict[str, torch.Ten
         "loss_object_cycle": cycle,
         "loss_object_reconstruction": reconstruction,
         "loss_object_masked_state": masked_state,
+        "loss_object_lifecycle_prediction": lifecycle_prediction,
         "loss_object_role": role,
         "loss_object_diversity": diversity,
         "object_scene_fraction": scene_fraction,

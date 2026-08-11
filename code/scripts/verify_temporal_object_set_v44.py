@@ -92,7 +92,10 @@ def gradient_contract(model, output) -> dict[str, int | float]:
     output["loss"].backward()
     groups = {"tokenizer": [], "posterior": [], "dynamics": [], "goal": []}
     nonfinite = []
+    missing = []
     for name, parameter in model.named_parameters():
+        if parameter.requires_grad and parameter.grad is None:
+            missing.append(name)
         if parameter.grad is not None and not bool(
             torch.isfinite(parameter.grad).all()
         ):
@@ -106,6 +109,7 @@ def gradient_contract(model, output) -> dict[str, int | float]:
         elif name.startswith("goal_effect_predictor."):
             groups["goal"].append(parameter)
     require(not nonfinite, f"v44 has non-finite gradients: {nonfinite}")
+    require(not missing, f"v44 has unused trainable parameters: {missing}")
     for name, parameters in groups.items():
         require(
             any(parameter.grad is not None for parameter in parameters),
@@ -118,6 +122,11 @@ def gradient_contract(model, output) -> dict[str, int | float]:
         for name, parameters in groups.items()
     }
     result["loss"] = float(output["loss"].detach())
+    result["all_trainable_gradient_tensors"] = sum(
+        parameter.grad is not None
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
     model.zero_grad(set_to_none=True)
     return result
 
@@ -215,7 +224,7 @@ def main() -> None:
             features.valid,
             batch["frame_times"],
             batch["observation_mask"],
-            35_000,
+            0,
         )
     require(bool(torch.isfinite(output["loss"])), "v44 verifier loss is non-finite")
     require(

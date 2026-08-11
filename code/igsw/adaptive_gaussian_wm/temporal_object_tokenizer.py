@@ -184,6 +184,9 @@ class TemporalObjectTokenizer(nn.Module):
                 "log_scale",
                 "presence",
                 "visibility",
+                "predicted_presence",
+                "predicted_visibility",
+                "observed_presence",
                 "assignment",
                 "decoded_slots",
             )
@@ -296,6 +299,9 @@ class TemporalObjectTokenizer(nn.Module):
             histories["log_scale"].append(log_scale)
             histories["presence"].append(presence)
             histories["visibility"].append(visibility)
+            histories["predicted_presence"].append(predicted_presence)
+            histories["predicted_visibility"].append(predicted_visibility)
+            histories["observed_presence"].append(observed_presence)
             histories["assignment"].append(assignment)
             histories["decoded_slots"].append(self.semantic_decoder(semantic))
         output = {
