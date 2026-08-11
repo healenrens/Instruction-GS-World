@@ -89,7 +89,7 @@ class EffectConditionedObjectDynamics(nn.Module):
         lifecycle_delta = self.lifecycle_delta(hidden).float() * gate
         presence_logits = torch.logit(presence.clamp(1e-4, 1 - 1e-4))
         visibility_logits = torch.logit(visibility.clamp(1e-4, 1 - 1e-4))
-        return {
+        prediction = {
             "semantic": semantic,
             "dynamic": dynamic + dynamic_delta.to(dynamic.dtype),
             "center": (center + 0.5 * geometry_delta[..., :2]).clamp(-1.5, 1.5),
@@ -97,3 +97,9 @@ class EffectConditionedObjectDynamics(nn.Module):
             "presence": torch.sigmoid(presence_logits + lifecycle_delta[..., 0]),
             "visibility": torch.sigmoid(visibility_logits + lifecycle_delta[..., 1]),
         }
+        zero_effect = effect.detach().abs().amax(dim=(1, 2)) == 0
+        for name, value in prediction.items():
+            identity = current[name][:, :count].to(value.dtype)
+            mask = zero_effect.reshape(len(effect), *([1] * (value.ndim - 1)))
+            prediction[name] = torch.where(mask, identity, value)
+        return prediction
