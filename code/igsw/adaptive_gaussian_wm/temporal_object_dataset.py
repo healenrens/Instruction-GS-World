@@ -62,13 +62,14 @@ class TemporalObjectVideoDataset(Dataset):
         observation_mask_probability: float = 0.20,
         max_items: int = 0,
         seed: int = 17,
+        record_manifest_hash: bool = True,
     ):
         self.cache_root = os.path.abspath(cache_root)
         manifest_path = os.path.join(self.cache_root, EPISODE_MANIFEST_NAME)
         with open(manifest_path, encoding="utf-8") as handle:
             self.manifest = json.load(handle)
         self.control_hz = validate_manifest(self.manifest, manifest_path)
-        self.data_sha256 = file_sha256(manifest_path)
+        self.data_sha256 = file_sha256(manifest_path) if record_manifest_hash else ""
         self.contract_label = "raw-video-only continuous Temporal Object Set chunks"
         self.condition_dim = 0
         self.teacher_sidecar_sha256 = ""
