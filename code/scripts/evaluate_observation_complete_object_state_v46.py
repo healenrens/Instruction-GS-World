@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True)
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--dino_checkpoint", required=True)
     parser.add_argument("--split", choices=("heldseed", "heldtask"), required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--max_items", type=int, default=512)
@@ -87,7 +88,9 @@ def main() -> None:
     device = torch.device("cuda:0")
     model = ObservationCompleteWorldModel(config).to(device).eval()
     model.load_state_dict(checkpoint["model"], strict=True)
-    encoder = FrozenDinoVideoRuntime(config, device, args.amp, args.dino_frame_batch)
+    encoder = FrozenDinoVideoRuntime(
+        config, device, args.amp, args.dino_frame_batch, args.dino_checkpoint
+    )
     amp_context = (
         (lambda: torch.autocast("cuda", dtype=torch.bfloat16))
         if args.amp == "bf16" else nullcontext

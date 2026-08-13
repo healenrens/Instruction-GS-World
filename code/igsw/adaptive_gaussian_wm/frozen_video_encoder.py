@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 import torch
 import torch.nn.functional as F
@@ -27,6 +28,7 @@ class FrozenDinoVideoRuntime:
         device: torch.device,
         amp: str,
         frame_batch: int,
+        checkpoint_path: str = "",
     ):
         if device.type != "cuda":
             raise ValueError("v44 DINO extraction requires CUDA")
@@ -34,19 +36,21 @@ class FrozenDinoVideoRuntime:
             raise ValueError("DINO frame batch must be positive")
         import timm
 
+        checkpoint_path = os.path.abspath(checkpoint_path) if checkpoint_path else ""
+        if checkpoint_path and not os.path.isfile(checkpoint_path):
+            raise ValueError(f"local DINO checkpoint is missing: {checkpoint_path}")
         self.device = device
         self.dtype = torch.bfloat16 if amp == "bf16" else torch.float32
         self.frame_batch = int(frame_batch)
-        self.backbone = (
-            timm.create_model(
-                config.dino_model_name,
-                pretrained=True,
-                num_classes=0,
-                img_size=config.dino_image_size,
-            )
-            .to(device=device, dtype=self.dtype)
-            .eval()
+        self.checkpoint_path = checkpoint_path
+        self.backbone = timm.create_model(
+            config.dino_model_name,
+            pretrained=True,
+            pretrained_cfg_overlay={"file": checkpoint_path} if checkpoint_path else None,
+            num_classes=0,
+            img_size=config.dino_image_size,
         )
+        self.backbone = self.backbone.to(device=device, dtype=self.dtype).eval()
         self.backbone.requires_grad_(False)
         self.patch_size = int(self.backbone.patch_embed.patch_size[0])
         self.prefix_tokens = int(getattr(self.backbone, "num_prefix_tokens", 1))

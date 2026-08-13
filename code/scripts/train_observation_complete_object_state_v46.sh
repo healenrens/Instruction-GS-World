@@ -9,6 +9,8 @@ VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 DATA="${DATA:-${RUNTIME_ROOT}/data/rt2_visual_episodes_rgb_native_30hz_v4}"
 OUT="${OUT:-${RUNTIME_ROOT}/outputs/observation_complete_object_state_v46_seed17}"
 GATE_REPORT="${GATE_REPORT:-}"
+SOURCE_REVISION="${SOURCE_REVISION:-}"
+DINO_CHECKPOINT="${DINO_CHECKPOINT:-${RUNTIME_ROOT}/models/dinov2_vitl14/model.safetensors}"
 PY="${VENV_ROOT}/.venv/bin/python"
 TORCHRUN="${VENV_ROOT}/.venv/bin/torchrun"
 
@@ -18,6 +20,14 @@ if [ -n "${INIT_FROM:-}" ]; then
 fi
 if [ -z "${GATE_REPORT}" ] || [ ! -f "${GATE_REPORT}" ]; then
   echo "[object-state-v46] GATE_REPORT is missing: ${GATE_REPORT}"
+  exit 2
+fi
+if [ -z "${SOURCE_REVISION}" ]; then
+  echo "[object-state-v46] SOURCE_REVISION is missing"
+  exit 2
+fi
+if [ ! -f "${DINO_CHECKPOINT}" ]; then
+  echo "[object-state-v46] local DINO checkpoint is missing: ${DINO_CHECKPOINT}"
   exit 2
 fi
 if [ ! -x "${PY}" ] || [ ! -x "${TORCHRUN}" ]; then
@@ -89,6 +99,7 @@ fi
 mkdir -p "${OUT}" "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}"
 ARGS=(
   --data "${DATA}" --out "${OUT}" --gate_report "${GATE_REPORT}"
+  --source_revision "${SOURCE_REVISION}" --dino_checkpoint "${DINO_CHECKPOINT}"
   --chunk_lengths "${CHUNK_LENGTHS:-8,16,24,32}"
   --temporal_strides "${TEMPORAL_STRIDES:-1,2,3,4}"
   --observation_mask_probability "${OBSERVATION_MASK_PROBABILITY:-0.20}"
@@ -116,6 +127,10 @@ if [ -n "${MAX_TRAIN_ITEMS:-}" ]; then ARGS+=(--max_train_items "${MAX_TRAIN_ITE
 echo "[object-state-v46] root=${ROOT} data=${DATA} out=${OUT}"
 echo "[object-state-v46] world=${NPROC_PER_NODE} gpu_memory_mib=${MIN_GPU_MEMORY_MIB} batch_per_gpu=${BATCH_PER_GPU} grad_accum=${GRAD_ACCUM} effective_batch=${TARGET_GLOBAL_BATCH}"
 echo "[object-state-v46] dino_frame_batch=${DINO_FRAME_BATCH} workers_per_rank=${WORKERS_PER_RANK}"
+echo "[object-state-v46] source_revision=${SOURCE_REVISION} dino_checkpoint=${DINO_CHECKPOINT}"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
 cd "${ROOT}" || exit 2
 exec "${TORCHRUN}" --standalone --nproc_per_node "${NPROC_PER_NODE}" \
   "${ROOT}/code/scripts/train_observation_complete_object_state_v46.py" "${ARGS[@]}"

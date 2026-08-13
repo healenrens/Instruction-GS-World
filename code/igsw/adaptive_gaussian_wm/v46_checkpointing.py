@@ -57,7 +57,8 @@ def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
         "data", "chunk_lengths", "temporal_strides",
         "observation_mask_probability", "batch", "grad_accum",
         "target_global_batch", "workers", "prefetch_factor",
-        "dino_frame_batch", "steps", "lr", "lr_floor", "weight_decay",
+        "dino_frame_batch", "dino_checkpoint", "source_revision",
+        "steps", "lr", "lr_floor", "weight_decay",
         "warmup_steps", "seed", "amp",
     )
     differences = {

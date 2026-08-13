@@ -6,7 +6,6 @@ import argparse
 from contextlib import nullcontext
 import json
 import os
-import subprocess
 import sys
 
 import torch
@@ -37,16 +36,12 @@ def maximum_difference(left: torch.Tensor, right: torch.Tensor) -> float:
     return float((left.float() - right.float()).abs().max())
 
 
-def git_commit() -> str:
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True
-    ).strip()
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--source_revision", required=True)
+    parser.add_argument("--dino_checkpoint", required=True)
     parser.add_argument("--dino_frame_batch", type=int, default=16)
     parser.add_argument("--amp", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--chunk_length", type=int, default=8)
@@ -243,7 +238,9 @@ def main() -> None:
         for name, value in batch.items()
     }
     batch["observation_mask"][:, args.chunk_length // 2] = False
-    encoder = FrozenDinoVideoRuntime(config, device, args.amp, args.dino_frame_batch)
+    encoder = FrozenDinoVideoRuntime(
+        config, device, args.amp, args.dino_frame_batch, args.dino_checkpoint
+    )
     require(
         not any(parameter.requires_grad for parameter in encoder.backbone.parameters()),
         "v46 DINO teacher is not frozen",
@@ -271,11 +268,12 @@ def main() -> None:
     report = {
         "status": "passed", "checkpoint_version": CHECKPOINT_VERSION,
         "architecture": ARCHITECTURE, "contract": TEMPORAL_OBJECT_VIDEO_CONTRACT,
-        "git_commit": git_commit(), "data": os.path.abspath(args.data),
+        "git_commit": args.source_revision, "data": os.path.abspath(args.data),
         "historical_checkpoint_used": False, "teacher_sidecar_used": False,
         "language_used": False, "explicit_action_used": False,
         "instance_segmentation_used": False, "fixed_patch_correspondence_used": False,
         "dino_model": config.dino_model_name, "dino_fully_frozen": True,
+        "dino_checkpoint": os.path.abspath(args.dino_checkpoint),
         "object_slots": config.object_slots, "scene_is_explicit_owner": True,
         "state_freezes_before_effect_learning": True,
         **structural, **gradients, **masked, **causal, **identity,

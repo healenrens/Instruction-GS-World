@@ -6,7 +6,6 @@ import argparse
 import json
 import os
 import random
-import subprocess
 import sys
 
 import torch
@@ -42,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--gate_report", required=True)
+    parser.add_argument("--source_revision", required=True)
+    parser.add_argument("--dino_checkpoint", required=True)
     parser.add_argument("--resume", default="")
     parser.add_argument("--chunk_lengths", default="8,16,24,32")
     parser.add_argument("--temporal_strides", default="1,2,3,4")
@@ -71,12 +72,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _git_commit() -> str:
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True
-    ).strip()
-
-
 def _validate_arguments(args, world_size: int) -> None:
     if args.resume and not os.path.isfile(args.resume):
         raise ValueError(f"v46 resume checkpoint is missing: {args.resume}")
@@ -91,6 +86,10 @@ def _validate_arguments(args, world_size: int) -> None:
         raise ValueError("v46 step counts are invalid")
     if min(args.save_every, args.recovery_every, args.log_every) < 1:
         raise ValueError("v46 save/recovery/log intervals must be positive")
+    if not args.source_revision:
+        raise ValueError("v46 source revision is empty")
+    if not os.path.isfile(args.dino_checkpoint):
+        raise ValueError(f"v46 local DINO checkpoint is missing: {args.dino_checkpoint}")
     validate_wandb_arguments(args)
 
 
@@ -115,7 +114,8 @@ def main() -> None:
     args.data = os.path.abspath(args.data)
     args.out = os.path.abspath(args.out)
     args.gate_report = os.path.abspath(args.gate_report)
-    args.git_commit = _git_commit()
+    args.dino_checkpoint = os.path.abspath(args.dino_checkpoint)
+    args.git_commit = args.source_revision
     context = init_torchrun()
     _validate_arguments(args, context.world_size)
     device = torch.device(context.device)
@@ -170,7 +170,9 @@ def main() -> None:
         model, device_ids=[context.local_rank], broadcast_buffers=False,
         find_unused_parameters=False,
     ) if context.distributed else model
-    encoder = FrozenDinoVideoRuntime(config, device, args.amp, args.dino_frame_batch)
+    encoder = FrozenDinoVideoRuntime(
+        config, device, args.amp, args.dino_frame_batch, args.dino_checkpoint
+    )
     sampler = build_training_sampler(
         dataset, context.world_size, context.rank, args.seed, args.batch, args.grad_accum
     )
@@ -210,6 +212,7 @@ def main() -> None:
             "examples": len(dataset), "world_size": context.world_size,
             "micro_batch": args.batch, "grad_accum": args.grad_accum,
             "dino_frame_batch": args.dino_frame_batch, "workers_per_rank": args.workers,
+            "dino_checkpoint": args.dino_checkpoint,
             "effective_batch": args.target_global_batch,
             "checkpoint_version": CHECKPOINT_VERSION, "architecture": ARCHITECTURE,
         }, sort_keys=True), flush=True)
