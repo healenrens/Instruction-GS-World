@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 
-CHECKPOINT_VERSION = 46
-ARCHITECTURE = "observation_complete_object_state_v1"
+CHECKPOINT_VERSION = 47
+ARCHITECTURE = "grounded_object_state_v2"
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,7 @@ class ObservationCompleteConfig:
     association_dustbin_logit: float = -0.5
     identity_temperature: float = 0.10
     object_gain_margin: float = 0.05
+    presence_half_life_seconds: float = 4.0
     intervention_margin: float = 0.05
     state_phase_steps: int = 15_000
     goal_phase_steps: int = 30_000
@@ -47,11 +48,11 @@ class ObservationCompleteConfig:
         if self.semantic_dim + self.dynamic_dim != self.model_dim:
             raise ValueError("semantic and dynamic dimensions must sum to model_dim")
         if self.object_slots < 2:
-            raise ValueError("v46 requires at least two object slots")
+            raise ValueError("v47 requires at least two object slots")
         if self.model_dim % self.heads:
             raise ValueError("model_dim must be divisible by attention heads")
         if self.scene_basis_dim != 6:
-            raise ValueError("v46 scene decoder uses the six-term spatial basis")
+            raise ValueError("v47 scene decoder uses the six-term spatial basis")
         if self.observation_queries < 1:
             raise ValueError("observation query count must be positive")
         if not 0.0 < self.semantic_update_rate <= 1.0:
@@ -66,10 +67,12 @@ class ObservationCompleteConfig:
             raise ValueError("association Sinkhorn iterations must be positive")
         if self.identity_temperature <= 0.0:
             raise ValueError("identity temperature must be positive")
+        if self.presence_half_life_seconds <= 0.0:
+            raise ValueError("presence half-life must be positive")
         if not 0 < self.state_phase_steps < self.goal_phase_steps < self.total_steps:
-            raise ValueError("v46 curriculum boundaries are invalid")
+            raise ValueError("v47 curriculum boundaries are invalid")
         if self.curriculum_ramp_steps < 1:
-            raise ValueError("v46 curriculum ramp must be positive")
+            raise ValueError("v47 curriculum ramp must be positive")
 
     def to_dict(self) -> dict:
         return asdict(self)

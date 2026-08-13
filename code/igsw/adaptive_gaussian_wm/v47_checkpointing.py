@@ -1,4 +1,4 @@
-"""Strict v46 checkpoint and exact-resume contract."""
+"""Strict v47 checkpoint and exact-resume contract."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import random
 import torch
 import torch.distributed as dist
 
-from .v46_config import ARCHITECTURE, CHECKPOINT_VERSION
+from .v47_config import ARCHITECTURE, CHECKPOINT_VERSION
 
 
 def collect_rng_states(context) -> list[dict]:
@@ -24,34 +24,34 @@ def collect_rng_states(context) -> list[dict]:
     states: list[dict | None] = [None] * context.world_size
     dist.all_gather_object(states, local)
     if any(state is None for state in states):
-        raise RuntimeError("failed to gather v46 RNG states")
+        raise RuntimeError("failed to gather v47 RNG states")
     return [state for state in states if state is not None]
 
 
 def restore_rng_state(checkpoint: dict, context) -> None:
     states = checkpoint["rng_states"]
     if len(states) != context.world_size:
-        raise ValueError("v46 resume RNG count differs from world size")
+        raise ValueError("v47 resume RNG count differs from world size")
     state = states[context.rank]
     torch.set_rng_state(state["torch"])
     if torch.device(context.device).type == "cuda":
         if state["cuda"] is None:
-            raise ValueError("v46 resume has no CUDA RNG state")
+            raise ValueError("v47 resume has no CUDA RNG state")
         torch.cuda.set_rng_state(state["cuda"], device=torch.device(context.device))
     random.setstate(state["python"])
 
 
 def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
     if checkpoint.get("checkpoint_version") != CHECKPOINT_VERSION:
-        raise ValueError("v46 resume requires a version-46 checkpoint")
+        raise ValueError("v47 resume requires a version-47 checkpoint")
     if checkpoint.get("architecture") != ARCHITECTURE:
-        raise ValueError("v46 resume architecture differs")
+        raise ValueError("v47 resume architecture differs")
     if checkpoint.get("parallelism") != "ddp_full_state_dict":
-        raise ValueError("v46 resume requires a DDP full state dict")
+        raise ValueError("v47 resume requires a DDP full state dict")
     if checkpoint.get("world_size") != world_size:
-        raise ValueError("v46 resume world size differs")
+        raise ValueError("v47 resume world size differs")
     if checkpoint.get("config") != config.to_dict():
-        raise ValueError("v46 resume model/curriculum config differs")
+        raise ValueError("v47 resume model/curriculum config differs")
     saved = checkpoint.get("args", {})
     immutable = (
         "data", "chunk_lengths", "temporal_strides",
@@ -67,7 +67,7 @@ def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
         if saved.get(name, "<missing>") != getattr(args, name)
     }
     if differences:
-        raise ValueError(f"v46 resume-critical arguments differ: {differences}")
+        raise ValueError(f"v47 resume-critical arguments differ: {differences}")
 
 
 def save_checkpoint(

@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from .distributed_statistics import gather_batch_with_grad, gather_batch_without_grad
 from .observation_complete_state import scene_basis
-from .v46_curriculum import V46Curriculum
+from .v47_curriculum import V47Curriculum
 
 
 def _pairwise_center(center: torch.Tensor) -> torch.Tensor:
@@ -77,10 +77,15 @@ def _weighted_mean(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 
 
 def _identity_loss(
-    model, identity: torch.Tensor, weight: torch.Tensor
+    model,
+    predicted_identity: torch.Tensor,
+    observation_identity: torch.Tensor,
+    weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    source = F.normalize(identity[:, 1:].float(), dim=-1, eps=1e-6)
-    target = F.normalize(identity[:, :-1].detach().float(), dim=-1, eps=1e-6)
+    source = F.normalize(predicted_identity[:, 1:].float(), dim=-1, eps=1e-6)
+    target = F.normalize(
+        observation_identity[:, 1:].detach().float(), dim=-1, eps=1e-6
+    )
     gathered = gather_batch_without_grad(target)
     batch, steps, count = source.shape[:3]
     candidates = gathered.permute(1, 0, 2, 3).reshape(steps, -1, source.shape[-1])
@@ -97,6 +102,22 @@ def _identity_loss(
     loss = _weighted_mean(item_loss, weight)
     accuracy = _weighted_mean((logits.argmax(-1) == labels).float(), weight)
     return loss, accuracy
+
+
+def _masked_state_loss(
+    full: dict[str, torch.Tensor],
+    masked: dict[str, torch.Tensor],
+    observation_mask: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    hidden = ~observation_mask
+    if not bool(hidden.any()):
+        raise ValueError("masked-state objective requires at least one hidden frame")
+    keys = (
+        "semantic", "dynamic", "center", "log_scale", "presence", "visibility",
+    )
+    prediction = {name: masked[name][hidden] for name in keys}
+    target = {name: full[name][hidden].detach() for name in keys}
+    return object_state_distance(prediction, target)
 
 
 def _state_loss(
@@ -124,8 +145,9 @@ def _state_loss(
             target_query[:, 1:], target_query[:, :-1], dim=-1, eps=1e-6
         )
     motion_weight = motion.clamp_min(0.0) * valid_query
+    object_improvement = scene_error.detach() - full_error
     object_necessity = _weighted_mean(
-        F.relu(model.config.object_gain_margin - object_gain), motion_weight
+        F.relu(model.config.object_gain_margin - object_improvement), motion_weight
     )
     motion_gain = _weighted_mean(object_gain, motion_weight)
     masked_prediction = _decode_queries(masked, output["coordinates"], indices)[0]
@@ -134,37 +156,85 @@ def _state_loss(
     )
     masked_weight = (~output["observation_mask"])[..., None].float() * valid_query
     masked_loss = _weighted_mean(masked_error, masked_weight)
+    masked_state, masked_state_parts = _masked_state_loss(
+        full, masked, output["observation_mask"]
+    )
     identity_weight = (
-        full["presence"][:, 1:].float()
-        * full["visibility"][:, 1:].float()
-        * full["presence"][:, :-1].float()
+        full["presence"][:, :-1].float()
+        * full["observed_visibility"][:, 1:].float()
+        * output["observation_mask"][:, 1:, None].float()
     ).detach()
-    identity, identity_top1 = _identity_loss(model, full["identity_key"], identity_weight)
+    identity, identity_top1 = _identity_loss(
+        model,
+        full["predicted_identity"],
+        full["observation_identity"],
+        identity_weight,
+    )
     observed = output["observation_mask"][..., None].float()
     lifecycle_weight = observed.expand_as(full["observed_presence"])
-    lifecycle = _weighted_mean(
-        (full["predicted_presence"].float() - full["observed_presence"].detach().float()).abs()
-        + (full["predicted_visibility"].float() - full["observed_presence"].detach().float()).abs(),
+    presence_prediction = _weighted_mean(
+        (full["predicted_presence"].float() - full["observed_presence"].detach().float()).abs(),
         lifecycle_weight,
     )
-    state_loss = observation + 0.5 * masked_loss + 0.25 * identity + 0.25 * object_necessity + 0.1 * lifecycle
+    visibility_prediction = _weighted_mean(
+        (full["predicted_visibility"].float() - full["observed_visibility"].detach().float()).abs(),
+        lifecycle_weight,
+    )
+    lifecycle = presence_prediction + visibility_prediction
+    object_fraction = assignment.sum(dim=2)
+    staticness = torch.exp(
+        -motion.detach().clamp_min(0.0) / model.config.object_gain_margin
+    )
+    gain_shortfall = (
+        F.relu(model.config.object_gain_margin - object_gain.detach())
+        / model.config.object_gain_margin
+    )
+    object_grounding = _weighted_mean(
+        object_fraction * staticness * gain_shortfall,
+        valid_query,
+    )
+    state_loss = (
+        observation
+        + 0.5 * masked_loss
+        + 0.5 * masked_state
+        + 0.25 * identity
+        + 0.25 * object_necessity
+        + 0.25 * object_grounding
+        + 0.1 * lifecycle
+    )
     object_mass = assignment.sum(dim=-1)
     valid_count = valid_query.sum(dim=-1, keepdim=True).clamp_min(1.0)
     effective = ((object_mass / valid_count) > 0.01).float().sum(dim=-1).mean()
+    slot_fraction = object_mass / valid_count
+    slot_utility = (
+        (assignment * object_gain.detach()[:, :, None] * valid_query[:, :, None]).sum(dim=-1)
+        / object_mass.clamp_min(1e-6)
+    )
+    supported = (
+        (slot_fraction > 0.01)
+        & (slot_utility > model.config.object_gain_margin)
+    ).float().sum(dim=-1).mean()
     owner = torch.cat((assignment, scene_assignment[:, :, None]), dim=2)
     owner_entropy = -(owner.clamp_min(1e-7) * owner.clamp_min(1e-7).log()).sum(dim=2)
-    return state_loss, {
+    parts = {
         "loss_state": state_loss,
         "loss_observation_complete": observation,
         "diagnostic_scene_only_error": scene_only,
         "diagnostic_object_gain": scene_only - observation,
         "diagnostic_motion_object_gain": motion_gain,
         "loss_object_necessity": object_necessity,
+        "loss_object_grounding": object_grounding,
         "loss_masked_observation": masked_loss,
-        "loss_temporal_identity": identity,
-        "object_identity_top1": identity_top1,
+        "loss_masked_state": masked_state,
+        "loss_track_observation_retrieval": identity,
+        "track_observation_retrieval_top1": identity_top1,
         "loss_lifecycle_prediction": lifecycle,
+        "loss_presence_prediction": presence_prediction,
+        "loss_visibility_prediction": visibility_prediction,
         "object_effective_count": effective,
+        "object_supported_count": supported,
+        "object_owner_fraction": _weighted_mean(object_fraction, valid_query),
+        "object_utility": _weighted_mean(slot_utility, slot_fraction),
         "scene_owner_fraction": _weighted_mean(scene_assignment, valid_query),
         "owner_assignment_entropy": _weighted_mean(owner_entropy, valid_query),
         "object_correction_gate": full["correction_gate"].float().mean(),
@@ -173,7 +243,17 @@ def _state_loss(
         "association_appearance_similarity": full["association_appearance"].float().mean(),
         "observation_query_count": target.new_tensor(float(len(indices))),
         "masked_query_fraction": masked_weight.mean(),
+        "presence_mean": full["presence"].float().mean(),
+        "visibility_mean": full["visibility"].float().mean(),
+        "presence_visibility_gap": (
+            full["presence"].float() - full["visibility"].float()
+        ).mean(),
     }
+    parts.update({
+        f"masked_state_{name}": value
+        for name, value in masked_state_parts.items()
+    })
+    return state_loss, parts
 
 
 def _intervention_loss(
@@ -193,7 +273,7 @@ def _effect_statistics(effect: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
 
 
 def observation_complete_loss(
-    model, output: dict, curriculum: V46Curriculum
+    model, output: dict, curriculum: V47Curriculum
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     state_loss, parts = _state_loss(model, output)
     correct, effect_parts = object_state_distance(
@@ -244,5 +324,5 @@ def observation_complete_loss(
     parts.update({f"effect_state_{name}": value for name, value in effect_parts.items()})
     parts.update({f"goal_state_{name}": value for name, value in goal_parts.items()})
     if not bool(torch.isfinite(total)):
-        raise RuntimeError("v46 objective produced a non-finite loss")
+        raise RuntimeError("v47 objective produced a non-finite loss")
     return total, parts

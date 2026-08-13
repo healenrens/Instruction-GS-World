@@ -13,7 +13,7 @@ from .object_state_association import (
     align_scalars,
     align_slots,
 )
-from .v46_config import ObservationCompleteConfig
+from .v47_config import ObservationCompleteConfig
 
 
 class _SlotBlock(nn.Module):
@@ -138,6 +138,7 @@ class ObservationCompleteObjectState(nn.Module):
         visibility = torch.sigmoid(
             torch.logit(visibility.clamp(1e-4, 1 - 1e-4)) + lifecycle[..., 1]
         )
+        visibility = torch.minimum(visibility, presence)
         return hidden, center, log_scale, presence, visibility
 
     def _owner_assignment(
@@ -225,10 +226,10 @@ class ObservationCompleteObjectState(nn.Module):
         observation_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         if frozen_patches.ndim != 4 or frame_times.shape != frozen_patches.shape[:2]:
-            raise ValueError("v46 state inputs have incompatible shapes")
+            raise ValueError("v47 state inputs have incompatible shapes")
         batch, frames = frozen_patches.shape[:2]
         if observation_mask.shape != (batch, frames) or observation_mask.dtype != torch.bool:
-            raise ValueError("v46 observation mask must be boolean [B,T]")
+            raise ValueError("v47 observation mask must be boolean [B,T]")
         patches = self.patch_projection(frozen_patches)
         slots = self.initial_slots[None].expand(batch, -1, -1) + self.track_identity[None]
         scene = self.initial_scene[None].expand(batch, -1)
@@ -239,11 +240,13 @@ class ObservationCompleteObjectState(nn.Module):
         names = (
             "semantic", "dynamic", "center", "log_scale", "presence", "visibility",
             "predicted_presence", "predicted_visibility", "observed_presence",
+            "observed_visibility", "predicted_identity", "observation_identity",
             "assignment", "scene_assignment", "slot_mass", "correction_gate", "scene",
             "association_entropy", "association_unmatched", "association_appearance",
         )
         history: dict[str, list[torch.Tensor]] = {name: [] for name in names}
         for time_index in range(frames):
+            previous_presence = presence
             delta = frame_times[:, time_index] if time_index == 0 else (
                 frame_times[:, time_index] - frame_times[:, time_index - 1]
             )
@@ -280,6 +283,16 @@ class ObservationCompleteObjectState(nn.Module):
                 * aligned_activity
                 * observed[:, None].float()
             )
+            persistence = torch.exp(
+                -math.log(2.0)
+                * delta.float()
+                / self.config.presence_half_life_seconds
+            )[:, None]
+            observed_visibility = correction.detach()
+            observed_presence = torch.maximum(
+                previous_presence.detach() * persistence,
+                observed_visibility,
+            )
             previous_semantic, previous_dynamic = predicted_slots.split(
                 (self.config.semantic_dim, self.config.dynamic_dim), dim=-1
             )
@@ -304,9 +317,12 @@ class ObservationCompleteObjectState(nn.Module):
             log_scale = torch.lerp(
                 predicted_scale, aligned_scale, correction[..., None]
             ).clamp(-3.0, 0.7)
-            presence = torch.lerp(predicted_presence, aligned_activity, correction).clamp(0.0, 1.0)
+            observation_gate = observed[:, None].float()
+            presence = torch.lerp(
+                predicted_presence, observed_presence, observation_gate
+            ).clamp(0.0, 1.0)
             visibility = torch.lerp(
-                predicted_visibility, aligned_activity, correction
+                predicted_visibility, observed_visibility, observation_gate
             ).clamp(0.0, 1.0)
             slots = torch.cat((semantic, dynamic), dim=-1)
             owners = self._owner_assignment(
@@ -318,7 +334,14 @@ class ObservationCompleteObjectState(nn.Module):
                 "log_scale": log_scale, "presence": presence, "visibility": visibility,
                 "predicted_presence": predicted_presence,
                 "predicted_visibility": predicted_visibility,
-                "observed_presence": aligned_activity,
+                "observed_presence": observed_presence,
+                "observed_visibility": observed_visibility,
+                "predicted_identity": F.normalize(
+                    previous_semantic.float(), dim=-1, eps=1e-6
+                ),
+                "observation_identity": F.normalize(
+                    observed_semantic.float(), dim=-1, eps=1e-6
+                ),
                 "assignment": owners[:, : self.config.object_slots],
                 "scene_assignment": owners[:, self.config.object_slots],
                 "slot_mass": aligned_mass,

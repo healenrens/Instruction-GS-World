@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .v46_config import ObservationCompleteConfig
+from .v47_config import ObservationCompleteConfig
 
 
 @dataclass

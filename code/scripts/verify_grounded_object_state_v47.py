@@ -1,4 +1,4 @@
-"""Server gate for observation-complete object-state learning v46."""
+"""Server gate for grounded object-state learning v47."""
 
 from __future__ import annotations
 
@@ -15,16 +15,17 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
 from igsw.adaptive_gaussian_wm.frozen_video_encoder import FrozenDinoVideoRuntime  # noqa: E402
+from igsw.adaptive_gaussian_wm.length_metric_window import LengthMetricWindow  # noqa: E402
 from igsw.adaptive_gaussian_wm.observation_complete_world_model import (  # noqa: E402
     ObservationCompleteWorldModel,
 )
 from igsw.adaptive_gaussian_wm.temporal_object_dataset import (  # noqa: E402
     TEMPORAL_OBJECT_VIDEO_CONTRACT, TemporalObjectVideoDataset,
 )
-from igsw.adaptive_gaussian_wm.v46_config import (  # noqa: E402
+from igsw.adaptive_gaussian_wm.v47_config import (  # noqa: E402
     ARCHITECTURE, CHECKPOINT_VERSION, ObservationCompleteConfig,
 )
-from igsw.adaptive_gaussian_wm.v46_curriculum import curriculum_at  # noqa: E402
+from igsw.adaptive_gaussian_wm.v47_curriculum import curriculum_at  # noqa: E402
 
 
 def require(condition: bool, message: str) -> None:
@@ -70,8 +71,8 @@ def _group_gradient_norms(model) -> dict[str, float]:
             "goal" if name.startswith("goal_effect_predictor.") else "effect"
         )
         groups[group].append(parameter.grad.detach().float().square().sum())
-    require(not missing, f"v46 has unused parameters: {missing}")
-    require(not nonfinite, f"v46 has non-finite gradients: {nonfinite}")
+    require(not missing, f"v47 has unused parameters: {missing}")
+    require(not nonfinite, f"v47 has non-finite gradients: {nonfinite}")
     return {
         name: float(torch.stack(values).sum().sqrt())
         for name, values in groups.items()
@@ -128,12 +129,31 @@ def structural_contract(model, features, batch, amp_context) -> dict[str, float]
     require(state["assignment"].shape[2] == model.config.object_slots, "object count differs")
     require(state["scene_coefficients"].shape[-2] == 6, "scene decoder is not low-rank")
     require(
+        bool((state["observed_presence"] >= state["observed_visibility"]).all()),
+        "observed presence does not preserve temporarily hidden tracks",
+    )
+    require(
+        bool((state["presence"] + 1e-6 >= state["visibility"]).all()),
+        "world-state visibility exceeds presence",
+    )
+    require(
         float(output["parts"]["observation_query_count"]) == model.config.observation_queries,
         "state objective does not supervise the configured patch query count",
     )
     require(
         all(bool(torch.isfinite(value)) for value in output["parts"].values()),
-        "v46 diagnostics contain non-finite values",
+        "v47 diagnostics contain non-finite values",
+    )
+    identity_difference = maximum_difference(
+        state["predicted_identity"], state["observation_identity"]
+    )
+    require(
+        identity_difference > 1e-6,
+        "track-observation retrieval collapsed to a same-tensor comparison",
+    )
+    require(
+        float(output["parts"]["loss_masked_state"]) > 0.0,
+        "masked compact-state supervision is inactive",
     )
     return {
         "owner_partition_max_error": partition_error,
@@ -141,6 +161,11 @@ def structural_contract(model, features, batch, amp_context) -> dict[str, float]
         "effective_object_count": float(output["parts"]["object_effective_count"]),
         "observation_error": float(output["parts"]["loss_observation_complete"]),
         "scene_only_error": float(output["parts"]["diagnostic_scene_only_error"]),
+        "masked_state_loss": float(output["parts"]["loss_masked_state"]),
+        "supported_object_count": float(output["parts"]["object_supported_count"]),
+        "object_owner_fraction": float(output["parts"]["object_owner_fraction"]),
+        "presence_visibility_gap": float(output["parts"]["presence_visibility_gap"]),
+        "track_observation_identity_max_difference": identity_difference,
     }
 
 
@@ -218,10 +243,41 @@ def zero_effect_contract(model, features, batch, amp_context) -> dict[str, float
     return {"zero_effect_identity_max_error": error}
 
 
+def metric_window_contract() -> dict[str, float]:
+    window = LengthMetricWindow()
+    lengths = (8, 16, 24, 32) * 5
+    for length in lengths:
+        window.add(
+            {
+                "loss_state": float(length),
+                "track_observation_retrieval_top1": 1.0 / length,
+            },
+            float(length),
+            1.0,
+            0.8,
+        )
+    summary = window.summarize_and_reset()
+    require(summary["history_length_coverage"] == 4.0, "history telemetry lost a length")
+    require(summary["metric_window_microbatches"] == 20.0, "history telemetry window differs")
+    for length in (8, 16, 24, 32):
+        require(
+            summary[f"history_h{length}_updates"] == 5.0,
+            f"history h{length} telemetry count differs",
+        )
+        require(
+            summary[f"history_h{length}_loss_state"] == float(length),
+            f"history h{length} telemetry value differs",
+        )
+    return {
+        "history_length_coverage": summary["history_length_coverage"],
+        "history_metric_window_microbatches": summary["metric_window_microbatches"],
+    }
+
+
 def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
-        raise RuntimeError("v46 verifier requires a visible CUDA device")
+        raise RuntimeError("v47 verifier requires a visible CUDA device")
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     device = torch.device("cuda:0")
@@ -231,7 +287,11 @@ def main() -> None:
     )
     samples = [dataset[(index, args.chunk_length)] for index in range(2)]
     forbidden = {"instruction", "condition_feature", "teacher_sidecar", "segmentation", "action", "dino"}
-    require(not forbidden.intersection(samples[0]), "v46 dataset exposed forbidden supervision")
+    require(not forbidden.intersection(samples[0]), "v47 dataset exposed forbidden supervision")
+    require(
+        any(not bool(sample["observation_mask"][1:-1].all()) for sample in samples),
+        "v47 dataset did not provide a hidden interior observation",
+    )
     batch = default_collate(samples)
     batch = {
         name: value.to(device, non_blocking=True) if torch.is_tensor(value) else value
@@ -243,7 +303,7 @@ def main() -> None:
     )
     require(
         not any(parameter.requires_grad for parameter in encoder.backbone.parameters()),
-        "v46 DINO teacher is not frozen",
+        "v47 DINO teacher is not frozen",
     )
     features = encoder(batch)
     model = ObservationCompleteWorldModel(config).to(device).train()
@@ -257,14 +317,15 @@ def main() -> None:
     masked = masked_observation_contract(model, features, batch, amp_context)
     causal = causal_contract(model, features, batch, amp_context)
     identity = zero_effect_contract(model, features, batch, amp_context)
+    telemetry = metric_window_contract()
     curricula = {
         step: curriculum_at(step, config)
         for step in (0, config.state_phase_steps, config.goal_phase_steps)
     }
-    require(curricula[0].state_weight == 1.0, "v46 initial state stage differs")
-    require(curricula[config.state_phase_steps].state_weight == 0.0, "v46 state does not freeze")
-    require(curricula[config.state_phase_steps].effect_weight > 0.0, "v46 effect ramp does not start")
-    require(curricula[config.goal_phase_steps].goal_weight > 0.0, "v46 goal ramp does not start")
+    require(curricula[0].state_weight == 1.0, "v47 initial state stage differs")
+    require(curricula[config.state_phase_steps].state_weight == 0.0, "v47 state does not freeze")
+    require(curricula[config.state_phase_steps].effect_weight > 0.0, "v47 effect ramp does not start")
+    require(curricula[config.goal_phase_steps].goal_weight > 0.0, "v47 goal ramp does not start")
     report = {
         "status": "passed", "checkpoint_version": CHECKPOINT_VERSION,
         "architecture": ARCHITECTURE, "contract": TEMPORAL_OBJECT_VIDEO_CONTRACT,
@@ -275,8 +336,12 @@ def main() -> None:
         "dino_model": config.dino_model_name, "dino_fully_frozen": True,
         "dino_checkpoint": os.path.abspath(args.dino_checkpoint),
         "object_slots": config.object_slots, "scene_is_explicit_owner": True,
+        "presence_visibility_are_separate": True,
+        "identity_target": "predicted_track_to_aligned_observation",
+        "masked_compact_state_supervision": True,
+        "object_grounding_supervision": True,
         "state_freezes_before_effect_learning": True,
-        **structural, **gradients, **masked, **causal, **identity,
+        **structural, **gradients, **masked, **causal, **identity, **telemetry,
     }
     output_path = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)

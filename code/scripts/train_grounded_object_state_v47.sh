@@ -7,7 +7,7 @@ ROOT="${ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 DATA="${DATA:-${RUNTIME_ROOT}/data/rt2_visual_episodes_rgb_native_30hz_v4}"
-OUT="${OUT:-${RUNTIME_ROOT}/outputs/observation_complete_object_state_v46_seed17}"
+OUT="${OUT:-${RUNTIME_ROOT}/outputs/grounded_object_state_v47_seed17}"
 GATE_REPORT="${GATE_REPORT:-}"
 SOURCE_REVISION="${SOURCE_REVISION:-}"
 DINO_CHECKPOINT="${DINO_CHECKPOINT:-${RUNTIME_ROOT}/models/dinov2_vitl14/model.safetensors}"
@@ -15,27 +15,27 @@ PY="${VENV_ROOT}/.venv/bin/python"
 TORCHRUN="${VENV_ROOT}/.venv/bin/torchrun"
 
 if [ -n "${INIT_FROM:-}" ]; then
-  echo "[object-state-v46] INIT_FROM is forbidden; v46 trains a new state model"
+  echo "[grounded-object-state-v47] INIT_FROM is forbidden; v47 trains a new state model"
   exit 2
 fi
 if [ -z "${GATE_REPORT}" ] || [ ! -f "${GATE_REPORT}" ]; then
-  echo "[object-state-v46] GATE_REPORT is missing: ${GATE_REPORT}"
+  echo "[grounded-object-state-v47] GATE_REPORT is missing: ${GATE_REPORT}"
   exit 2
 fi
 if [ -z "${SOURCE_REVISION}" ]; then
-  echo "[object-state-v46] SOURCE_REVISION is missing"
+  echo "[grounded-object-state-v47] SOURCE_REVISION is missing"
   exit 2
 fi
 if [ ! -f "${DINO_CHECKPOINT}" ]; then
-  echo "[object-state-v46] local DINO checkpoint is missing: ${DINO_CHECKPOINT}"
+  echo "[grounded-object-state-v47] local DINO checkpoint is missing: ${DINO_CHECKPOINT}"
   exit 2
 fi
 if [ ! -x "${PY}" ] || [ ! -x "${TORCHRUN}" ]; then
-  echo "[object-state-v46] runtime is missing under ${VENV_ROOT}/.venv"
+  echo "[grounded-object-state-v47] runtime is missing under ${VENV_ROOT}/.venv"
   exit 2
 fi
 if [ ! -f "${DATA}/episode_manifest.json" ]; then
-  echo "[object-state-v46] RGB manifest is missing under ${DATA}"
+  echo "[grounded-object-state-v47] RGB manifest is missing under ${DATA}"
   exit 2
 fi
 
@@ -44,7 +44,7 @@ if [ "${NPROC_PER_NODE}" = auto ]; then
   NPROC_PER_NODE="$("${PY}" -c 'import torch; print(torch.cuda.device_count())')"
 fi
 if [ "${NPROC_PER_NODE}" -lt 1 ]; then
-  echo "[object-state-v46] no visible CUDA devices"
+  echo "[grounded-object-state-v47] no visible CUDA devices"
   exit 2
 fi
 
@@ -86,13 +86,13 @@ GRAD_ACCUM="${GRAD_ACCUM:-auto}"
 LOCAL_BATCH=$((BATCH_PER_GPU * NPROC_PER_NODE))
 if [ "${GRAD_ACCUM}" = auto ]; then
   if [ $((TARGET_GLOBAL_BATCH % LOCAL_BATCH)) -ne 0 ]; then
-    echo "[object-state-v46] target batch is not divisible by local batch"
+    echo "[grounded-object-state-v47] target batch is not divisible by local batch"
     exit 2
   fi
   GRAD_ACCUM=$((TARGET_GLOBAL_BATCH / LOCAL_BATCH))
 fi
 if [ $((BATCH_PER_GPU * NPROC_PER_NODE * GRAD_ACCUM)) -ne "${TARGET_GLOBAL_BATCH}" ]; then
-  echo "[object-state-v46] effective batch contract differs"
+  echo "[grounded-object-state-v47] effective batch contract differs"
   exit 2
 fi
 
@@ -115,22 +115,22 @@ ARGS=(
   --recovery_every "${RECOVERY_EVERY:-250}" --log_every "${LOG_EVERY:-20}"
   --seed "${SEED:-17}" --amp "${AMP:-bf16}"
   --wandb_mode "${WANDB_MODE:-online}" --wandb_project "${WANDB_PROJECT:-instruct-gs-world}"
-  --wandb_entity "${WANDB_ENTITY:-}" --wandb_name "${WANDB_NAME:-${RUN_NAME:-observation_complete_object_state_v46_seed17}}"
-  --wandb_group "${WANDB_GROUP:-observation-complete-object-state-v46}"
-  --wandb_tags "${WANDB_TAGS:-v46,pure-video,object-state,latent-effect}"
+  --wandb_entity "${WANDB_ENTITY:-}" --wandb_name "${WANDB_NAME:-${RUN_NAME:-grounded_object_state_v47_seed17}}"
+  --wandb_group "${WANDB_GROUP:-grounded-object-state-v47}"
+  --wandb_tags "${WANDB_TAGS:-v47,pure-video,object-state,latent-effect}"
   --wandb_dir "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}"
 )
 if [ -n "${RESUME:-}" ]; then ARGS+=(--resume "${RESUME}"); fi
 if [ -n "${WANDB_RUN_ID:-}" ]; then ARGS+=(--wandb_run_id "${WANDB_RUN_ID}"); fi
 if [ -n "${MAX_TRAIN_ITEMS:-}" ]; then ARGS+=(--max_train_items "${MAX_TRAIN_ITEMS}"); fi
 
-echo "[object-state-v46] root=${ROOT} data=${DATA} out=${OUT}"
-echo "[object-state-v46] world=${NPROC_PER_NODE} gpu_memory_mib=${MIN_GPU_MEMORY_MIB} batch_per_gpu=${BATCH_PER_GPU} grad_accum=${GRAD_ACCUM} effective_batch=${TARGET_GLOBAL_BATCH}"
-echo "[object-state-v46] dino_frame_batch=${DINO_FRAME_BATCH} workers_per_rank=${WORKERS_PER_RANK}"
-echo "[object-state-v46] source_revision=${SOURCE_REVISION} dino_checkpoint=${DINO_CHECKPOINT}"
+echo "[grounded-object-state-v47] root=${ROOT} data=${DATA} out=${OUT}"
+echo "[grounded-object-state-v47] world=${NPROC_PER_NODE} gpu_memory_mib=${MIN_GPU_MEMORY_MIB} batch_per_gpu=${BATCH_PER_GPU} grad_accum=${GRAD_ACCUM} effective_batch=${TARGET_GLOBAL_BATCH}"
+echo "[grounded-object-state-v47] dino_frame_batch=${DINO_FRAME_BATCH} workers_per_rank=${WORKERS_PER_RANK}"
+echo "[grounded-object-state-v47] source_revision=${SOURCE_REVISION} dino_checkpoint=${DINO_CHECKPOINT}"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 cd "${ROOT}" || exit 2
 exec "${TORCHRUN}" --standalone --nproc_per_node "${NPROC_PER_NODE}" \
-  "${ROOT}/code/scripts/train_observation_complete_object_state_v46.py" "${ARGS[@]}"
+  "${ROOT}/code/scripts/train_grounded_object_state_v47.py" "${ARGS[@]}"

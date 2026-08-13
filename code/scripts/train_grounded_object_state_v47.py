@@ -26,13 +26,13 @@ from igsw.adaptive_gaussian_wm.observation_complete_world_model import (  # noqa
 )
 from igsw.adaptive_gaussian_wm.temporal_object_dataset import TemporalObjectVideoDataset  # noqa: E402
 from igsw.adaptive_gaussian_wm.train_runtime import cosine_schedule  # noqa: E402
-from igsw.adaptive_gaussian_wm.v46_checkpointing import (  # noqa: E402
+from igsw.adaptive_gaussian_wm.v47_checkpointing import (  # noqa: E402
     restore_rng_state, validate_resume,
 )
-from igsw.adaptive_gaussian_wm.v46_config import (  # noqa: E402
+from igsw.adaptive_gaussian_wm.v47_config import (  # noqa: E402
     ARCHITECTURE, CHECKPOINT_VERSION, ObservationCompleteConfig,
 )
-from igsw.adaptive_gaussian_wm.v46_training_loop import train_v46  # noqa: E402
+from igsw.adaptive_gaussian_wm.v47_training_loop import train_v47  # noqa: E402
 from igsw.distributed import assert_same_paths, init_torchrun  # noqa: E402
 
 
@@ -74,22 +74,22 @@ def parse_args() -> argparse.Namespace:
 
 def _validate_arguments(args, world_size: int) -> None:
     if args.resume and not os.path.isfile(args.resume):
-        raise ValueError(f"v46 resume checkpoint is missing: {args.resume}")
+        raise ValueError(f"v47 resume checkpoint is missing: {args.resume}")
     if min(args.batch, args.grad_accum, args.workers + 1, args.prefetch_factor, args.dino_frame_batch) < 1:
-        raise ValueError("v46 batch, accumulation, workers and DINO batch are invalid")
+        raise ValueError("v47 batch, accumulation, workers and DINO batch are invalid")
     effective = args.batch * args.grad_accum * world_size
     if effective != args.target_global_batch:
-        raise ValueError(f"v46 effective batch {effective} != target {args.target_global_batch}")
+        raise ValueError(f"v47 effective batch {effective} != target {args.target_global_batch}")
     if not 0.0 < args.lr_floor <= args.lr:
-        raise ValueError("v46 learning-rate floor is invalid")
+        raise ValueError("v47 learning-rate floor is invalid")
     if args.steps <= 0 or args.warmup_steps < 0:
-        raise ValueError("v46 step counts are invalid")
+        raise ValueError("v47 step counts are invalid")
     if min(args.save_every, args.recovery_every, args.log_every) < 1:
-        raise ValueError("v46 save/recovery/log intervals must be positive")
+        raise ValueError("v47 save/recovery/log intervals must be positive")
     if not args.source_revision:
-        raise ValueError("v46 source revision is empty")
+        raise ValueError("v47 source revision is empty")
     if not os.path.isfile(args.dino_checkpoint):
-        raise ValueError(f"v46 local DINO checkpoint is missing: {args.dino_checkpoint}")
+        raise ValueError(f"v47 local DINO checkpoint is missing: {args.dino_checkpoint}")
     validate_wandb_arguments(args)
 
 
@@ -105,7 +105,7 @@ def _validate_gate(args) -> dict:
         if report.get(name) != value
     }
     if differences:
-        raise ValueError(f"v46 gate report differs from this run: {differences}")
+        raise ValueError(f"v47 gate report differs from this run: {differences}")
     return report
 
 
@@ -146,7 +146,7 @@ def main() -> None:
             os.path.lexists(os.path.join(args.out, "latest.pt"))
             or os.path.isfile(existing_contract)
         ):
-            raise ValueError(f"v46 output already contains a run: {args.out}")
+            raise ValueError(f"v47 output already contains a run: {args.out}")
         metadata = {
             "checkpoint_version": CHECKPOINT_VERSION,
             "architecture": ARCHITECTURE,
@@ -208,7 +208,7 @@ def main() -> None:
     })
     if context.is_main:
         print(json.dumps({
-            "event": "v46_start", "global_step": start_step,
+            "event": "v47_start", "global_step": start_step,
             "examples": len(dataset), "world_size": context.world_size,
             "micro_batch": args.batch, "grad_accum": args.grad_accum,
             "dino_frame_batch": args.dino_frame_batch, "workers_per_rank": args.workers,
@@ -216,14 +216,14 @@ def main() -> None:
             "effective_batch": args.target_global_batch,
             "checkpoint_version": CHECKPOINT_VERSION, "architecture": ARCHITECTURE,
         }, sort_keys=True), flush=True)
-    final_step = train_v46(
+    final_step = train_v47(
         model, wrapped, encoder, loader, sampler, optimizer, scheduler,
         context, args, start_step, tracker,
     )
     if tracker is not None:
         tracker.finish()
     if context.is_main:
-        print(json.dumps({"event": "v46_complete", "global_step": final_step}), flush=True)
+        print(json.dumps({"event": "v47_complete", "global_step": final_step}), flush=True)
     if context.distributed:
         dist.destroy_process_group()
 

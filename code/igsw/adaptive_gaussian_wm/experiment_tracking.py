@@ -26,6 +26,10 @@ _RUNTIME_KEYS = {
     "world_size",
     "effective_batch",
     "updates_per_epoch",
+    "chunk_length",
+    "temporal_stride",
+    "observation_fraction",
+    "metric_window_microbatches",
 }
 _SYSTEM_KEYS = {
     "peak_memory_gb",

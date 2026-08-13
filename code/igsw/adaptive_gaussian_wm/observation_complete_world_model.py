@@ -10,8 +10,8 @@ from .observation_complete_objective import observation_complete_loss
 from .observation_complete_state import ObservationCompleteObjectState
 from .v45_effect_models import ImageGoalEffectPredictor, VideoEffectPosterior
 from .v45_object_dynamics import EffectConditionedObjectDynamics
-from .v46_config import ObservationCompleteConfig
-from .v46_curriculum import curriculum_at
+from .v47_config import ObservationCompleteConfig
+from .v47_curriculum import curriculum_at
 
 
 _STATE_KEYS = (
@@ -48,7 +48,7 @@ class ObservationCompleteWorldModel(nn.Module):
         valid: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         if patches.shape[1] != 1:
-            raise ValueError("v46 image-goal encoder expects exactly one frame")
+            raise ValueError("v47 image-goal encoder expects exactly one frame")
         batch = len(patches)
         times = torch.zeros(batch, 1, device=patches.device)
         observed = torch.ones(batch, 1, dtype=torch.bool, device=patches.device)

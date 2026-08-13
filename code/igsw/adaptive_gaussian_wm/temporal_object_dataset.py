@@ -259,6 +259,11 @@ class TemporalObjectVideoDataset(Dataset):
         )
         observed[0] = True
         observed[-1] = True
+        if bool(observed[1:-1].all()):
+            hidden = 1 + _stable_integer(
+                "forced-mask", self.seed, record.manifest_index, ordinal, chunk_length
+            ) % (chunk_length - 2)
+            observed[hidden] = False
         return {
             "video_rgb": rgb,
             "video_pixel_valid": valid,

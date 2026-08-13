@@ -1,4 +1,4 @@
-"""DDP training loop for the strict v46 state-to-effect curriculum."""
+"""DDP training loop for the grounded v47 state-to-effect curriculum."""
 
 from __future__ import annotations
 
@@ -10,18 +10,19 @@ import time
 import torch
 
 from .gradient_health import clip_finite_grad_norm_, optimizer_group_grad_norms
+from .length_metric_window import LengthMetricWindow
 from .train_runtime import cuda_memory_metrics, move_to_device, reduce_metrics
-from .v46_checkpointing import collect_rng_states, save_checkpoint
-from .v46_curriculum import curriculum_at
+from .v47_checkpointing import collect_rng_states, save_checkpoint
+from .v47_curriculum import curriculum_at
 
 
 def _checkpoint_due(step: int, args) -> tuple[str, str] | None:
     milestone = args.save_every > 0 and step % args.save_every == 0
     recovery = step == 1 or (args.recovery_every > 0 and step % args.recovery_every == 0)
     if step == args.steps or milestone:
-        return os.path.join(args.out, f"v46_{step:07d}.pt"), "milestone"
+        return os.path.join(args.out, f"v47_{step:07d}.pt"), "milestone"
     if recovery:
-        return os.path.join(args.out, "v46_recovery.pt"), "recovery"
+        return os.path.join(args.out, "v47_recovery.pt"), "recovery"
     return None
 
 
@@ -38,7 +39,7 @@ def apply_curriculum_lrs(optimizer, scheduler, step: int, config) -> None:
         group["lr"] = scheduled[index] if active else 0.0
 
 
-def train_v46(
+def train_v47(
     model, wrapped, encoder, loader, sampler, optimizer, scheduler,
     context, args, start_step: int, tracker,
 ) -> int:
@@ -52,13 +53,14 @@ def train_v46(
     usable_batches = len(loader) // args.grad_accum * args.grad_accum
     updates_per_epoch = usable_batches // args.grad_accum
     if updates_per_epoch < 1:
-        raise ValueError("v46 loader cannot supply one optimizer update")
+        raise ValueError("v47 loader cannot supply one optimizer update")
     epoch, update_offset = divmod(start_step, updates_per_epoch)
     resume_batch_offset = update_offset * args.grad_accum
     direct_seek = bool(getattr(sampler, "supports_start_index", False))
     log_path = os.path.join(args.out, "train.jsonl")
     started = time.time()
     step = int(start_step)
+    metric_window = LengthMetricWindow()
     apply_curriculum_lrs(optimizer, scheduler, step, model.config)
     optimizer.zero_grad(set_to_none=True)
     while step < args.steps:
@@ -67,7 +69,8 @@ def train_v46(
         if direct_seek:
             sampler.set_start_index(resume_batch_offset * args.batch)
             direct_batch_offset = resume_batch_offset
-        accumulated: dict[str, torch.Tensor] = {}
+        by_length: dict[int, dict[str, torch.Tensor]] = {}
+        length_counts: dict[int, int] = {}
         micro_count = 0
         for batch_index, cpu_batch in enumerate(loader):
             if not direct_seek and batch_index < resume_batch_offset:
@@ -87,8 +90,20 @@ def train_v46(
                 )
                 loss = result["loss"] / args.grad_accum
             loss.backward()
+            length = int(batch["chunk_length"][0])
+            length_parts = by_length.setdefault(length, {})
             for name, value in result["parts"].items():
-                accumulated[name] = accumulated.get(name, value.detach() * 0.0) + value.detach()
+                length_parts[name] = (
+                    length_parts.get(name, value.detach() * 0.0) + value.detach()
+                )
+            for name, value in (
+                ("_temporal_stride", batch["temporal_stride"].float().mean()),
+                ("_observation_fraction", batch["observation_mask"].float().mean()),
+            ):
+                length_parts[name] = (
+                    length_parts.get(name, value.detach() * 0.0) + value.detach()
+                )
+            length_counts[length] = length_counts.get(length, 0) + 1
             if not synchronize:
                 continue
             collect = step == start_step or (step + 1) % args.log_every == 0
@@ -99,15 +114,30 @@ def train_v46(
             step += 1
             apply_curriculum_lrs(optimizer, scheduler, step, model.config)
             optimizer.zero_grad(set_to_none=True)
-            metrics = reduce_metrics(
-                {name: value / args.grad_accum for name, value in accumulated.items()},
-                context.world_size,
+            reduced_group_norms = (
+                reduce_metrics(group_norms, context.world_size) if group_norms else {}
             )
-            if group_norms:
-                metrics.update(reduce_metrics(group_norms, context.world_size))
-            accumulated = {}
             micro_count = 0
+            for length, length_parts in sorted(by_length.items()):
+                count = length_counts[length]
+                length_metrics = reduce_metrics(
+                    {name: value / count for name, value in length_parts.items()},
+                    context.world_size,
+                )
+                temporal_stride = length_metrics.pop("_temporal_stride")
+                observation_fraction = length_metrics.pop("_observation_fraction")
+                if context.is_main:
+                    metric_window.add(
+                        length_metrics,
+                        float(length),
+                        temporal_stride,
+                        observation_fraction,
+                        count,
+                    )
+            by_length = {}
+            length_counts = {}
             if context.is_main and (step == 1 or step % args.log_every == 0 or step == args.steps):
+                window_metrics = metric_window.summarize_and_reset()
                 effective_batch = args.batch * context.world_size * args.grad_accum
                 elapsed = max(time.time() - started, 1e-6)
                 completed = max(step - start_step, 1)
@@ -127,10 +157,8 @@ def train_v46(
                     "world_size": context.world_size,
                     "effective_batch": effective_batch,
                     "updates_per_epoch": updates_per_epoch,
-                    "chunk_length": float(batch["chunk_length"].float().mean()),
-                    "temporal_stride": float(batch["temporal_stride"].float().mean()),
-                    "observation_fraction": float(batch["observation_mask"].float().mean()),
-                    **metrics,
+                    **window_metrics,
+                    **reduced_group_norms,
                 }
                 record.update({
                     f"lr_{group.get('group_name', index)}": group["lr"]
