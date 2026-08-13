@@ -67,6 +67,8 @@ class ObservationCompleteConfig:
             raise ValueError("association Sinkhorn iterations must be positive")
         if self.identity_temperature <= 0.0:
             raise ValueError("identity temperature must be positive")
+        if self.object_gain_margin <= 0.0:
+            raise ValueError("object gain margin must be positive")
         if self.presence_half_life_seconds <= 0.0:
             raise ValueError("presence half-life must be positive")
         if not 0 < self.state_phase_steps < self.goal_phase_steps < self.total_steps:
