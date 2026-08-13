@@ -200,10 +200,10 @@ class ObservationCompleteObjectState(nn.Module):
         ) / denominator[..., None].to(patches.dtype)
         center = torch.einsum(
             "bkn,bnd->bkd", support, coordinates.float()
-        ) / denominator[..., None]
+        ).float() / denominator[..., None]
         offset = coordinates[:, None].float() - center[:, :, None]
         log_scale = 0.5 * torch.log(
-            torch.einsum("bkn,bknd->bkd", support, offset.square())
+            torch.einsum("bkn,bknd->bkd", support, offset.square()).float()
             / denominator[..., None]
             + 1e-3
         )
@@ -271,11 +271,15 @@ class ObservationCompleteObjectState(nn.Module):
             )
             weights = association.normalized_transport
             aligned_slots = align_slots(weights, candidate_slots)
-            aligned_center = align_slots(weights, candidate_center)
-            aligned_scale = align_slots(weights, candidate_scale)
-            aligned_activity = align_scalars(weights, activity)
-            aligned_mass = align_scalars(weights, candidate_mass)
-            correction = association.match_probability * aligned_activity * observed[:, None]
+            aligned_center = align_slots(weights, candidate_center).float()
+            aligned_scale = align_slots(weights, candidate_scale).float()
+            aligned_activity = align_scalars(weights, activity).float()
+            aligned_mass = align_scalars(weights, candidate_mass).float()
+            correction = (
+                association.match_probability.float()
+                * aligned_activity
+                * observed[:, None].float()
+            )
             previous_semantic, previous_dynamic = predicted_slots.split(
                 (self.config.semantic_dim, self.config.dynamic_dim), dim=-1
             )
