@@ -62,6 +62,7 @@ _DIAGNOSTIC_PREFIXES = (
     "goal_",
     "history_h",
     "region_",
+    "slot_",
     "temporal_",
     "dino_",
     "diagnostic_",
