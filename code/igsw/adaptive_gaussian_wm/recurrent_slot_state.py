@@ -84,25 +84,31 @@ class SlotTemporalPredictor(nn.Module):
         )
 
     def forward(self, slots: torch.Tensor, delta_time: torch.Tensor) -> torch.Tensor:
-        dt = delta_time.float().clamp_min(0.0)
-        time_features = torch.stack(
-            (
-                torch.log1p(dt),
-                torch.sin(dt),
-                torch.cos(dt),
-                torch.sin(0.25 * dt),
-                torch.cos(0.25 * dt),
-            ),
-            dim=-1,
-        ).to(slots.dtype)
-        predicted = slots + self.time(time_features)[:, None]
-        normalized = self.norm_attention(predicted)
-        attended, _ = self.attention(
-            normalized, normalized, normalized, need_weights=False
-        )
-        predicted = predicted + attended
-        predicted = predicted + self.mlp(self.norm_mlp(predicted))
-        return stable_rms_normalize(predicted)
+        input_dtype = slots.dtype
+        with torch.autocast(device_type=slots.device.type, enabled=False):
+            slots_float = slots.float()
+            dt = delta_time.float().clamp_min(0.0)
+            time_features = torch.stack(
+                (
+                    torch.log1p(dt),
+                    torch.sin(dt),
+                    torch.cos(dt),
+                    torch.sin(0.25 * dt),
+                    torch.cos(0.25 * dt),
+                ),
+                dim=-1,
+            )
+            time_update = 0.25 * torch.tanh(self.time(time_features))
+            predicted = slots_float + time_update[:, None]
+            normalized = self.norm_attention(predicted)
+            attended, _ = self.attention(
+                normalized, normalized, normalized, need_weights=False
+            )
+            predicted = predicted + 0.25 * torch.tanh(attended)
+            mlp_update = self.mlp(self.norm_mlp(predicted))
+            predicted = predicted + 0.25 * torch.tanh(mlp_update)
+            predicted = stable_rms_normalize(predicted)
+        return predicted.to(input_dtype)
 
 
 class RecurrentSlotAttention(nn.Module):
@@ -134,36 +140,37 @@ class RecurrentSlotAttention(nn.Module):
         inputs: torch.Tensor,
         valid: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        keys = self.key(self.norm_inputs(inputs))
-        values = self.value(self.norm_inputs(inputs))
-        slots = predicted
-        attention = None
-        for _ in range(self.config.slot_iterations):
-            queries = self.query(self.norm_slots(slots))
-            logits = torch.einsum("bkd,bnd->bkn", queries, keys)
-            logits = logits / self.config.slot_dim**0.5
-            logits = logits.float().masked_fill(~valid[:, None], -1e4)
-            competition = logits.softmax(dim=1) * valid[:, None].float()
-            normalized, correction_support = evidence_normalized_attention(competition)
-            updates = torch.einsum(
-                "bkn,bnd->bkd", normalized.to(values.dtype), values
-            )
-            previous = slots
-            candidate = self.update(
-                updates.flatten(0, 1), previous.flatten(0, 1)
-            ).reshape_as(previous)
-            candidate = candidate + self.update_mlp(self.norm_update(candidate))
-            candidate = candidate.to(previous.dtype)
-            slots = torch.lerp(
-                previous,
-                candidate,
-                correction_support.to(candidate.dtype),
-            )
-            slots = stable_rms_normalize(slots)
-            attention = competition.transpose(1, 2)
+        input_dtype = predicted.dtype
+        with torch.autocast(device_type=predicted.device.type, enabled=False):
+            normalized_inputs = self.norm_inputs(inputs.float())
+            keys = self.key(normalized_inputs)
+            values = self.value(normalized_inputs)
+            slots = predicted.float()
+            attention = None
+            for _ in range(self.config.slot_iterations):
+                queries = self.query(self.norm_slots(slots))
+                logits = torch.einsum("bkd,bnd->bkn", queries, keys)
+                logits = logits / self.config.slot_dim**0.5
+                logits = logits.masked_fill(~valid[:, None], -1e4)
+                competition = logits.softmax(dim=1) * valid[:, None].float()
+                normalized, correction_support = evidence_normalized_attention(
+                    competition
+                )
+                updates = torch.einsum("bkn,bnd->bkd", normalized, values)
+                previous = slots
+                candidate = self.update(
+                    updates.flatten(0, 1), previous.flatten(0, 1)
+                ).reshape_as(previous)
+                refinement = self.update_mlp(self.norm_update(candidate))
+                candidate = stable_rms_normalize(
+                    candidate + 0.25 * torch.tanh(refinement)
+                )
+                slots = torch.lerp(previous, candidate, correction_support)
+                slots = stable_rms_normalize(slots)
+                attention = competition.transpose(1, 2)
         if attention is None:
             raise RuntimeError("slot correction produced no attention")
-        return slots, attention
+        return slots.to(input_dtype), attention
 
     def forward(
         self,
@@ -189,7 +196,12 @@ class RecurrentSlotAttention(nn.Module):
         previous_time = frame_times[:, 0]
         for index in range(frames):
             delta = frame_times[:, index] - previous_time if index else torch.zeros_like(previous_time)
-            predicted = self.predictor(slots, delta)
+            if index == 0:
+                predicted = stable_rms_normalize(slots)
+            else:
+                # One-step truncated credit assignment preserves the recurrent
+                # state while preventing 32-frame Jacobian multiplication.
+                predicted = self.predictor(slots.detach(), delta)
             inputs = self.adapter(patches[:, index], coordinates[:, index])
             corrected, assignment = self._correct(predicted, inputs, valid[:, index])
             observed = observation_mask[:, index, None, None]

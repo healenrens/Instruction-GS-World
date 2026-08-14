@@ -150,6 +150,49 @@ def numerical_stability_contract(device: torch.device) -> dict[str, float]:
     }
 
 
+def long_sequence_gradient_contract(
+    model, features, amp_context
+) -> dict[str, float]:
+    frames = 32
+    source_frames = features.patches.shape[1]
+    repeats = (frames + source_frames - 1) // source_frames
+    patches = features.patches.repeat(1, repeats, 1, 1)[:, :frames]
+    coordinates = features.coordinates.repeat(1, repeats, 1, 1)[:, :frames]
+    valid = features.valid.repeat(1, repeats, 1)[:, :frames]
+    frame_times = torch.arange(
+        frames, device=patches.device, dtype=torch.float32
+    )[None].expand(len(patches), -1) / 30.0
+    observation_mask = torch.ones(
+        len(patches), frames, device=patches.device, dtype=torch.bool
+    )
+    observation_mask[:, 4::5] = False
+    model.zero_grad(set_to_none=True)
+    with amp_context():
+        output = model(
+            patches, coordinates, valid, frame_times, observation_mask
+        )
+    require(bool(torch.isfinite(output["loss"])), "long v48 loss is non-finite")
+    output["loss"].backward()
+    predictor_gradients = [
+        parameter.grad
+        for name, parameter in model.named_parameters()
+        if name.startswith("state_encoder.predictor.") and parameter.grad is not None
+    ]
+    require(predictor_gradients, "long v48 path did not train the predictor")
+    predictor_max = max(float(gradient.abs().max()) for gradient in predictor_gradients)
+    require(
+        bool(torch.isfinite(torch.tensor(predictor_max))),
+        "long v48 predictor gradient is non-finite",
+    )
+    preclip = clip_finite_grad_norm_(model.named_parameters(), 5.0)
+    model.zero_grad(set_to_none=True)
+    return {
+        "long_sequence_frames": float(frames),
+        "long_sequence_gradient_norm": float(preclip),
+        "long_sequence_predictor_gradient_max": predictor_max,
+    }
+
+
 @torch.no_grad()
 def structural_contract(model, features, batch, amp_context) -> dict[str, float]:
     with amp_context():
@@ -387,6 +430,7 @@ def main() -> None:
     structural = structural_contract(model, features, batch, amp_context)
     gradients = gradient_contract(model, features, batch, amp_context)
     numerical = numerical_stability_contract(device)
+    long_sequence = long_sequence_gradient_contract(model, features, amp_context)
     model.eval()
     causal = causal_prefix_contract(model, features, batch, amp_context)
     masked = masked_frame_contract(model, features, batch, amp_context)
@@ -416,6 +460,7 @@ def main() -> None:
         **structural,
         **gradients,
         **numerical,
+        **long_sequence,
         **causal,
         **masked,
         **temporal,
