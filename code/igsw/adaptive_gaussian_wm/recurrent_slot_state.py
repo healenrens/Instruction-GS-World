@@ -153,6 +153,7 @@ class RecurrentSlotAttention(nn.Module):
                 updates.flatten(0, 1), previous.flatten(0, 1)
             ).reshape_as(previous)
             candidate = candidate + self.update_mlp(self.norm_update(candidate))
+            candidate = candidate.to(previous.dtype)
             slots = torch.lerp(
                 previous,
                 candidate,
