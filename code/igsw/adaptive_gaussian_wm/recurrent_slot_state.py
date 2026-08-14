@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .stable_normalization import stable_rms_normalize
 from .v48_config import SlotContrastConfig
 
 
@@ -23,6 +24,16 @@ def _coordinate_basis(coordinates: torch.Tensor) -> torch.Tensor:
             )
         )
     return torch.stack(values, dim=-1)
+
+
+def evidence_normalized_attention(
+    competition: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Average supported patches without amplifying sub-patch slot mass."""
+    mass = competition.sum(dim=2, keepdim=True)
+    normalized = competition / mass.clamp_min(1.0)
+    correction_support = mass.clamp(max=1.0)
+    return normalized, correction_support
 
 
 class FrozenFeatureAdapter(nn.Module):
@@ -90,7 +101,8 @@ class SlotTemporalPredictor(nn.Module):
             normalized, normalized, normalized, need_weights=False
         )
         predicted = predicted + attended
-        return predicted + self.mlp(self.norm_mlp(predicted))
+        predicted = predicted + self.mlp(self.norm_mlp(predicted))
+        return stable_rms_normalize(predicted)
 
 
 class RecurrentSlotAttention(nn.Module):
@@ -132,15 +144,21 @@ class RecurrentSlotAttention(nn.Module):
             logits = logits / self.config.slot_dim**0.5
             logits = logits.float().masked_fill(~valid[:, None], -1e4)
             competition = logits.softmax(dim=1) * valid[:, None].float()
-            normalized = competition / competition.sum(dim=2, keepdim=True).clamp_min(1e-6)
+            normalized, correction_support = evidence_normalized_attention(competition)
             updates = torch.einsum(
                 "bkn,bnd->bkd", normalized.to(values.dtype), values
             )
             previous = slots
-            slots = self.update(
+            candidate = self.update(
                 updates.flatten(0, 1), previous.flatten(0, 1)
             ).reshape_as(previous)
-            slots = slots + self.update_mlp(self.norm_update(slots))
+            candidate = candidate + self.update_mlp(self.norm_update(candidate))
+            slots = torch.lerp(
+                previous,
+                candidate,
+                correction_support.to(candidate.dtype),
+            )
+            slots = stable_rms_normalize(slots)
             attention = competition.transpose(1, 2)
         if attention is None:
             raise RuntimeError("slot correction produced no attention")

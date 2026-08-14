@@ -12,6 +12,9 @@ import torch.distributed as dist
 from .v48_config import ARCHITECTURE, CHECKPOINT_VERSION
 
 
+NUMERICAL_STABILITY_PARENT = "5a2a3fa530305ec86918d31f68af2ece9c76bca9"
+
+
 def collect_rng_states(context) -> list[dict]:
     device = torch.device(context.device)
     local = {
@@ -54,7 +57,7 @@ def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
         "data", "chunk_lengths", "temporal_strides",
         "observation_mask_probability", "batch", "grad_accum",
         "target_global_batch", "workers", "prefetch_factor",
-        "dino_frame_batch", "dino_checkpoint", "source_revision",
+        "dino_frame_batch", "dino_checkpoint",
         "steps", "lr", "lr_floor", "weight_decay", "warmup_steps",
         "seed", "amp",
     )
@@ -65,6 +68,16 @@ def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
     }
     if differences:
         raise ValueError(f"v48 resume-critical arguments differ: {differences}")
+    saved_revision = saved.get("source_revision", "")
+    compatible_revision = (
+        saved_revision == args.source_revision
+        or saved_revision == NUMERICAL_STABILITY_PARENT
+    )
+    if not compatible_revision:
+        raise ValueError(
+            "v48 resume source revision is not the current revision or the "
+            "declared numerical-stability parent"
+        )
 
 
 def save_checkpoint(

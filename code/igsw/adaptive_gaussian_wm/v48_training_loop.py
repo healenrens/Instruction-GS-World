@@ -9,7 +9,11 @@ import time
 
 import torch
 
-from .gradient_health import clip_finite_grad_norm_, optimizer_group_grad_norms
+from .gradient_health import (
+    clip_finite_grad_norm_,
+    optimizer_group_grad_norms,
+    parameter_prefix_grad_norms,
+)
 from .train_runtime import cuda_memory_metrics, move_to_device, reduce_metrics
 from .v48_checkpointing import collect_rng_states, save_checkpoint
 
@@ -135,6 +139,27 @@ def train_v48(
                 continue
             collect = step == start_step or (step + 1) % args.log_every == 0
             group_norms = optimizer_group_grad_norms(optimizer) if collect else {}
+            if collect:
+                group_norms.update(
+                    parameter_prefix_grad_norms(
+                        model.named_parameters(),
+                        {
+                            "state_adapter": ("state_encoder.adapter.",),
+                            "state_predictor": ("state_encoder.predictor.",),
+                            "slot_corrector": (
+                                "state_encoder.initial_slots",
+                                "state_encoder.norm_",
+                                "state_encoder.query.",
+                                "state_encoder.key.",
+                                "state_encoder.value.",
+                                "state_encoder.update.",
+                                "state_encoder.update_mlp.",
+                            ),
+                            "slot_decoder": ("decoder.",),
+                            "contrast_projector": ("contrast_projector.",),
+                        },
+                    )
+                )
             grad_norm = clip_finite_grad_norm_(model.named_parameters(), args.max_grad_norm)
             optimizer.step()
             scheduler.step()
@@ -157,6 +182,9 @@ def train_v48(
                     "samples_seen": step * effective_batch,
                     "lr": scheduler.get_last_lr()[0],
                     "grad_norm": float(grad_norm),
+                    "grad_clip_coefficient": min(
+                        1.0, args.max_grad_norm / max(float(grad_norm), 1e-12)
+                    ),
                     "steps_per_second": completed / elapsed,
                     "samples_per_second": effective_batch * completed / elapsed,
                     "wall_time_seconds": elapsed,

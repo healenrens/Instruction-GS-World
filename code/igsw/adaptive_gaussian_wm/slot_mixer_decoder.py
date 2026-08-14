@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .recurrent_slot_state import _coordinate_basis
+from .stable_normalization import stable_unit_normalize
 from .v48_config import SlotContrastConfig
 
 
@@ -86,5 +86,5 @@ class PositionConditionedSlotMixer(nn.Module):
             query, assignment = layer(query, slots, slot_valid)
         if assignment is None:
             raise RuntimeError("SlotMixer produced no assignment")
-        decoded = F.normalize(self.output(query).float(), dim=-1, eps=1e-6)
+        decoded = stable_unit_normalize(self.output(query))
         return decoded, assignment.float()

@@ -18,8 +18,21 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 from igsw.adaptive_gaussian_wm.frozen_video_encoder import (  # noqa: E402
     FrozenDinoVideoRuntime,
 )
+from igsw.adaptive_gaussian_wm.gradient_health import (  # noqa: E402
+    clip_finite_grad_norm_,
+)
+from igsw.adaptive_gaussian_wm.recurrent_slot_state import (  # noqa: E402
+    evidence_normalized_attention,
+)
 from igsw.adaptive_gaussian_wm.slot_contrast_world_model import (  # noqa: E402
     SlotContrastObjectWorldModel,
+)
+from igsw.adaptive_gaussian_wm.slot_contrast_objective import (  # noqa: E402
+    temporal_slot_contrast,
+)
+from igsw.adaptive_gaussian_wm.stable_normalization import (  # noqa: E402
+    stable_rms_normalize,
+    stable_unit_normalize,
 )
 from igsw.adaptive_gaussian_wm.temporal_object_dataset import (  # noqa: E402
     TEMPORAL_OBJECT_VIDEO_CONTRACT,
@@ -85,6 +98,56 @@ def gradient_contract(model, features, batch, amp_context) -> dict[str, float]:
     }
     model.zero_grad(set_to_none=True)
     return metrics
+
+
+def numerical_stability_contract(device: torch.device) -> dict[str, float]:
+    tiny = torch.full((4, 128), 1e-30, device=device, requires_grad=True)
+    stable_unit_normalize(tiny).sum().backward()
+    require(bool(torch.isfinite(tiny.grad).all()), "tiny-vector normalization gradient failed")
+
+    recurrent = torch.full((4, 256), 1e30, device=device, requires_grad=True)
+    bounded = stable_rms_normalize(recurrent)
+    bounded.sum().backward()
+    bounded_rms = bounded.float().square().mean(dim=-1).sqrt()
+    require(bool(torch.isfinite(recurrent.grad).all()), "recurrent RMS gradient failed")
+    require(float(bounded_rms.max()) <= 1.001, "recurrent RMS normalization failed")
+
+    competition = torch.tensor(
+        [[[1e-30, 1e-30], [0.5, 0.5]]],
+        device=device,
+        requires_grad=True,
+    )
+    normalized, support = evidence_normalized_attention(competition)
+    (normalized.sum() + support.sum()).backward()
+    require(
+        bool(torch.isfinite(competition.grad).all()),
+        "low-evidence slot normalization gradient failed",
+    )
+
+    parameter = torch.nn.Parameter(torch.zeros(4, device=device))
+    parameter.grad = torch.full_like(parameter, 1e30)
+    preclip = clip_finite_grad_norm_((("synthetic", parameter),), 5.0)
+    postclip = torch.linalg.vector_norm(parameter.grad.double())
+    require(bool(torch.isfinite(preclip)), "stable clipping returned a non-finite norm")
+    require(float(postclip) <= 5.001, "stable clipping exceeded its bound")
+
+    identities = torch.eye(4, device=device)[:2]
+    projected = identities[None, None].expand(1, 4, 2, 4).contiguous()
+    activity = torch.ones(1, 4, 2, device=device)
+    contrast_loss, retrieval = temporal_slot_contrast(
+        projected, activity, 0.02, 0.1
+    )
+    require(bool(torch.isfinite(contrast_loss)), "multi-positive contrast is non-finite")
+    require(float(retrieval) == 1.0, "multi-positive identity retrieval failed")
+    return {
+        "tiny_normalization_gradient_max": float(tiny.grad.abs().max()),
+        "recurrent_state_rms_max": float(bounded_rms.max()),
+        "low_evidence_gradient_max": float(competition.grad.abs().max()),
+        "huge_finite_preclip_norm": float(preclip),
+        "huge_finite_postclip_norm": float(postclip),
+        "multi_positive_contrast_loss": float(contrast_loss),
+        "multi_positive_retrieval_top1": float(retrieval),
+    }
 
 
 @torch.no_grad()
@@ -323,6 +386,7 @@ def main() -> None:
     )
     structural = structural_contract(model, features, batch, amp_context)
     gradients = gradient_contract(model, features, batch, amp_context)
+    numerical = numerical_stability_contract(device)
     model.eval()
     causal = causal_prefix_contract(model, features, batch, amp_context)
     masked = masked_frame_contract(model, features, batch, amp_context)
@@ -351,6 +415,7 @@ def main() -> None:
         "core_objective": "frozen_dino_reconstruction_plus_temporal_slot_contrast",
         **structural,
         **gradients,
+        **numerical,
         **causal,
         **masked,
         **temporal,

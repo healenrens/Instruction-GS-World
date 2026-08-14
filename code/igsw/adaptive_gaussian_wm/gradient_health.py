@@ -4,6 +4,23 @@ from __future__ import annotations
 import torch
 
 
+def _stable_total_norm(gradients: list[torch.Tensor]) -> torch.Tensor:
+    if not gradients:
+        raise RuntimeError("no gradients were produced")
+    maximum = torch.stack(
+        [gradient.detach().abs().max().float() for gradient in gradients]
+    ).max()
+    if float(maximum) == 0.0:
+        return maximum.double()
+    scaled_squares = torch.stack(
+        [
+            (gradient.detach().float() / maximum).square().sum()
+            for gradient in gradients
+        ]
+    )
+    return maximum.double() * scaled_squares.double().sum().sqrt()
+
+
 @torch.no_grad()
 def optimizer_group_grad_norms(
     optimizer: torch.optim.Optimizer,
@@ -12,15 +29,37 @@ def optimizer_group_grad_norms(
     result = {}
     for index, group in enumerate(optimizer.param_groups):
         gradients = [
-            parameter.grad.detach().float().norm(2)
+            parameter.grad
             for parameter in group["params"]
             if parameter.grad is not None
         ]
         if not gradients:
             continue
-        norm = torch.stack(gradients).square().sum().sqrt()
+        norm = _stable_total_norm(gradients)
         name = group.get("group_name", str(index))
         result[f"grad_norm_{name}"] = norm
+    return result
+
+
+@torch.no_grad()
+def parameter_prefix_grad_norms(
+    named_parameters,
+    groups: dict[str, tuple[str, ...]],
+) -> dict[str, torch.Tensor]:
+    entries = [
+        (name, parameter.grad)
+        for name, parameter in named_parameters
+        if parameter.grad is not None
+    ]
+    result = {}
+    for group_name, prefixes in groups.items():
+        gradients = [
+            gradient
+            for name, gradient in entries
+            if name.startswith(prefixes)
+        ]
+        if gradients:
+            result[f"grad_norm_{group_name}"] = _stable_total_norm(gradients)
     return result
 
 
@@ -49,8 +88,11 @@ def clip_finite_grad_norm_(
         raise RuntimeError(
             "non-finite gradients in parameters: " + ", ".join(offenders)
         )
-    return torch.nn.utils.clip_grad_norm_(
-        [parameter for _, parameter in entries],
-        max_norm,
-        error_if_nonfinite=True,
-    )
+    gradients = [parameter.grad for _, parameter in entries]
+    total_norm = _stable_total_norm(gradients)
+    if not bool(torch.isfinite(total_norm)):
+        raise RuntimeError("finite gradients produced a non-finite stable total norm")
+    coefficient = (max_norm / total_norm.clamp_min(1e-12)).clamp(max=1.0)
+    for gradient in gradients:
+        gradient.mul_(coefficient.to(device=gradient.device, dtype=gradient.dtype))
+    return total_norm

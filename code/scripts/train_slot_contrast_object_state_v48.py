@@ -178,6 +178,9 @@ def main() -> None:
             "explicit_action_used": False,
             "instance_segmentation_used": False,
             "dino_fully_frozen": True,
+            "resumed_from_git_commit": (
+                checkpoint.get("git_commit") if checkpoint is not None else None
+            ),
             "config": config.to_dict(),
             "args": vars(args),
             "gate": gate,
@@ -244,6 +247,9 @@ def main() -> None:
             "architecture": ARCHITECTURE,
             "git_commit": args.git_commit,
             "historical_checkpoint_used": False,
+            "resumed_from_git_commit": (
+                checkpoint.get("git_commit") if checkpoint is not None else None
+            ),
             **config.to_dict(),
             **vars(args),
         },

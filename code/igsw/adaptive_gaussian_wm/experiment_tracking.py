@@ -18,6 +18,7 @@ _PROGRESS_KEYS = {
 _RUNTIME_KEYS = {
     "lr",
     "grad_norm",
+    "grad_clip_coefficient",
     "steps_per_second",
     "samples_per_second",
     "wall_time_seconds",
@@ -110,7 +111,7 @@ def _write_run_id(path: str, run_id: str) -> None:
 def _metric_name(name: str) -> str:
     if name in _PROGRESS_KEYS:
         return f"progress/{name}"
-    if name in _RUNTIME_KEYS or name.startswith("lr_"):
+    if name in _RUNTIME_KEYS or name.startswith(("lr_", "grad_norm_")):
         return f"runtime/{name}"
     if name in _SYSTEM_KEYS:
         return f"system/{name}"
