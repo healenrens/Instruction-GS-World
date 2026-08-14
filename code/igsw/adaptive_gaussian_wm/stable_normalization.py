@@ -14,8 +14,12 @@ def stable_unit_normalize(
         raise ValueError("minimum normalization norm must be positive")
     value_float = value.float()
     scale = value_float.abs().amax(dim=-1, keepdim=True).clamp_min(minimum_norm)
-    norm = scale * (value_float / scale).square().sum(dim=-1, keepdim=True).sqrt()
-    return value_float / norm.clamp_min(minimum_norm)
+    scaled_floor = minimum_norm / scale
+    norm = scale * (
+        (value_float / scale).square().sum(dim=-1, keepdim=True)
+        + scaled_floor.square()
+    ).sqrt()
+    return value_float / norm
 
 
 def stable_rms_normalize(
@@ -27,5 +31,9 @@ def stable_rms_normalize(
         raise ValueError("minimum RMS must be positive")
     value_float = value.float()
     scale = value_float.abs().amax(dim=-1, keepdim=True).clamp_min(minimum_rms)
-    rms = scale * (value_float / scale).square().mean(dim=-1, keepdim=True).sqrt()
-    return (value_float / rms.clamp_min(minimum_rms)).to(value.dtype)
+    scaled_floor = minimum_rms / scale
+    rms = scale * (
+        (value_float / scale).square().mean(dim=-1, keepdim=True)
+        + scaled_floor.square()
+    ).sqrt()
+    return (value_float / rms).to(value.dtype)
