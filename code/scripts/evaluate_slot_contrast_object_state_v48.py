@@ -40,6 +40,10 @@ from igsw.adaptive_gaussian_wm.v48_cross_episode_evaluation import (  # noqa: E4
 from igsw.adaptive_gaussian_wm.v48_eval_visualization import (  # noqa: E402
     save_assignment_visualizations,
 )
+from igsw.adaptive_gaussian_wm.v48_evaluation_tracking import (  # noqa: E402
+    add_evaluation_wandb_arguments,
+    init_evaluation_tracker,
+)
 from igsw.adaptive_gaussian_wm.v48_held_metrics import (  # noqa: E402
     base_state_metrics,
     encode_fully_observed,
@@ -79,6 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temporal_strides", default="1,2,3,4")
     parser.add_argument("--cross_episode_pairs", type=int, default=2000)
     parser.add_argument("--qualitative_items", type=int, default=8)
+    add_evaluation_wandb_arguments(parser)
     return parser.parse_args()
 
 
@@ -374,6 +379,7 @@ def main() -> None:
         else nullcontext
     )
     group_lookup = _group_id_lookup(dataset)
+    tracker = init_evaluation_tracker(args, checkpoint, chunk_lengths)
     by_length = {}
     for chunk_length in chunk_lengths:
         print(
@@ -387,7 +393,7 @@ def main() -> None:
             ),
             flush=True,
         )
-        by_length[str(chunk_length)] = evaluate_length(
+        result = evaluate_length(
             model,
             encoder,
             dataset,
@@ -397,6 +403,9 @@ def main() -> None:
             device,
             amp_context,
         )
+        by_length[str(chunk_length)] = result
+        if tracker is not None:
+            tracker.log_length(args.split, chunk_length, result)
     all_checks = [
         value for length in by_length.values() for value in length["checks"].values()
     ]
@@ -428,6 +437,8 @@ def main() -> None:
         json.dump(report, handle, indent=2, sort_keys=True)
         handle.write("\n")
     os.replace(temporary, output_path)
+    if tracker is not None:
+        tracker.finish(report, output_path)
     print(json.dumps(report, sort_keys=True), flush=True)
 
 

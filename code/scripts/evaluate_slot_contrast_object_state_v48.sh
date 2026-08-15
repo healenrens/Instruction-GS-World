@@ -11,6 +11,14 @@ CHECKPOINT="${CHECKPOINT:-${RUNTIME_ROOT}/outputs/slot_contrast_object_state_v48
 DINO_CHECKPOINT="${DINO_CHECKPOINT:-${RUNTIME_ROOT}/models/dinov2_vitl14/model.safetensors}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${RUNTIME_ROOT}/outputs/v48_held_object_state}"
 PY="${VENV_ROOT}/.venv/bin/python"
+WANDB_MODE="${WANDB_MODE:-online}"
+WANDB_PROJECT="${WANDB_PROJECT:-instruct-gs-world}"
+WANDB_ENTITY="${WANDB_ENTITY:-healenrenss-university-of-chinese-acadmic-and-science}"
+WANDB_GROUP="${WANDB_GROUP:-v48-held-object-state-evaluation}"
+WANDB_NAME_PREFIX="${WANDB_NAME_PREFIX:-v48-held-object-state}"
+WANDB_TAGS="${WANDB_TAGS:-v48,held-evaluation,object-state}"
+WANDB_DIR="${WANDB_DIR:-${OUTPUT_ROOT}/wandb}"
+WANDB_SOURCE_RUN="${WANDB_SOURCE_RUN:-healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world/l1eu5wr3}"
 
 if [ ! -x "${PY}" ]; then
   echo "[v48-held] Python runtime is missing: ${PY}"
@@ -35,6 +43,7 @@ export HF_DATASETS_OFFLINE=1
 export PYTHONUNBUFFERED=1
 
 mkdir -p "${OUTPUT_ROOT}"
+mkdir -p "${WANDB_DIR}"
 IFS=',' read -r -a REQUESTED_SPLITS <<< "${SPLITS:-heldseed,heldtask}"
 for SPLIT in "${REQUESTED_SPLITS[@]}"; do
   REPORT="${OUTPUT_ROOT}/${SPLIT}.json"
@@ -56,7 +65,15 @@ for SPLIT in "${REQUESTED_SPLITS[@]}"; do
     --chunk_lengths "${CHUNK_LENGTHS:-8,16,24,32}" \
     --temporal_strides "${TEMPORAL_STRIDES:-1,2,3,4}" \
     --cross_episode_pairs "${CROSS_EPISODE_PAIRS:-2000}" \
-    --qualitative_items "${QUALITATIVE_ITEMS:-8}"
+    --qualitative_items "${QUALITATIVE_ITEMS:-8}" \
+    --wandb_mode "${WANDB_MODE}" \
+    --wandb_project "${WANDB_PROJECT}" \
+    --wandb_entity "${WANDB_ENTITY}" \
+    --wandb_name "${WANDB_NAME_PREFIX}-${SPLIT}" \
+    --wandb_group "${WANDB_GROUP}" \
+    --wandb_tags "${WANDB_TAGS}" \
+    --wandb_dir "${WANDB_DIR}" \
+    --wandb_source_run "${WANDB_SOURCE_RUN}"
   EVALUATION_RC=$?
   if [ "${EVALUATION_RC}" -ne 0 ]; then
     echo "[v48-held] split=${SPLIT} failed rc=${EVALUATION_RC}"
