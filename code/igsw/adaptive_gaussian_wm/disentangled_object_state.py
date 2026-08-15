@@ -205,6 +205,7 @@ class DisentangledObjectStateEncoder(nn.Module):
         owner = logits.softmax(dim=1) * valid[:, None].float()
         object_competition = owner[:, : self.config.object_slots]
         normalized, support = evidence_normalized_attention(object_competition)
+        support = support.float()
         object_mass = object_competition.sum(dim=2)
         appearance_observation = torch.einsum(
             "bkn,bnd->bkd", normalized, appearance.float()
@@ -228,12 +229,13 @@ class DisentangledObjectStateEncoder(nn.Module):
         )
         center_observation = torch.einsum(
             "bkn,bnd->bkd", normalized, coordinates.float()
-        )
+        ).float()
         offset = coordinates[:, None].float() - center_observation[:, :, None]
         spatial_variance = torch.einsum(
             "bkn,bknd->bkd", normalized, offset.square()
         ).mean(dim=-1)
         scale_observation = 0.5 * spatial_variance.clamp_min(1e-4).log()
+        scale_observation = scale_observation.float()
         corrected_center = torch.lerp(center.float(), center_observation, support)
         corrected_scale = torch.lerp(
             log_scale.float(), scale_observation, support.squeeze(-1)
@@ -344,4 +346,3 @@ class DisentangledObjectStateEncoder(nn.Module):
                 history.setdefault(name, []).append(value)
             previous_time = frame_times[:, index]
         return {name: torch.stack(values, dim=1) for name, values in history.items()}
-
