@@ -40,7 +40,7 @@ class PointTrackCompositionalDecoder(nn.Module):
     def forward(self, state, coordinates, valid, object_valid=None):
         identity, dynamic = state["identity"], state["dynamic"]
         object_state = torch.cat((identity, dynamic), dim=-1)
-        scene, transient = state["scene"][:, None], state["transient"][:, None]
+        scene, transient = state["scene"], state["transient"]
         position_basis = _coordinate_basis(coordinates)
         position = self.mask_position(position_basis)
         logits = torch.einsum(
