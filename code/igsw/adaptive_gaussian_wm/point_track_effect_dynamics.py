@@ -118,28 +118,34 @@ class PointTrackEffectDynamics(nn.Module):
         )
         return {
             "identity": source["identity"],
-            "dynamic": torch.lerp(source["dynamic"].float(), dynamic_candidate, gate).to(source["dynamic"].dtype),
+            "dynamic": torch.lerp(
+                source["dynamic"].float(), dynamic_candidate.float(), gate.float()
+            ).to(source["dynamic"].dtype),
             "center": torch.lerp(
                 source["center"].float(),
                 (source["center"].float() + 0.5 * torch.tanh(center.float())).clamp(-1.25, 1.25),
-                gate,
+                gate.float(),
             ),
             "log_scale": torch.lerp(
                 source["log_scale"].float(),
                 (source["log_scale"].float() + 0.25 * torch.tanh(scale.squeeze(-1))).clamp(-3.0, 0.7),
-                scalar_gate,
+                scalar_gate.float(),
             ),
             "support_shape": normalize_support_shape(
-                torch.lerp(source["support_shape"].float(), shape_candidate, gate)
+                torch.lerp(
+                    source["support_shape"].float(),
+                    shape_candidate.float(),
+                    gate.float(),
+                )
             ),
             "presence": torch.lerp(
                 source["presence"].float(),
                 (source["presence"].float() + 0.25 * torch.tanh(presence.squeeze(-1))).clamp(0.0, 1.0),
-                scalar_gate,
+                scalar_gate.float(),
             ),
             "visibility": torch.lerp(
                 source["visibility"].float(),
                 (source["visibility"].float() + 0.25 * torch.tanh(visibility.squeeze(-1))).clamp(0.0, 1.0),
-                scalar_gate,
+                scalar_gate.float(),
             ),
         }

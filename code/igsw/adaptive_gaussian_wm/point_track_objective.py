@@ -141,7 +141,11 @@ def object_state_objective(model, patches, valid, evidence, teacher, match, outp
     diversity = F.relu(similarity - 0.20).masked_fill(diagonal[None, None], 0.0).mean()
     target_object = match.target_student_owner[..., : model.config.object_slots].sum(dim=-1)
     predicted_object = match.sampled_student_assignment[..., : model.config.object_slots].sum(dim=-1)
-    motion_weight = teacher.track_motion[:, None] * evidence.visibility.float()
+    motion_weight = (
+        teacher.track_motion[:, None]
+        * evidence.visibility.float()
+        * target_object[:, None]
+    )
     motion_coverage = weighted_mean(F.relu(0.5 - predicted_object), motion_weight)
     total = (
         model.config.reconstruction_weight * reconstruction

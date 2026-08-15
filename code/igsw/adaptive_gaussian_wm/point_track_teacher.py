@@ -82,7 +82,9 @@ class FrozenPointTrackerRuntime:
     def _queries(self, batch: int, frames: int) -> tuple[torch.Tensor, torch.Tensor]:
         side = self.config.tracker_grid_side
         size = self.config.tracker_image_size
-        axis = torch.linspace(0.5, size - 0.5, side, device=self.device)
+        axis = (
+            torch.arange(side, device=self.device, dtype=torch.float32) + 0.5
+        ) * (size / side)
         y, x = torch.meshgrid(axis, axis, indexing="ij")
         xy = torch.stack((x, y), dim=-1).reshape(-1, 2)
         times = torch.tensor(

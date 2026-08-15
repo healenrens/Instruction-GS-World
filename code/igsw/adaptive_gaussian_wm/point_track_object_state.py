@@ -256,11 +256,13 @@ class PointTrackObjectStateEncoder(nn.Module):
             torch.lerp(
                 state["identity"].float(),
                 identity_candidate.float(),
-                support * self.config.identity_update_rate,
+                support.float() * self.config.identity_update_rate,
             )
         )
         dynamic = stable_rms_normalize(
-            torch.lerp(state["dynamic"].float(), dynamic_candidate.float(), support)
+            torch.lerp(
+                state["dynamic"].float(), dynamic_candidate.float(), support.float()
+            )
         )
         center_observation = torch.einsum("bkn,bnd->bkd", normalized, coordinates.float())
         log_scale, support_shape = support_shape_from_assignment(
@@ -274,13 +276,25 @@ class PointTrackObjectStateEncoder(nn.Module):
             nuisance_observation[:, 1], self.transient_state[:, 0].expand(len(patches), -1).float()
         )[:, None]
         blended_shape = normalize_support_shape(
-            torch.lerp(state["support_shape"].float(), support_shape, support)
+            torch.lerp(
+                state["support_shape"].float(),
+                support_shape.float(),
+                support.float(),
+            )
         )
         return {
             "identity": identity.to(state["identity"].dtype),
             "dynamic": dynamic.to(state["dynamic"].dtype),
-            "center": torch.lerp(state["center"].float(), center_observation, support),
-            "log_scale": torch.lerp(state["log_scale"].float(), log_scale, scalar_support),
+            "center": torch.lerp(
+                state["center"].float(),
+                center_observation.float(),
+                support.float(),
+            ),
+            "log_scale": torch.lerp(
+                state["log_scale"].float(),
+                log_scale.float(),
+                scalar_support.float(),
+            ),
             "support_shape": blended_shape,
             "presence": torch.maximum(state["presence"].float(), visibility),
             "visibility": visibility,
