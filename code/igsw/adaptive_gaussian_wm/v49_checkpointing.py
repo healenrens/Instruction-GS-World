@@ -45,6 +45,8 @@ def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
         raise ValueError("v49 resume architecture differs")
     if checkpoint.get("parallelism") != "ddp_full_state_dict":
         raise ValueError("v49 resume requires a DDP full state dict")
+    if checkpoint.get("git_commit") != args.git_commit:
+        raise ValueError("v49 resume source revision differs")
     if checkpoint.get("world_size") != world_size:
         raise ValueError("v49 resume visible GPU count differs")
     if checkpoint.get("config") != config.to_dict():
@@ -134,4 +136,3 @@ def save_checkpoint(
         os.fsync(handle.fileno())
     os.replace(temporary_manifest, manifest_path)
     return manifest
-
