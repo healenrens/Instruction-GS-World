@@ -130,26 +130,39 @@ class EffectConditionedObjectDynamics(nn.Module):
         )
         gate = torch.tanh(effect.float().square().mean(dim=(1, 2)).sqrt())
         gate = gate[:, None, None]
-        predicted_dynamic = stable_rms_normalize(
-            source["dynamic"].float() + gate * 0.5 * torch.tanh(dynamic.float())
+        source_dynamic = source["dynamic"].float()
+        dynamic_candidate = stable_rms_normalize(
+            source_dynamic + 0.5 * torch.tanh(dynamic.float())
         )
+        predicted_dynamic = torch.lerp(
+            source_dynamic, dynamic_candidate, gate
+        )
+        source_center = source["center"].float()
+        center_candidate = (
+            source_center + 0.5 * torch.tanh(center.float())
+        ).clamp(-1.25, 1.25)
+        source_scale = source["log_scale"].float()
+        scale_candidate = (
+            source_scale + 0.25 * torch.tanh(log_scale.squeeze(-1).float())
+        ).clamp(-3.0, 0.7)
+        scalar_gate = gate.squeeze(-1)
+        source_presence = source["presence"].float()
+        presence_candidate = (
+            source_presence + 0.25 * torch.tanh(presence.squeeze(-1).float())
+        ).clamp(0.0, 1.0)
+        source_visibility = source["visibility"].float()
+        visibility_candidate = (
+            source_visibility + 0.25 * torch.tanh(visibility.squeeze(-1).float())
+        ).clamp(0.0, 1.0)
         return {
             "identity": source["identity"],
             "dynamic": predicted_dynamic.to(source["dynamic"].dtype),
-            "center": (
-                source["center"].float() + gate * 0.5 * torch.tanh(center.float())
-            ).clamp(-1.25, 1.25),
-            "log_scale": (
-                source["log_scale"].float()
-                + gate.squeeze(-1) * 0.25 * torch.tanh(log_scale.squeeze(-1).float())
-            ).clamp(-3.0, 0.7),
-            "presence": (
-                source["presence"].float()
-                + gate.squeeze(-1) * 0.25 * torch.tanh(presence.squeeze(-1).float())
-            ).clamp(0.0, 1.0),
-            "visibility": (
-                source["visibility"].float()
-                + gate.squeeze(-1) * 0.25 * torch.tanh(visibility.squeeze(-1).float())
-            ).clamp(0.0, 1.0),
+            "center": torch.lerp(source_center, center_candidate, gate),
+            "log_scale": torch.lerp(source_scale, scale_candidate, scalar_gate),
+            "presence": torch.lerp(
+                source_presence, presence_candidate, scalar_gate
+            ),
+            "visibility": torch.lerp(
+                source_visibility, visibility_candidate, scalar_gate
+            ),
         }
-
