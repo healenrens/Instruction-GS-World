@@ -240,23 +240,25 @@ def causal_contract(model, features, batch, evidence, amp_context) -> dict[str, 
 
 @torch.no_grad()
 def effect_contract(model, features, batch, amp_context) -> dict[str, float]:
-    state = model.state_encoder(
-        features.patches,
-        features.coordinates,
-        features.valid,
-        batch["frame_times"],
-        torch.ones_like(batch["observation_mask"]),
-    )
-    source = _frame_state(state, 0)
-    target = _frame_state(state, -1)
-    changed_target = {name: value.clone() for name, value in target.items()}
-    changed_target["dynamic"] = changed_target["dynamic"].roll(1, dims=1)
-    effect = model.effect_posterior(source, target)
-    changed_effect = model.effect_posterior(source, changed_target)
+    with amp_context():
+        state = model.state_encoder(
+            features.patches,
+            features.coordinates,
+            features.valid,
+            batch["frame_times"],
+            torch.ones_like(batch["observation_mask"]),
+        )
+        source = _frame_state(state, 0)
+        target = _frame_state(state, -1)
+        changed_target = {name: value.clone() for name, value in target.items()}
+        changed_target["dynamic"] = changed_target["dynamic"].roll(1, dims=1)
+        effect = model.effect_posterior(source, target)
+        changed_effect = model.effect_posterior(source, changed_target)
     posterior_difference = maximum_difference(effect, changed_effect)
     require(posterior_difference > 1e-6, "v49 posterior ignores target object state")
     delta = batch["frame_times"][:, -1] - batch["frame_times"][:, 0]
-    zero = model.dynamics(source, torch.zeros_like(effect), delta)
+    with amp_context():
+        zero = model.dynamics(source, torch.zeros_like(effect), delta)
     zero_difference = max(
         maximum_difference(zero[name], source[name]) for name in source
     )
@@ -349,4 +351,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
