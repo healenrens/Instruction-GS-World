@@ -46,6 +46,7 @@ from igsw.adaptive_gaussian_wm.v51_config import (  # noqa: E402
     CHECKPOINT_VERSION,
     PointTrackObjectStateConfig,
 )
+from igsw.adaptive_gaussian_wm.v51_training_loop import summarize_window  # noqa: E402
 
 
 def require(condition: bool, message: str) -> None:
@@ -55,6 +56,30 @@ def require(condition: bool, message: str) -> None:
 
 def maximum_difference(left: torch.Tensor, right: torch.Tensor) -> float:
     return float((left.float() - right.float()).abs().max())
+
+
+def metric_window_contract(device: torch.device) -> dict[str, float]:
+    by_length: dict[int, dict[str, torch.Tensor]] = {}
+    counts: dict[int, int] = {}
+    for length in (8, 16, 24, 32) * 5:
+        parts = by_length.setdefault(length, {})
+        values = {
+            "loss": torch.tensor(float(length), device=device),
+            "_temporal_stride": torch.tensor(1.0, device=device),
+        }
+        for name, value in values.items():
+            parts[name] = parts.get(name, value * 0.0) + value
+        counts[length] = counts.get(length, 0) + 1
+    summary = summarize_window(by_length, counts, 1)
+    require(summary["history_length_coverage"] == 4.0, "v51 telemetry lost a history length")
+    require(summary["metric_window_microbatches"] == 20.0, "v51 telemetry window differs")
+    for length in (8, 16, 24, 32):
+        require(summary[f"history_h{length}_updates"] == 5.0, "v51 history update count differs")
+        require(summary[f"history_h{length}_loss"] == float(length), "v51 history metric differs")
+    return {
+        "history_length_coverage": summary["history_length_coverage"],
+        "history_metric_window_microbatches": summary["metric_window_microbatches"],
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -365,6 +390,7 @@ def main() -> None:
     device = torch.device("cuda:0")
     config = PointTrackObjectStateConfig()
     config.validate()
+    telemetry = metric_window_contract(device)
     semantics = teacher_semantics_contract(config, device)
     dataset = PointTrackObjectVideoDataset(args.data, "train", max_items=64, seed=args.seed)
     samples = [dataset[(index, args.chunk_length)] for index in range(1)]
@@ -454,6 +480,7 @@ def main() -> None:
         **occlusion,
         **zero,
         **semantics,
+        **telemetry,
     }
     output_path = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)

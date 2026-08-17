@@ -61,13 +61,14 @@ def train_v51(model, wrapped, dino, point_tracker, loader, sampler, optimizer, s
     started, step = time.time(), int(start_step)
     trainable = [(name, value) for name, value in model.named_parameters() if value.requires_grad]
     optimizer.zero_grad(set_to_none=True)
+    metric_by_length, metric_counts = {}, {}
     while step < args.steps:
         sampler.set_epoch(args.seed + epoch)
         direct_batch_offset = 0
         if direct_seek:
             sampler.set_start_index(resume_batch_offset * args.batch)
             direct_batch_offset = resume_batch_offset
-        by_length, counts, micro_count = {}, {}, 0
+        micro_count = 0
         for batch_index, cpu_batch in enumerate(loader):
             if not direct_seek and batch_index < resume_batch_offset:
                 continue
@@ -91,14 +92,15 @@ def train_v51(model, wrapped, dino, point_tracker, loader, sampler, optimizer, s
                 loss = output["loss"] / args.grad_accum
             loss.backward()
             length = int(batch["chunk_length"][0])
-            parts = by_length.setdefault(length, {})
+            parts = metric_by_length.setdefault(length, {})
             values = {**output["parts"], "_temporal_stride": batch["temporal_stride"].float().mean()}
             for name, value in values.items():
                 parts[name] = parts.get(name, value.detach() * 0.0) + value.detach()
-            counts[length] = counts.get(length, 0) + 1
+            metric_counts[length] = metric_counts.get(length, 0) + 1
             if not synchronize:
                 continue
-            collect = step == start_step or (step + 1) % args.log_every == 0
+            next_step = step + 1
+            collect = next_step % args.log_every == 0 or next_step == args.steps
             norms = optimizer_group_grad_norms(optimizer) if collect else {}
             if collect:
                 norms.update(parameter_prefix_grad_norms(
@@ -120,11 +122,14 @@ def train_v51(model, wrapped, dino, point_tracker, loader, sampler, optimizer, s
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
-            step += 1
-            metrics = summarize_window(by_length, counts, context.world_size)
-            by_length, counts, micro_count = {}, {}, 0
+            step = next_step
+            micro_count = 0
+            metrics = None
+            if collect:
+                metrics = summarize_window(metric_by_length, metric_counts, context.world_size)
+                metric_by_length, metric_counts = {}, {}
             reduced_norms = reduce_metrics(norms, context.world_size) if norms else {}
-            if context.is_main and (step == 1 or step % args.log_every == 0 or step == args.steps):
+            if context.is_main and collect:
                 effective_batch = args.batch * context.world_size * args.grad_accum
                 elapsed = max(time.time() - started, 1e-6)
                 completed = max(step - start_step, 1)
