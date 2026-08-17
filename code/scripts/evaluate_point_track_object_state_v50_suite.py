@@ -222,15 +222,14 @@ def evaluate_condition(args, model, loader, dino, tracker, device, amp_context):
             for name, value in diagnostics.probes.items():
                 aggregate.probes.setdefault(name, []).append(value)
             if aggregate.order_count < args.causal_items:
-                aggregate.causal_max = max(
-                    aggregate.causal_max,
-                    causal_prefix_difference(
+                with amp_context():
+                    prefix_difference = causal_prefix_difference(
                         model, features, batch["frame_times"], output["state"]
-                    ),
-                )
-                order = order_sensitivity(
-                    model, features, batch["frame_times"], output["state"]
-                )
+                    )
+                    order = order_sensitivity(
+                        model, features, batch["frame_times"], output["state"]
+                    )
+                aggregate.causal_max = max(aggregate.causal_max, prefix_difference)
                 for name, value in order.items():
                     aggregate.order_sum[name] += value * batch_items
                 aggregate.order_count += batch_items
