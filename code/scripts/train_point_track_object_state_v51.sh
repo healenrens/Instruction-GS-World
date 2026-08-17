@@ -112,7 +112,7 @@ WORKERS_PER_RANK="${WORKERS_PER_RANK:-auto}"
 if [ "${WORKERS_PER_RANK}" = auto ]; then
   WORKERS_PER_RANK="$("${PY}" -c "import os; print(max(2, min(8, (os.cpu_count() or 8) // (2 * ${NPROC_PER_NODE}))))")"
 fi
-TRACKER_SEQUENCE_BATCH="${TRACKER_SEQUENCE_BATCH:-4}"
+TRACKER_SEQUENCE_BATCH="${TRACKER_SEQUENCE_BATCH:-1}"
 
 if [ "${STAGE}" = object_state ]; then
   STEPS="${STEPS:-50000}"

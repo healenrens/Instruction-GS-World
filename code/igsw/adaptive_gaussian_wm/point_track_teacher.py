@@ -61,8 +61,10 @@ class FrozenPointTrackerRuntime:
     ):
         if device.type != "cuda":
             raise ValueError("v50 point tracking requires CUDA")
-        if sequence_batch < 1:
-            raise ValueError("v50 tracker sequence batch must be positive")
+        if sequence_batch != 1:
+            raise ValueError(
+                "CoTracker3 offline requires tracker sequence batch 1"
+            )
         checkpoint_path = os.path.abspath(checkpoint_path)
         if not os.path.isfile(checkpoint_path):
             raise ValueError(f"local CoTracker checkpoint is missing: {checkpoint_path}")
