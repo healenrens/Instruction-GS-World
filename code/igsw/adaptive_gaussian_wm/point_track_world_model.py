@@ -14,7 +14,7 @@ from .point_track_effect_dynamics import PointTrackEffectDynamics, PointTrackEff
 from .point_track_object_state import PointTrackObjectStateEncoder
 from .point_track_objective import latent_effect_objective, object_state_objective
 from .trajectory_component_teacher import build_trajectory_component_teacher
-from .v50_config import STAGES
+from .v51_config import STAGES
 
 
 STATE_NAMES = (
@@ -35,7 +35,13 @@ class PointTrackObjectWorldModel(nn.Module):
         self.state_encoder = PointTrackObjectStateEncoder(config)
         self.decoder = PointTrackCompositionalDecoder(config)
         self.identity_readout = nn.Linear(config.identity_dim, config.patch_dim)
-        self.motion_readout = nn.Linear(config.dynamic_dim, 2)
+        self.motion_readout = nn.Linear(
+            config.dynamic_dim, len(config.dynamic_horizons) * 2
+        )
+        self.geometry_residual_readout = nn.Linear(
+            config.dynamic_dim,
+            len(config.dynamic_horizons) * config.dynamic_geometry_dim,
+        )
         self.effect_posterior = PointTrackEffectPosterior(config)
         self.dynamics = PointTrackEffectDynamics(config)
         self.stage = ""
@@ -43,7 +49,7 @@ class PointTrackObjectWorldModel(nn.Module):
 
     def set_stage(self, stage: str) -> None:
         if stage not in STAGES:
-            raise ValueError(f"unsupported v50 stage: {stage}")
+            raise ValueError(f"unsupported v51 stage: {stage}")
         self.stage = stage
         state_trainable = stage == "object_state"
         self.student_tracklets.requires_grad_(state_trainable)
@@ -51,6 +57,7 @@ class PointTrackObjectWorldModel(nn.Module):
         self.decoder.requires_grad_(state_trainable)
         self.identity_readout.requires_grad_(state_trainable)
         self.motion_readout.requires_grad_(state_trainable)
+        self.geometry_residual_readout.requires_grad_(state_trainable)
         self.effect_posterior.requires_grad_(not state_trainable)
         self.dynamics.requires_grad_(not state_trainable)
 
@@ -75,7 +82,13 @@ class PointTrackObjectWorldModel(nn.Module):
         """Deployment path: frozen DINO features in, persistent Object State out."""
         tracklets = self.student_tracklets(patches, coordinates, valid)
         state = self.state_encoder(
-            tracklets.features, coordinates, valid, frame_times
+            tracklets.features,
+            coordinates,
+            valid,
+            frame_times,
+            tracklets.temporal_residual,
+            tracklets.residual_flow,
+            tracklets.confidence,
         )
         return tracklets, state
 
@@ -95,8 +108,10 @@ class PointTrackObjectWorldModel(nn.Module):
             )
         if self.stage == "object_state":
             if point_tracks is None:
-                raise ValueError("v50 Object State training requires point-track teacher evidence")
-            teacher = build_trajectory_component_teacher(point_tracks, self.config)
+                raise ValueError("v51 Object State training requires point-track teacher evidence")
+            teacher = build_trajectory_component_teacher(
+                point_tracks, self.config, frame_times
+            )
             match = match_trajectory_teacher_to_student(
                 state, point_tracks, teacher, grid_hw, self.config.object_slots
             )

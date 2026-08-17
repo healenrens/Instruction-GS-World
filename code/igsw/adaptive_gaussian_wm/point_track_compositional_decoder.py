@@ -22,8 +22,8 @@ class PointTrackCompositionalDecoder(nn.Module):
         self.object_mask = nn.Linear(config.state_dim, config.state_dim, bias=False)
         self.nuisance_mask = nn.Linear(config.state_dim, config.state_dim, bias=False)
         self.object_coefficients = nn.Sequential(
-            nn.LayerNorm(config.state_dim),
-            nn.Linear(config.state_dim, rank * config.patch_dim),
+            nn.LayerNorm(config.identity_dim),
+            nn.Linear(config.identity_dim, rank * config.patch_dim),
         )
         self.scene_coefficients = nn.Sequential(
             nn.LayerNorm(config.state_dim),
@@ -69,8 +69,8 @@ class PointTrackCompositionalDecoder(nn.Module):
         assignment = owner_logits.masked_fill(~valid[..., None], -1e4).softmax(dim=-1)
         assignment = assignment * valid[..., None].float()
         rank = self.config.decoder_spatial_rank
-        coefficients = self.object_coefficients(object_state).reshape(
-            *object_state.shape[:2], rank, self.config.patch_dim
+        coefficients = self.object_coefficients(identity).reshape(
+            *identity.shape[:2], rank, self.config.patch_dim
         )
         scene_coefficients = self.scene_coefficients(scene[:, 0]).reshape(
             len(scene), rank, self.config.patch_dim

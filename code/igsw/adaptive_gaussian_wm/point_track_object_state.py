@@ -56,8 +56,8 @@ class PointTrackPatchAdapter(nn.Module):
             nn.Linear(config.identity_dim, config.identity_dim),
         )
         self.dynamic = nn.Sequential(
-            nn.LayerNorm(config.patch_dim),
-            nn.Linear(config.patch_dim, config.dynamic_dim),
+            nn.LayerNorm(config.patch_dim + 3),
+            nn.Linear(config.patch_dim + 3, config.dynamic_dim),
             nn.GELU(),
             nn.Linear(config.dynamic_dim, config.dynamic_dim),
         )
@@ -69,9 +69,18 @@ class PointTrackPatchAdapter(nn.Module):
         self.key = nn.Linear(config.state_dim, config.state_dim, bias=False)
         self.value = nn.Linear(config.state_dim, config.state_dim, bias=False)
 
-    def forward(self, patches, coordinates):
+    def forward(self, patches, coordinates, temporal_residual, residual_flow, confidence):
         appearance = self.appearance(patches)
-        dynamic = self.dynamic(patches)
+        dynamic = self.dynamic(
+            torch.cat(
+                (
+                    temporal_residual,
+                    residual_flow.to(temporal_residual.dtype),
+                    confidence[..., None].to(temporal_residual.dtype),
+                ),
+                dim=-1,
+            )
+        )
         combined = torch.cat((appearance, dynamic), dim=-1)
         combined = combined + self.position(_coordinate_basis(coordinates))
         return appearance, dynamic, self.key(combined), self.value(combined)
@@ -123,6 +132,7 @@ class CausalObjectMemoryPredictor(nn.Module):
                 state["support_shape"].float(),
                 state["presence"].float()[..., None],
                 state["visibility"].float()[..., None],
+                state["unobserved_time"].float()[..., None],
             ),
             dim=-1,
         )
@@ -138,9 +148,9 @@ class CausalObjectMemoryPredictor(nn.Module):
             dim=-1,
             eps=1e-4,
         )
-        survival = torch.exp(
-            -math.log(2.0) * dt[:, None] / self.config.presence_half_life_seconds
-        )
+        prior_presence = state["presence"].float().clamp(1e-4, 1.0 - 1e-4)
+        prior_logit = torch.logit(prior_presence)
+        presence_rate = torch.tanh(presence.squeeze(-1))
         return {
             "identity": state["identity"],
             "dynamic": stable_rms_normalize(
@@ -159,11 +169,9 @@ class CausalObjectMemoryPredictor(nn.Module):
                 ),
                 dim=-1,
             )),
-            "presence": (
-                state["presence"].float() * survival
-                + 0.05 * torch.tanh(presence.squeeze(-1))
-            ).clamp(0.0, 1.0),
+            "presence": torch.sigmoid(prior_logit + presence_rate * dt[:, None]),
             "visibility": torch.zeros_like(state["visibility"].float()),
+            "unobserved_time": state["unobserved_time"].float() + dt[:, None],
         }
 
 
@@ -210,11 +218,29 @@ class PointTrackObjectStateEncoder(nn.Module):
             ),
             "presence": self.initial_presence.sigmoid().expand(batch, -1).float(),
             "visibility": torch.zeros(batch, self.config.object_slots, device=self.initial_presence.device),
+            "unobserved_time": torch.zeros(
+                batch, self.config.object_slots, device=self.initial_presence.device
+            ),
             "scene": self.scene_state.expand(batch, -1, -1),
         }
 
-    def _correct(self, state, patches, coordinates, valid) -> dict[str, torch.Tensor]:
-        appearance, dynamic_input, keys, values = self.adapter(patches, coordinates)
+    def _correct(
+        self,
+        state,
+        patches,
+        coordinates,
+        valid,
+        temporal_residual,
+        residual_flow,
+        confidence,
+    ) -> dict[str, torch.Tensor]:
+        appearance, dynamic_input, keys, values = self.adapter(
+            patches,
+            coordinates,
+            temporal_residual,
+            residual_flow,
+            confidence,
+        )
         object_state = torch.cat((state["identity"], state["dynamic"]), dim=-1)
         object_logits = torch.einsum(
             "bkd,bnd->bkn", self.object_query(object_state.float()), keys.float()
@@ -296,19 +322,43 @@ class PointTrackObjectStateEncoder(nn.Module):
                 scalar_support.float(),
             ),
             "support_shape": blended_shape,
-            "presence": torch.maximum(state["presence"].float(), visibility),
+            "presence": torch.where(
+                visibility >= self.config.lifecycle_visible_track_fraction,
+                torch.maximum(state["presence"].float(), visibility),
+                state["presence"].float(),
+            ),
             "visibility": visibility,
+            "unobserved_time": torch.where(
+                visibility >= self.config.lifecycle_visible_track_fraction,
+                torch.zeros_like(state["unobserved_time"].float()),
+                state["unobserved_time"].float(),
+            ),
             "scene": scene.to(state["scene"].dtype),
             "transient": transient.to(state["scene"].dtype),
             "assignment": owner.transpose(1, 2),
             "mass": mass,
         }
 
-    def forward(self, patches, coordinates, valid, frame_times) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        patches,
+        coordinates,
+        valid,
+        frame_times,
+        temporal_residual,
+        residual_flow,
+        confidence,
+    ) -> dict[str, torch.Tensor]:
         if patches.ndim != 4 or coordinates.shape != (*patches.shape[:3], 2):
-            raise ValueError("v50 patch and coordinate shapes differ")
+            raise ValueError("v51 patch and coordinate shapes differ")
         if valid.shape != patches.shape[:3] or frame_times.shape != patches.shape[:2]:
-            raise ValueError("v50 validity or time shape differs")
+            raise ValueError("v51 validity or time shape differs")
+        if temporal_residual.shape != patches.shape:
+            raise ValueError("v51 temporal feature residual shape differs")
+        if residual_flow.shape != (*patches.shape[:3], 2):
+            raise ValueError("v51 residual-flow shape differs")
+        if confidence.shape != patches.shape[:3]:
+            raise ValueError("v51 tracklet confidence shape differs")
         batch, frames = patches.shape[:2]
         state = self._initial_state(batch)
         history: dict[str, list[torch.Tensor]] = {}
@@ -322,13 +372,19 @@ class PointTrackObjectStateEncoder(nn.Module):
                     "scene": state["scene"],
                 }
             corrected = self._correct(
-                state, patches[:, index], coordinates[:, index], valid[:, index]
+                state,
+                patches[:, index],
+                coordinates[:, index],
+                valid[:, index],
+                temporal_residual[:, index],
+                residual_flow[:, index],
+                confidence[:, index],
             )
             state = {
                 name: corrected[name]
                 for name in (
                     "identity", "dynamic", "center", "log_scale",
-                    "support_shape", "presence", "visibility", "scene",
+                    "support_shape", "presence", "visibility", "unobserved_time", "scene",
                 )
             }
             for name, value in corrected.items():

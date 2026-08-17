@@ -16,6 +16,8 @@ class TeacherStudentMatch:
     target_student_owner: torch.Tensor
     permutation: torch.Tensor
     component_valid: torch.Tensor
+    component_score: torch.Tensor
+    component_track_weight: torch.Tensor
     identity: torch.Tensor
     visibility: torch.Tensor
     presence: torch.Tensor
@@ -25,8 +27,10 @@ class TeacherStudentMatch:
     log_scale: torch.Tensor
     support_shape: torch.Tensor
     geometry_valid: torch.Tensor
-    motion: torch.Tensor
-    motion_valid: torch.Tensor
+    relative_motion: torch.Tensor
+    relative_motion_valid: torch.Tensor
+    geometry_residual: torch.Tensor
+    geometry_residual_valid: torch.Tensor
 
 
 def _hungarian_minimize(cost: torch.Tensor) -> torch.Tensor:
@@ -84,7 +88,7 @@ def _match_components(
 ) -> torch.Tensor:
     student = sampled_student[..., :object_slots].float()
     teacher_owner = teacher.track_owner[..., :object_slots].float()
-    overlap = torch.einsum(
+    intersection = torch.einsum(
         "btps,bpc,btp->bsc",
         student.detach(),
         teacher_owner,
@@ -93,30 +97,35 @@ def _match_components(
     teacher_mass = torch.einsum(
         "bpc,btp->bc", teacher_owner, visibility.float()
     ).clamp_min(1.0)
-    overlap = overlap / teacher_mass[:, None]
-    inactive_penalty = (~teacher.component_valid).float()[:, None] * 1e-3
+    student_mass = torch.einsum(
+        "btps,btp->bs", student.detach(), visibility.float()
+    ).clamp_min(1.0)
+    coverage = intersection / teacher_mass[:, None]
+    precision = intersection / student_mass[:, :, None]
+    dice = 2.0 * intersection / (
+        teacher_mass[:, None] + student_mass[:, :, None]
+    )
+    score = 0.50 * dice + 0.25 * coverage + 0.25 * precision
+    invalid_cost = (~teacher.component_valid).float()[:, None]
+    cost = -score + invalid_cost
     return torch.stack(
         [
-            _hungarian_minimize(-overlap[index] + inactive_penalty[index])
-            for index in range(len(overlap))
+            _hungarian_minimize(cost[index])
+            for index in range(len(cost))
         ]
     )
 
 
 def _match_static(permutation: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-    if value.ndim == 2:
-        return torch.einsum("bsc,bc->bs", permutation, value)
-    if value.ndim == 3:
-        return torch.einsum("bsc,bcd->bsd", permutation, value)
-    raise ValueError("unsupported v50 static teacher target rank")
+    if value.ndim < 2:
+        raise ValueError("unsupported component teacher target rank")
+    return torch.einsum("bsc,bc...->bs...", permutation, value)
 
 
 def _match_temporal(permutation: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-    if value.ndim == 3:
-        return torch.einsum("bsc,btc->bts", permutation, value)
-    if value.ndim == 4:
-        return torch.einsum("bsc,btcd->btsd", permutation, value)
-    raise ValueError("unsupported v50 temporal teacher target rank")
+    if value.ndim < 3:
+        raise ValueError("unsupported temporal component teacher target rank")
+    return torch.einsum("bsc,btc...->bts...", permutation, value)
 
 
 def match_trajectory_teacher_to_student(
@@ -137,6 +146,9 @@ def match_trajectory_teacher_to_student(
         teacher.track_owner[..., :object_slots],
         permutation,
     )
+    component_track_weight = torch.einsum(
+        "bpc,bsc->bps", teacher.component_track_weight, permutation
+    )
     target_owner = torch.cat(
         (
             target_objects,
@@ -149,6 +161,8 @@ def match_trajectory_teacher_to_student(
         target_student_owner=target_owner,
         permutation=permutation,
         component_valid=_match_static(permutation, teacher.component_valid.float()).bool(),
+        component_score=_match_static(permutation, teacher.component_score),
+        component_track_weight=component_track_weight,
         identity=_match_static(permutation, teacher.identity),
         visibility=_match_temporal(permutation, teacher.visibility),
         presence=_match_temporal(permutation, teacher.presence),
@@ -158,6 +172,12 @@ def match_trajectory_teacher_to_student(
         log_scale=_match_temporal(permutation, teacher.log_scale),
         support_shape=_match_temporal(permutation, teacher.support_shape),
         geometry_valid=_match_temporal(permutation, teacher.geometry_valid.float()).bool(),
-        motion=_match_temporal(permutation, teacher.motion),
-        motion_valid=_match_temporal(permutation, teacher.motion_valid.float()).bool(),
+        relative_motion=_match_temporal(permutation, teacher.relative_motion),
+        relative_motion_valid=_match_temporal(
+            permutation, teacher.relative_motion_valid.float()
+        ).bool(),
+        geometry_residual=_match_temporal(permutation, teacher.geometry_residual),
+        geometry_residual_valid=_match_temporal(
+            permutation, teacher.geometry_residual_valid.float()
+        ).bool(),
     )

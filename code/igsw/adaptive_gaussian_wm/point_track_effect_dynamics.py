@@ -83,7 +83,7 @@ class PointTrackEffectDynamics(nn.Module):
 
     def forward(self, source, effect, delta_time):
         if effect.shape[1:] != (self.config.effect_factors, self.config.effect_dim):
-            raise ValueError("v50 latent effect shape differs")
+            raise ValueError("v51 latent effect shape differs")
         dt = delta_time.float().clamp_min(0.0)
         time = torch.stack(
             (

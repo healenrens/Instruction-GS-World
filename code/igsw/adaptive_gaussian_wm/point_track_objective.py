@@ -1,4 +1,4 @@
-"""Teacher-student Object State and posterior latent-effect objectives."""
+"""Component-balanced Object State and posterior latent-effect objectives."""
 
 from __future__ import annotations
 
@@ -6,7 +6,11 @@ import torch
 import torch.nn.functional as F
 
 from .distributed_statistics import gather_batch_with_grad
-from .trajectory_component_teacher import LIFECYCLE_OCCLUDED, LIFECYCLE_VISIBLE
+from .trajectory_lifecycle import (
+    LIFECYCLE_ABSENT,
+    LIFECYCLE_OCCLUDED,
+    LIFECYCLE_VISIBLE,
+)
 
 
 def weighted_mean(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -19,29 +23,68 @@ def binary_cross_entropy(prediction: torch.Tensor, target: torch.Tensor) -> torc
     return -(target * prediction.log() + (1.0 - target) * (1.0 - prediction).log())
 
 
-def owner_supervision(match, evidence) -> tuple[torch.Tensor, dict]:
+def component_set_supervision(model, match, evidence):
     prediction = match.sampled_student_assignment.float().clamp_min(1e-6)
     target = match.target_student_owner[:, None].expand_as(prediction)
     visible = evidence.visibility.float()
-    loss = weighted_mean(-(target * prediction.log()).sum(dim=-1), visible)
+    object_count = model.config.object_slots
+    object_prediction = prediction[..., :object_count]
+    object_target = target[..., :object_count]
+    component_weight = match.component_track_weight[:, None] * visible[..., None]
+    component_weight = component_weight * match.component_valid[:, None, None].float()
+    object_nll = -(object_target * object_prediction.log())
+    object_loss = (object_nll * component_weight).sum() / component_weight.sum().clamp_min(1.0)
+
+    nuisance_target = target[..., object_count:]
+    nuisance_prediction = prediction[..., object_count:]
+    nuisance_weight = nuisance_target.sum(dim=-1) * visible
+    nuisance_nll = -(nuisance_target * nuisance_prediction.log()).sum(dim=-1)
+    nuisance_loss = weighted_mean(nuisance_nll, nuisance_weight)
+    owner_loss = object_loss + nuisance_loss
+
+    coverage_weight = component_weight
+    component_coverage = (object_prediction * coverage_weight).sum(dim=(1, 2))
+    component_coverage = component_coverage / coverage_weight.sum(dim=(1, 2)).clamp_min(1.0)
+    valid_component = match.component_valid.float()
+    coverage_loss = weighted_mean(1.0 - component_coverage, valid_component)
+    usage = component_coverage * valid_component
+    usage_share = usage / usage.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+    uniform = valid_component / valid_component.sum(dim=-1, keepdim=True).clamp_min(1.0)
+    balance_loss = weighted_mean((usage_share - uniform).square(), valid_component)
+    component_set = coverage_loss + balance_loss
+
     shuffled_target = target.roll(1, dims=2)
-    shuffled = weighted_mean(
-        -(shuffled_target * prediction.log()).sum(dim=-1), visible
+    shuffled_component_weight = component_weight.roll(1, dims=2)
+    shuffled_object = (
+        -(shuffled_target[..., :object_count] * object_prediction.log())
+        * shuffled_component_weight
+    ).sum() / shuffled_component_weight.sum().clamp_min(1.0)
+    shuffled_nuisance_target = shuffled_target[..., object_count:]
+    shuffled_nuisance_weight = shuffled_nuisance_target.sum(dim=-1) * visible
+    shuffled_nuisance = weighted_mean(
+        -(shuffled_nuisance_target * nuisance_prediction.log()).sum(dim=-1),
+        shuffled_nuisance_weight,
     )
+    shuffled = shuffled_object + shuffled_nuisance
     accuracy = weighted_mean(
         (prediction.argmax(dim=-1) == target.argmax(dim=-1)).float(), visible
     )
-    return loss, {
-        "loss_teacher_owner": loss,
+    return owner_loss, component_set, {
+        "loss_teacher_owner": owner_loss,
+        "loss_teacher_object_owner": object_loss,
+        "loss_teacher_nuisance_owner": nuisance_loss,
+        "loss_component_coverage": coverage_loss,
+        "loss_component_set_balance": balance_loss,
+        "component_set_mean_coverage": weighted_mean(component_coverage, valid_component),
         "teacher_owner_top1": accuracy,
         "teacher_owner_shuffled_loss": shuffled,
         "teacher_owner_gain_over_shuffled": (
-            shuffled - loss
+            shuffled - owner_loss
         ) / shuffled.detach().clamp_min(1e-6),
     }
 
 
-def identity_supervision(model, state, match) -> tuple[torch.Tensor, torch.Tensor, dict]:
+def identity_supervision(model, state, match):
     prediction = F.normalize(
         model.identity_readout(state["identity"].float()), dim=-1, eps=1e-6
     )
@@ -49,6 +92,14 @@ def identity_supervision(model, state, match) -> tuple[torch.Tensor, torch.Tenso
     distance = 1.0 - (prediction * target).sum(dim=-1)
     visible = match.visibility.detach() * match.component_valid[:, None].float()
     identity = weighted_mean(distance, visible)
+    temporal_weight = torch.minimum(visible[:, 1:], visible[:, :-1])
+    temporal_distance = 1.0 - F.cosine_similarity(
+        state["identity"][:, 1:].float(),
+        state["identity"][:, :-1].float(),
+        dim=-1,
+        eps=1e-6,
+    )
+    identity_temporal = weighted_mean(temporal_distance, temporal_weight)
     occluded_before = (
         match.lifecycle_state == LIFECYCLE_OCCLUDED
     ).float().cumsum(dim=1) > 0
@@ -58,8 +109,9 @@ def identity_supervision(model, state, match) -> tuple[torch.Tensor, torch.Tenso
     shuffled = weighted_mean(
         1.0 - (prediction * shuffled_target).sum(dim=-1), visible
     )
-    return identity, reappearance, {
+    return identity, identity_temporal, reappearance, {
         "loss_teacher_identity": identity,
+        "loss_identity_temporal_only": identity_temporal,
         "loss_teacher_reappearance": reappearance,
         "teacher_identity_shuffled_distance": shuffled,
         "teacher_identity_gain_over_shuffled": (
@@ -70,14 +122,37 @@ def identity_supervision(model, state, match) -> tuple[torch.Tensor, torch.Tenso
 
 
 def dynamic_geometry_lifecycle(model, state, match):
-    motion_prediction = model.motion_readout(state["dynamic"][:, :-1].float())
-    motion_weight = match.motion_valid.detach().float()
+    batch, frames, slots = state["dynamic"].shape[:3]
+    horizon_count = len(model.config.dynamic_horizons)
+    motion_prediction = model.motion_readout(state["dynamic"].float()).reshape(
+        batch, frames, slots, horizon_count, 2
+    )
+    motion_weight = match.relative_motion_valid.detach().float()
     motion = weighted_mean(
         F.smooth_l1_loss(
-            motion_prediction.float(), match.motion.detach().float(), reduction="none"
+            motion_prediction, match.relative_motion.detach().float(), reduction="none"
         ).mean(dim=-1),
         motion_weight,
     )
+    residual_prediction = model.geometry_residual_readout(
+        state["dynamic"].float()
+    ).reshape(
+        batch,
+        frames,
+        slots,
+        horizon_count,
+        model.config.dynamic_geometry_dim,
+    )
+    residual_weight = match.geometry_residual_valid.detach().float()
+    geometry_residual = weighted_mean(
+        F.smooth_l1_loss(
+            residual_prediction,
+            match.geometry_residual.detach().float(),
+            reduction="none",
+        ).mean(dim=-1),
+        residual_weight,
+    )
+
     geometry_weight = match.geometry_valid.detach().float()
     prediction_relative = state["center"][:, :, :, None] - state["center"][:, :, None]
     target_relative = match.center[:, :, :, None] - match.center[:, :, None]
@@ -98,7 +173,9 @@ def dynamic_geometry_lifecycle(model, state, match):
     )
     shape = weighted_mean(
         F.smooth_l1_loss(
-            state["support_shape"].float(), match.support_shape.detach().float(), reduction="none"
+            state["support_shape"].float(),
+            match.support_shape.detach().float(),
+            reduction="none",
         ).mean(dim=-1),
         geometry_weight,
     )
@@ -109,16 +186,28 @@ def dynamic_geometry_lifecycle(model, state, match):
     presence = weighted_mean(
         binary_cross_entropy(state["presence"], match.presence), lifecycle_weight
     )
-    return motion, center + scale + shape, visibility + presence, {
-        "loss_teacher_motion": motion,
+    valid_lifecycle = match.component_valid[:, None].expand_as(match.lifecycle_state)
+    lifecycle_total = valid_lifecycle.float().sum().clamp_min(1.0)
+    return motion + geometry_residual, center + scale + shape, visibility + presence, {
+        "loss_teacher_multihorizon_motion": motion,
+        "loss_teacher_multihorizon_geometry_residual": geometry_residual,
         "loss_teacher_relative_center": center,
         "loss_teacher_relative_scale": scale,
         "loss_teacher_support_shape": shape,
         "loss_teacher_visibility": visibility,
         "loss_teacher_presence": presence,
-        "teacher_visible_fraction": (match.lifecycle_state == LIFECYCLE_VISIBLE).float().mean(),
-        "teacher_occluded_fraction": (match.lifecycle_state == LIFECYCLE_OCCLUDED).float().mean(),
-        "teacher_unknown_fraction": (~match.lifecycle_known).float().mean(),
+        "teacher_visible_fraction": (
+            (match.lifecycle_state == LIFECYCLE_VISIBLE) & valid_lifecycle
+        ).float().sum() / lifecycle_total,
+        "teacher_occluded_fraction": (
+            (match.lifecycle_state == LIFECYCLE_OCCLUDED) & valid_lifecycle
+        ).float().sum() / lifecycle_total,
+        "teacher_absent_fraction": (
+            (match.lifecycle_state == LIFECYCLE_ABSENT) & valid_lifecycle
+        ).float().sum() / lifecycle_total,
+        "teacher_unknown_fraction": (
+            (~match.lifecycle_known) & valid_lifecycle
+        ).float().sum() / lifecycle_total,
     }
 
 
@@ -127,8 +216,8 @@ def object_state_objective(model, patches, valid, evidence, teacher, match, outp
     reconstruction = weighted_mean(
         1.0 - (output["reconstruction"].float() * target).sum(dim=-1), valid.float()
     )
-    owner, owner_parts = owner_supervision(match, evidence)
-    identity, reappearance, identity_parts = identity_supervision(
+    owner, component_set, owner_parts = component_set_supervision(model, match, evidence)
+    identity, identity_temporal, reappearance, identity_parts = identity_supervision(
         model, output["state"], match
     )
     motion, geometry, lifecycle, state_parts = dynamic_geometry_lifecycle(
@@ -141,30 +230,24 @@ def object_state_objective(model, patches, valid, evidence, teacher, match, outp
     diversity = F.relu(similarity - 0.20).masked_fill(diagonal[None, None], 0.0).mean()
     target_object = match.target_student_owner[..., : model.config.object_slots].sum(dim=-1)
     predicted_object = match.sampled_student_assignment[..., : model.config.object_slots].sum(dim=-1)
-    motion_weight = (
-        teacher.track_motion[:, None]
-        * evidence.visibility.float()
-        * target_object[:, None]
-    )
-    motion_coverage = weighted_mean(F.relu(0.5 - predicted_object), motion_weight)
     total = (
         model.config.reconstruction_weight * reconstruction
         + model.config.track_assignment_weight * owner
+        + model.config.component_set_weight * component_set
         + model.config.identity_weight * identity
+        + model.config.identity_temporal_weight * identity_temporal
         + model.config.reappearance_weight * reappearance
         + model.config.motion_weight * motion
         + model.config.lifecycle_weight * lifecycle
         + model.config.geometry_weight * geometry
         + model.config.diversity_weight * diversity
-        + model.config.motion_coverage_weight * motion_coverage
     )
     parts = {
         "loss": total,
         "loss_object_state": total,
         "loss_reconstruction_auxiliary": reconstruction,
         "loss_identity_diversity": diversity,
-        "loss_motion_object_coverage": motion_coverage,
-        "teacher_component_count": teacher.component_valid.float().sum(dim=-1).mean(),
+        "train_teacher_component_count": teacher.component_valid.float().sum(dim=-1).mean(),
         "teacher_object_track_fraction": target_object.mean(),
         "student_object_track_fraction": predicted_object.mean(),
         "scene_owner_fraction": match.sampled_student_assignment[..., model.config.object_slots].mean(),
@@ -176,7 +259,7 @@ def object_state_objective(model, patches, valid, evidence, teacher, match, outp
     parts.update(identity_parts)
     parts.update(state_parts)
     if not bool(torch.isfinite(total)):
-        raise RuntimeError("v50 Object State objective is non-finite")
+        raise RuntimeError("v51 Object State objective is non-finite")
     return total, parts
 
 
@@ -244,5 +327,5 @@ def latent_effect_objective(model, output):
     }
     parts.update({f"effect_state_{name}": value for name, value in correct_parts.items()})
     if not bool(torch.isfinite(total)):
-        raise RuntimeError("v50 latent-effect objective is non-finite")
+        raise RuntimeError("v51 latent-effect objective is non-finite")
     return total, parts

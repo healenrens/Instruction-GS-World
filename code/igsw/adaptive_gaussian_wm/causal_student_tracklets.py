@@ -12,6 +12,7 @@ import torch.nn.functional as F
 @dataclass(frozen=True)
 class StudentTracklets:
     features: torch.Tensor
+    temporal_residual: torch.Tensor
     residual_flow: torch.Tensor
     confidence: torch.Tensor
 
@@ -49,7 +50,7 @@ class CausalStudentTrackletEncoder(nn.Module):
     def forward(self, patches, coordinates, valid) -> StudentTracklets:
         if patches.ndim != 4 or coordinates.shape != (*patches.shape[:3], 2):
             raise ValueError("student tracklet patch/coordinate shapes differ")
-        features, flows, confidences = [], [], []
+        features, residuals, flows, confidences = [], [], [], []
         for index in range(patches.shape[1]):
             current = patches[:, index]
             if index == 0:
@@ -80,10 +81,12 @@ class CausalStudentTrackletEncoder(nn.Module):
                 current.float() + 0.25 * torch.tanh(update.float()), dim=-1, eps=1e-6
             )
             features.append(tracklet.to(current.dtype))
+            residuals.append((current.float() - transported).to(current.dtype))
             flows.append(flow)
             confidences.append(confidence)
         return StudentTracklets(
             features=torch.stack(features, dim=1),
+            temporal_residual=torch.stack(residuals, dim=1),
             residual_flow=torch.stack(flows, dim=1),
             confidence=torch.stack(confidences, dim=1),
         )
