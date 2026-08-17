@@ -90,7 +90,7 @@ class CausalObjectMemoryPredictor(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.input = nn.Linear(config.state_token_dim, config.state_dim)
+        self.input = nn.Linear(config.memory_state_token_dim, config.state_dim)
         self.time = nn.Sequential(
             nn.Linear(5, config.state_dim),
             nn.SiLU(),

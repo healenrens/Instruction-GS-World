@@ -25,6 +25,7 @@ from igsw.adaptive_gaussian_wm.point_track_dataset import (  # noqa: E402
     POINT_TRACK_VIDEO_CONTRACT,
     PointTrackObjectVideoDataset,
 )
+from igsw.adaptive_gaussian_wm.point_track_effect_dynamics import state_tokens  # noqa: E402
 from igsw.adaptive_gaussian_wm.point_track_teacher import (  # noqa: E402
     FrozenPointTrackerRuntime,
     PointTrackEvidence,
@@ -260,6 +261,23 @@ def decoder_occlusion_contract(model, features, output, amp_context) -> dict[str
 @torch.no_grad()
 def zero_effect_contract(model, output, frame_times, amp_context) -> dict[str, float]:
     source = frame_state(output["state"], 0)
+    token_width = state_tokens(source).shape[-1]
+    require(
+        token_width == model.config.effect_state_token_dim,
+        "v51 effect-state token width differs from its configuration",
+    )
+    require(
+        token_width == model.dynamics.state_input.in_features,
+        "v51 effect-state token width differs from the Dynamics input",
+    )
+    require(
+        2 * token_width == model.effect_posterior.pair_input[0].normalized_shape[0],
+        "v51 paired effect-state token width differs from the Posterior input",
+    )
+    require(
+        model.state_encoder.predictor.input.in_features == model.config.memory_state_token_dim,
+        "v51 memory-state token width differs from the memory predictor input",
+    )
     effect = torch.zeros(
         len(frame_times),
         model.config.effect_factors,
@@ -270,7 +288,11 @@ def zero_effect_contract(model, output, frame_times, amp_context) -> dict[str, f
         predicted = model.dynamics(source, effect, frame_times[:, -1] - frame_times[:, 0])
     difference = max(maximum_difference(predicted[name], source[name]) for name in source)
     require(difference < 1e-6, "zero latent effect changes v51 object state")
-    return {"zero_effect_state_max_difference": difference}
+    return {
+        "effect_state_token_dim": float(token_width),
+        "memory_state_token_dim": float(model.config.memory_state_token_dim),
+        "zero_effect_state_max_difference": difference,
+    }
 
 
 @torch.no_grad()

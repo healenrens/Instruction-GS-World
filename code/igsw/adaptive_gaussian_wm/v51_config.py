@@ -76,8 +76,12 @@ class PointTrackObjectStateConfig:
         return self.tracker_grid_side**2 * len(self.tracker_anchor_fractions)
 
     @property
-    def state_token_dim(self) -> int:
+    def memory_state_token_dim(self) -> int:
         return self.state_dim + 2 + 1 + self.support_shape_dim + 3
+
+    @property
+    def effect_state_token_dim(self) -> int:
+        return self.state_dim + 2 + 1 + self.support_shape_dim + 2
 
     def validate(self) -> None:
         if self.object_slots < 2:

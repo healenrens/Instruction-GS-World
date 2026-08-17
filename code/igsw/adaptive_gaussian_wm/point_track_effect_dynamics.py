@@ -30,8 +30,8 @@ class PointTrackEffectPosterior(nn.Module):
         super().__init__()
         self.config = config
         self.pair_input = nn.Sequential(
-            nn.LayerNorm(2 * config.state_token_dim),
-            nn.Linear(2 * config.state_token_dim, config.state_dim),
+            nn.LayerNorm(2 * config.effect_state_token_dim),
+            nn.Linear(2 * config.effect_state_token_dim, config.state_dim),
             nn.GELU(),
             nn.Linear(config.state_dim, config.state_dim),
         )
@@ -58,7 +58,7 @@ class PointTrackEffectDynamics(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.state_input = nn.Linear(config.state_token_dim, config.state_dim)
+        self.state_input = nn.Linear(config.effect_state_token_dim, config.state_dim)
         self.effect_input = nn.Linear(config.effect_factors * config.effect_dim, config.state_dim)
         self.time_input = nn.Sequential(
             nn.Linear(5, config.state_dim), nn.SiLU(), nn.Linear(config.state_dim, config.state_dim)
