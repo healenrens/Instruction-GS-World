@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--source_revision", required=True)
     parser.add_argument("--evaluator_revision", default="")
-    parser.add_argument("--expected_step", type=int, default=22000)
+    parser.add_argument("--expected_step", type=int, default=22500)
     parser.add_argument("--dino_checkpoint", required=True)
     parser.add_argument("--tracker_checkpoint", required=True)
     parser.add_argument("--splits", default="heldseed,heldtask")
@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wandb_project", default="instruct-gs-world")
     parser.add_argument("--wandb_entity", default="")
     parser.add_argument(
-        "--wandb_name", default="point_track_object_state_v50_step22000_comprehensive"
+        "--wandb_name", default="point_track_object_state_v50_step22500_comprehensive"
     )
     parser.add_argument("--wandb_group", default="point-track-object-state-v50-eval")
     parser.add_argument("--wandb_dir", default="")
