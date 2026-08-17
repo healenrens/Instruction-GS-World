@@ -1,5 +1,7 @@
 """GPU verifier for the v51 point-track Object State contract."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -16,7 +18,9 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
 from igsw.adaptive_gaussian_wm.frozen_video_encoder import FrozenDinoVideoRuntime  # noqa: E402
 from igsw.adaptive_gaussian_wm.gradient_health import clip_finite_grad_norm_  # noqa: E402
-from igsw.adaptive_gaussian_wm.point_track_alignment import match_trajectory_teacher_to_student  # noqa: E402
+from igsw.adaptive_gaussian_wm.point_track_alignment import (
+    match_trajectory_teacher_to_student,
+)  # noqa: E402
 from igsw.adaptive_gaussian_wm.point_track_dataset import (  # noqa: E402
     POINT_TRACK_VIDEO_CONTRACT,
     PointTrackObjectVideoDataset,
@@ -29,7 +33,9 @@ from igsw.adaptive_gaussian_wm.point_track_world_model import (  # noqa: E402
     PointTrackObjectWorldModel,
     frame_state,
 )
-from igsw.adaptive_gaussian_wm.trajectory_component_teacher import build_trajectory_component_teacher  # noqa: E402
+from igsw.adaptive_gaussian_wm.trajectory_component_teacher import (
+    build_trajectory_component_teacher,
+)  # noqa: E402
 from igsw.adaptive_gaussian_wm.trajectory_lifecycle import (  # noqa: E402
     LIFECYCLE_ABSENT,
     LIFECYCLE_OCCLUDED,
@@ -95,28 +101,62 @@ def structural_contract(model, features, evidence, output) -> dict[str, float]:
     state = output["state"]
     batch, frames, patches = features.valid.shape
     slots = model.config.object_slots
-    require(state["identity"].shape == (batch, frames, slots, model.config.identity_dim), "v51 identity shape differs")
-    require(state["dynamic"].shape == (batch, frames, slots, model.config.dynamic_dim), "v51 dynamic shape differs")
-    require(state["support_shape"].shape == (batch, frames, slots, 3), "v51 support shape differs")
-    require(state["unobserved_time"].shape == (batch, frames, slots), "v51 unobserved-time shape differs")
-    require(state["assignment"].shape == (batch, frames, patches, model.config.owner_count), "v51 assignment shape differs")
-    require(output["student_tracklets"].features.shape == features.patches.shape, "v51 student tracklet shape differs")
-    require(output["student_tracklets"].temporal_residual.shape == features.patches.shape, "v51 temporal residual shape differs")
-    require(float(output["student_tracklets"].temporal_residual[:, 0].abs().max()) < 1e-6, "v51 first-frame temporal residual is not zero")
-    require(evidence.coordinates.shape == (batch, frames, model.config.tracker_queries, 2), "v51 point-track shape differs")
-    require(evidence.visibility.shape == (batch, frames, model.config.tracker_queries), "v51 visibility shape differs")
+    require(
+        state["identity"].shape == (batch, frames, slots, model.config.identity_dim),
+        "v51 identity shape differs",
+    )
+    require(
+        state["dynamic"].shape == (batch, frames, slots, model.config.dynamic_dim),
+        "v51 dynamic shape differs",
+    )
+    require(
+        state["support_shape"].shape == (batch, frames, slots, 3),
+        "v51 support shape differs",
+    )
+    require(
+        state["unobserved_time"].shape == (batch, frames, slots),
+        "v51 unobserved-time shape differs",
+    )
+    require(
+        state["assignment"].shape == (batch, frames, patches, model.config.owner_count),
+        "v51 assignment shape differs",
+    )
+    require(
+        output["student_tracklets"].features.shape == features.patches.shape,
+        "v51 student tracklet shape differs",
+    )
+    require(
+        output["student_tracklets"].temporal_residual.shape == features.patches.shape,
+        "v51 temporal residual shape differs",
+    )
+    require(
+        float(output["student_tracklets"].temporal_residual[:, 0].abs().max()) < 1e-6,
+        "v51 first-frame temporal residual is not zero",
+    )
+    require(
+        evidence.coordinates.shape == (batch, frames, model.config.tracker_queries, 2),
+        "v51 point-track shape differs",
+    )
+    require(
+        evidence.visibility.shape == (batch, frames, model.config.tracker_queries),
+        "v51 visibility shape differs",
+    )
     partition = state["assignment"].sum(dim=-1)
     partition_error = maximum_difference(partition[features.valid], torch.ones_like(partition[features.valid]))
     require(partition_error < 1e-5, "v51 encoder owners do not partition patches")
     decoder_partition = output["decoder_assignment"].sum(dim=-1)
     decoder_error = maximum_difference(
-        decoder_partition[features.valid], torch.ones_like(decoder_partition[features.valid])
+        decoder_partition[features.valid],
+        torch.ones_like(decoder_partition[features.valid]),
     )
     require(decoder_error < 1e-5, "v51 decoder owners do not partition patches")
     direction_norm = state["support_shape"][..., 1:].float().norm(dim=-1)
     shape_error = float((direction_norm - 1.0).abs().max())
     require(shape_error < 1e-3, "v51 support orientation is not normalized")
-    require(len(evidence.query_times.unique()) >= 2, "v51 tracker does not use multiple anchor times")
+    require(
+        len(evidence.query_times.unique()) >= 2,
+        "v51 tracker does not use multiple anchor times",
+    )
     teacher_components = float(output["teacher"].component_valid.float().sum(dim=-1).mean())
     require(teacher_components >= 1.0, "v51 verifier found no trajectory teacher component")
     return {
@@ -141,20 +181,14 @@ def causal_contract(model, features, batch, amp_context) -> dict[str, float]:
         _, reference = model.encode_student(
             features.patches, features.coordinates, features.valid, batch["frame_times"]
         )
-        _, altered = model.encode_student(
-            changed, features.coordinates, features.valid, batch["frame_times"]
-        )
-    difference = maximum_difference(
-        reference["identity"][:, :midpoint], altered["identity"][:, :midpoint]
-    )
+        _, altered = model.encode_student(changed, features.coordinates, features.valid, batch["frame_times"])
+    difference = maximum_difference(reference["identity"][:, :midpoint], altered["identity"][:, :midpoint])
     require(difference < 1e-6, "future RGB changed the causal v51 state prefix")
     return {"future_swap_prefix_max_difference": difference}
 
 
 @torch.no_grad()
-def external_track_contract(
-    model, features, evidence, output, frame_times, amp_context
-) -> dict[str, float]:
+def external_track_contract(model, features, evidence, output, frame_times, amp_context) -> dict[str, float]:
     match = output["match"]
     midpoint = evidence.coordinates.shape[1] // 2
     changed_coordinates = evidence.coordinates.clone()
@@ -169,11 +203,13 @@ def external_track_contract(
         query_times=evidence.query_times,
         sampled_features=changed_features,
     )
-    changed_teacher = build_trajectory_component_teacher(
-        shifted, model.config, frame_times
-    )
+    changed_teacher = build_trajectory_component_teacher(shifted, model.config, frame_times)
     changed = match_trajectory_teacher_to_student(
-        output["state"], shifted, changed_teacher, features.grid_hw, model.config.object_slots
+        output["state"],
+        shifted,
+        changed_teacher,
+        features.grid_hw,
+        model.config.object_slots,
     )
     with amp_context():
         changed_output = model(
@@ -184,15 +220,9 @@ def external_track_contract(
             shifted,
             features.grid_hw,
         )
-    student_difference = maximum_difference(
-        output["state"]["identity"], changed_output["state"]["identity"]
-    )
-    assignment_difference = maximum_difference(
-        match.target_student_owner, changed.target_student_owner
-    )
-    graph_difference = maximum_difference(
-        output["teacher"].graph_affinity, changed_teacher.graph_affinity
-    )
+    student_difference = maximum_difference(output["state"]["identity"], changed_output["state"]["identity"])
+    assignment_difference = maximum_difference(match.target_student_owner, changed.target_student_owner)
+    graph_difference = maximum_difference(output["teacher"].graph_affinity, changed_teacher.graph_affinity)
     require(graph_difference > 1e-6, "v51 teacher ignores external track identity")
     require(student_difference < 1e-6, "v51 deployment student reads teacher tracks")
     return {
@@ -204,21 +234,36 @@ def external_track_contract(
 
 @torch.no_grad()
 def decoder_occlusion_contract(model, features, output, amp_context) -> dict[str, float]:
-    state = {name: value[:, 0].clone() for name, value in output["state"].items() if name not in ("assignment", "mass")}
+    match = output["match"]
+    slot = int(match.component_score[0].argmax())
+    require(
+        bool(match.component_valid[0, slot]),
+        "v51 verifier found no valid component for decoder occlusion",
+    )
+    frame = int(match.visibility[0, :, slot].argmax())
+    state = {
+        name: value[:, frame].clone() for name, value in output["state"].items() if name not in ("assignment", "mass")
+    }
     with amp_context():
-        _, reference = model.decoder(state, features.coordinates[:, 0], features.valid[:, 0])
-        state["visibility"][:, 0] = 0.0
-        _, hidden = model.decoder(state, features.coordinates[:, 0], features.valid[:, 0])
-    decrease = float((reference[..., 0] - hidden[..., 0]).mean())
+        _, reference = model.decoder(state, features.coordinates[:, frame], features.valid[:, frame])
+        state["visibility"][:, slot] = 0.0
+        _, hidden = model.decoder(state, features.coordinates[:, frame], features.valid[:, frame])
+    valid = features.valid[:, frame].float()
+    decrease = float(((reference[..., slot] - hidden[..., slot]) * valid).sum() / valid.sum().clamp_min(1.0))
     require(decrease > 0.0, "occluded v51 object still participates in reconstruction")
-    return {"occluded_object_assignment_mean_decrease": decrease}
+    return {
+        "occluded_object_assignment_mean_decrease": decrease,
+        "occluded_object_slot": float(slot),
+    }
 
 
 @torch.no_grad()
 def zero_effect_contract(model, output, frame_times, amp_context) -> dict[str, float]:
     source = frame_state(output["state"], 0)
     effect = torch.zeros(
-        len(frame_times), model.config.effect_factors, model.config.effect_dim,
+        len(frame_times),
+        model.config.effect_factors,
+        model.config.effect_dim,
         device=frame_times.device,
     )
     with amp_context():
@@ -263,14 +308,23 @@ def teacher_semantics_contract(config, device) -> dict[str, float]:
     moving_is_object = float(object_owner[2:4].mean())
     absent = float((teacher.lifecycle_state == LIFECYCLE_ABSENT).sum())
     occluded = float((teacher.lifecycle_state == LIFECYCLE_OCCLUDED).sum())
-    require(static_is_object == 1.0, "v51 static persistent tracks are not object candidates")
-    require(moving_is_object == 1.0, "v51 moving persistent tracks are not object candidates")
+    require(
+        static_is_object == 1.0,
+        "v51 static persistent tracks are not object candidates",
+    )
+    require(
+        moving_is_object == 1.0,
+        "v51 moving persistent tracks are not object candidates",
+    )
     require(absent > 0.0, "v51 teacher produced no sustained-absence target")
     require(occluded > 0.0, "v51 teacher produced no gap/reappearance occlusion target")
     horizon_valid = teacher.relative_motion_valid.flatten(0, 2).any(dim=0)
     require(bool(horizon_valid.all()), "v51 teacher does not cover every motion horizon")
     geometry_horizon_valid = teacher.geometry_residual_valid.flatten(0, 2).any(dim=0)
-    require(bool(geometry_horizon_valid.all()), "v51 teacher does not cover every geometry horizon")
+    require(
+        bool(geometry_horizon_valid.all()),
+        "v51 teacher does not cover every geometry horizon",
+    )
     return {
         "static_teacher_object_fraction": static_is_object,
         "moving_teacher_object_fraction": moving_is_object,
@@ -290,18 +344,32 @@ def main() -> None:
     config = PointTrackObjectStateConfig()
     config.validate()
     semantics = teacher_semantics_contract(config, device)
-    dataset = PointTrackObjectVideoDataset(
-        args.data, "train", max_items=64, seed=args.seed
-    )
+    dataset = PointTrackObjectVideoDataset(args.data, "train", max_items=64, seed=args.seed)
     samples = [dataset[(index, args.chunk_length)] for index in range(1)]
-    forbidden = {"instruction", "condition_feature", "teacher_sidecar", "segmentation", "action", "dino"}
-    require(not forbidden.intersection(samples[0]), "v51 dataset exposed forbidden supervision")
+    forbidden = {
+        "instruction",
+        "condition_feature",
+        "teacher_sidecar",
+        "segmentation",
+        "action",
+        "dino",
+    }
+    require(
+        not forbidden.intersection(samples[0]),
+        "v51 dataset exposed forbidden supervision",
+    )
     batch = default_collate(samples)
     batch = {name: value.to(device) if torch.is_tensor(value) else value for name, value in batch.items()}
     dino = FrozenDinoVideoRuntime(config, device, args.amp, args.dino_frame_batch, args.dino_checkpoint)
     point_tracker = FrozenPointTrackerRuntime(config, device, args.tracker_checkpoint, 1)
-    require(not any(parameter.requires_grad for parameter in dino.backbone.parameters()), "v51 DINO is not frozen")
-    require(not any(parameter.requires_grad for parameter in point_tracker.model.parameters()), "v51 point tracker is not frozen")
+    require(
+        not any(parameter.requires_grad for parameter in dino.backbone.parameters()),
+        "v51 DINO is not frozen",
+    )
+    require(
+        not any(parameter.requires_grad for parameter in point_tracker.model.parameters()),
+        "v51 point tracker is not frozen",
+    )
     features = dino(batch)
     evidence = point_tracker(batch, features.patches, features.grid_hw)
     require(bool(evidence.visibility.any()), "v51 verifier found no visible point track")
@@ -309,25 +377,34 @@ def main() -> None:
     model = PointTrackObjectWorldModel(config, "object_state").to(device).train()
     with amp_context():
         state_output = model(
-            features.patches, features.coordinates, features.valid,
-            batch["frame_times"], evidence, features.grid_hw,
+            features.patches,
+            features.coordinates,
+            features.valid,
+            batch["frame_times"],
+            evidence,
+            features.grid_hw,
         )
-    require(bool(torch.isfinite(state_output["loss"])), "v51 Object State loss is non-finite")
+    require(
+        bool(torch.isfinite(state_output["loss"])),
+        "v51 Object State loss is non-finite",
+    )
     structural = structural_contract(model, features, evidence, state_output)
     state_gradients = finite_gradient_contract(model, state_output, "object_state")
     model.eval()
     causal = causal_contract(model, features, batch, amp_context)
-    external = external_track_contract(
-        model, features, evidence, state_output, batch["frame_times"], amp_context
-    )
+    external = external_track_contract(model, features, evidence, state_output, batch["frame_times"], amp_context)
     occlusion = decoder_occlusion_contract(model, features, state_output, amp_context)
     zero = zero_effect_contract(model, state_output, batch["frame_times"], amp_context)
     model.set_stage("latent_effect")
     model.train()
     with amp_context():
         effect_output = model(
-            features.patches, features.coordinates, features.valid,
-            batch["frame_times"], None, features.grid_hw,
+            features.patches,
+            features.coordinates,
+            features.valid,
+            batch["frame_times"],
+            None,
+            features.grid_hw,
         )
     effect_gradients = finite_gradient_contract(model, effect_output, "latent_effect")
     report = {
