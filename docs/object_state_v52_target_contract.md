@@ -49,6 +49,8 @@ The dynamic target at time $t$ uses only observed trailing motion $t-h\rightarro
 - Persistent cycle, pair-relation, and identity-negative losses are gated by object evidence. Static scene tracks cannot be pulled into object roots by a relation loss that conflicts with their scene target.
 - Scene tracks use the scene-owner target and low-weight compositional reconstruction. Transient tracks receive an owner target but no identity-permanence target.
 - DINO appearance helps form confidence-weighted pair evidence and the auxiliary compositional reconstruction. A root identity is not regressed to a surface-point DINO vector, because different parts of one object need not share the same patch appearance.
+- Geometry and trailing motion targets are relation-weighted object aggregates, not individual point coordinates or point flows. An isolated track without reliable object-relation support contributes no object geometry or dynamic target.
+- Motion alone does not create an object target. A moving track needs coherent relation support from another track; unsupported or short-lived motion is routed to transient rather than consuming a persistent environment-object root.
 
 ## Objective falsification gate
 
@@ -73,3 +75,18 @@ Each corruption must increase its intended loss term, not merely the total by ac
 - No action-free future prediction, Dynamics, latent effect, language, RGB reconstruction target, or instance segmentation is included.
 - Held point-track evaluation is reported as teacher agreement, not independent object truth.
 - Dynamics and object-bound latent effect remain prohibited until independent Object State evaluation is available and passes.
+
+## Independent promotion evaluation
+
+The independent promotion path never imports or runs the training point tracker. It reads a small evaluation-only `independent_object_truth_v1` sidecar with stable object IDs, per-frame instance masks, and explicit `unknown/absent/present` lifecycle labels. These labels are not used by training.
+
+The JSON manifest contains `contract`, `complete`, `provenance`, and `items`. `provenance.kind` must be `simulator_ground_truth` or `human_annotation`, and `provenance.uses_training_tracker` must be `false`. Each item declares `split`, `episode_filename`, and a relative `annotation` path. Its PyTorch annotation contains:
+
+- `contract: independent_object_truth_v1`;
+- `episode_filename`;
+- `frame_indices: [T]` increasing `int64` indices;
+- `instance_masks: [T,H,W]`, where `-1` is ignored, `0` is scene/background, and positive values are stable object IDs;
+- `object_ids: [O]` listing the evaluated environmental objects;
+- `object_presence: [T,O]`, using `-1` for unknown, `0` for absent, and `1` for present.
+
+Ambiguous manipulator pixels, shadows, reflections, and uncertain boundaries should be `-1`, not forced into scene or an environmental object. The independent gate measures foreground routing, background routing, object separation, temporal assignment, identity reappearance, relative center, lifecycle, and deletion locality on these external masks. Passing the track-teacher evaluator alone cannot set `deployment_promotion_ready=true`.
