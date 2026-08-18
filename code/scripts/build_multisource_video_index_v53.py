@@ -52,11 +52,13 @@ def cache_episodes(source: dict, source_index: int) -> list[dict]:
 
 
 def find_task_roots(root: str) -> list[str]:
-    roots = []
-    for directory, _, filenames in os.walk(root):
-        if "info.json" in filenames and os.path.basename(directory) == "meta":
-            roots.append(os.path.dirname(directory))
-    return sorted(roots)
+    info_paths = [os.path.join(root, "meta", "info.json")]
+    info_paths.extend(glob(os.path.join(root, "*", "meta", "info.json")))
+    return sorted(
+        os.path.dirname(os.path.dirname(path))
+        for path in info_paths
+        if os.path.isfile(path)
+    )
 
 
 def select_camera(info: dict, source: dict, task_root: str) -> str:
