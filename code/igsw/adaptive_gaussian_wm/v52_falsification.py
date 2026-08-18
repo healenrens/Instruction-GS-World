@@ -17,7 +17,7 @@ def _one_hot_owner(index: torch.Tensor, owners: int) -> torch.Tensor:
     return F.one_hot(index.long(), num_classes=owners).float()
 
 
-def _synthetic_contract(config, device: torch.device):
+def build_synthetic_objective_contract(config, device: torch.device):
     batch, frames, points = 1, 6, 8
     owners = config.owner_count
     coordinates = torch.zeros(batch, frames, points, 2, device=device)
@@ -186,7 +186,7 @@ def _corruptions(prediction, teacher, config):
 
 
 def run_objective_falsification(config, device: torch.device) -> dict:
-    teacher, evidence, reasonable = _synthetic_contract(config, device)
+    teacher, evidence, reasonable = build_synthetic_objective_contract(config, device)
     reference = object_state_target_terms(reasonable, teacher, evidence, config)
     corruptions = _corruptions(reasonable, teacher, config)
     results = {

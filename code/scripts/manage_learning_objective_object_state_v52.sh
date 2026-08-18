@@ -24,6 +24,10 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export PYTHONPATH="${RUNTIME_ROOT}/third_party/co-tracker:${ROOT}/code:${PYTHONPATH:-}"
 
 verify_run() {
+  if [ -z "${SOURCE_REVISION}" ]; then
+    echo "[object-state-v52-manager] SOURCE_REVISION is missing"
+    return 2
+  fi
   mkdir -p "$(dirname "${GATE_REPORT}")"
   rm -f "${GATE_REPORT}"
   CUDA_VISIBLE_DEVICES="${VERIFY_CUDA_VISIBLE_DEVICES:-0}" \

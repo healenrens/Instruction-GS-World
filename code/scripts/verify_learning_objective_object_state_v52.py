@@ -40,6 +40,7 @@ from igsw.adaptive_gaussian_wm.v52_config import (  # noqa: E402
     LearningObjectiveObjectStateConfig,
 )
 from igsw.adaptive_gaussian_wm.v52_falsification import (  # noqa: E402
+    build_synthetic_objective_contract,
     run_objective_falsification,
 )
 
@@ -195,8 +196,8 @@ def teacher_isolation_contract(model, features, batch, evidence, output, amp_con
     }
 
 
-def factorized_gradient_contract(output, evidence, config) -> dict[str, float]:
-    base = output["prediction"]
+def factorized_gradient_contract(config, device) -> dict[str, float]:
+    teacher, evidence, base = build_synthetic_objective_contract(config, device)
     tensors = {
         "assignment": base.assignment.detach().float().requires_grad_(True),
         "identity": base.identity.detach().float().requires_grad_(True),
@@ -207,7 +208,7 @@ def factorized_gradient_contract(output, evidence, config) -> dict[str, float]:
         "decoder_assignment": base.decoder_assignment.detach().float().requires_grad_(True),
     }
     prediction = ObjectStatePredictions(**tensors)
-    terms = object_state_target_terms(prediction, output["teacher"], evidence, config)
+    terms = object_state_target_terms(prediction, teacher, evidence, config)
     expected = {
         "identity": ("identity",),
         "motion": ("motion",),
@@ -281,7 +282,7 @@ def main() -> None:
             batch["frame_times"], evidence, features.grid_hw,
         )
     structure = structural_contract(model, features, evidence, output)
-    factorization = factorized_gradient_contract(output, evidence, config)
+    factorization = factorized_gradient_contract(config, device)
     gradients = finite_gradient_contract(model, output)
     model.eval()
     causal = causal_contract(model, features, batch, amp_context)
