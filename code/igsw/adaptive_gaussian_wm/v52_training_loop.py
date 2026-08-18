@@ -129,7 +129,6 @@ def train_v52(
                         "state_encoder": ("state_encoder.",),
                         "student_tracklets": ("student_tracklets.",),
                         "compositional_decoder": ("decoder.",),
-                        "identity_head": ("identity_readout.",),
                         "motion_head": ("motion_readout.",),
                     },
                 ))

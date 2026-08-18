@@ -43,18 +43,24 @@ def _assignment_terms(prediction, teacher, config):
     visible = teacher.visibility.float()
     mean_owner = visible_track_mean(assignment, visible)
     temporal_similarity = (assignment * mean_owner[:, None]).sum(dim=-1)
-    track_cycle = weighted_mean(1.0 - temporal_similarity, visible)
+    object_weight = teacher.object_confidence[:, None] * visible
+    track_cycle = weighted_mean(1.0 - temporal_similarity, object_weight)
 
     object_mean = mean_owner[..., : config.object_slots]
     relation_similarity = torch.einsum("bpk,bqk->bpq", object_mean, object_mean)
-    same = weighted_mean(1.0 - relation_similarity, teacher.same_confidence)
-    different = weighted_mean(relation_similarity, teacher.different_confidence)
+    object_pair = (
+        teacher.object_confidence[:, :, None]
+        * teacher.object_confidence[:, None]
+    )
+    same_weight = teacher.same_confidence * object_pair
+    different_weight = teacher.different_confidence * object_pair
+    same = weighted_mean(1.0 - relation_similarity, same_weight)
+    different = weighted_mean(relation_similarity, different_weight)
     relation = same + different
 
     object_probability = assignment[..., : config.object_slots].sum(dim=-1)
     scene_probability = assignment[..., config.object_slots]
     transient_probability = assignment[..., config.object_slots + 1]
-    object_weight = teacher.object_confidence[:, None] * visible
     scene_weight = teacher.scene_confidence[:, None] * visible
     transient_weight = teacher.transient_confidence[:, None] * visible
     owner_evidence = weighted_mean(-object_probability.log(), object_weight)
@@ -93,11 +99,7 @@ def _assignment_terms(prediction, teacher, config):
 
 def _identity_term(prediction, teacher, config):
     identity = F.normalize(prediction.identity.float(), dim=-1, eps=1e-6)
-    target = teacher.track_identity[:, None]
     visible_object = teacher.visibility.float() * teacher.object_confidence[:, None]
-    appearance = weighted_mean(
-        1.0 - (identity * target).sum(dim=-1), visible_object
-    )
     mean_identity = F.normalize(
         visible_track_mean(identity, teacher.visibility), dim=-1, eps=1e-6
     )
@@ -105,11 +107,19 @@ def _identity_term(prediction, teacher, config):
         1.0 - (identity * mean_identity[:, None]).sum(dim=-1), visible_object
     )
     pair_similarity = torch.einsum("bpd,bqd->bpq", mean_identity, mean_identity)
+    object_pair = (
+        teacher.object_confidence[:, :, None]
+        * teacher.object_confidence[:, None]
+    )
+    same = weighted_mean(
+        1.0 - pair_similarity,
+        teacher.same_confidence * object_pair,
+    )
     negative = weighted_mean(
         F.relu(pair_similarity - config.identity_negative_margin),
-        teacher.different_confidence,
+        teacher.different_confidence * object_pair,
     )
-    return appearance + temporal + negative, appearance, temporal, negative
+    return temporal + same + negative, temporal, same, negative
 
 
 def _motion_geometry_terms(prediction, teacher, evidence):
@@ -151,7 +161,7 @@ def object_state_target_terms(
     config,
 ) -> dict[str, torch.Tensor]:
     assignments = _assignment_terms(prediction, teacher, config)
-    identity, appearance, identity_temporal, identity_negative = _identity_term(
+    identity, identity_temporal, identity_same, identity_negative = _identity_term(
         prediction, teacher, config
     )
     motion, geometry = _motion_geometry_terms(prediction, teacher, evidence)
@@ -173,8 +183,8 @@ def object_state_target_terms(
     terms = {
         "target_total": total,
         "identity": identity,
-        "identity_appearance": appearance,
         "identity_temporal": identity_temporal,
+        "identity_same": identity_same,
         "identity_negative": identity_negative,
         "motion": motion,
         "geometry": geometry,

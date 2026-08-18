@@ -65,7 +65,12 @@ def batch_metrics(model, features, evidence, output, amp_context):
     prediction, teacher = output["prediction"], output["teacher"]
     assignment = prediction.assignment.float()
     visible = teacher.visibility.float()
-    pair_visible = visible[:, 1:] * visible[:, :-1]
+    object_weight = visible * teacher.object_confidence[:, None]
+    pair_visible = (
+        visible[:, 1:]
+        * visible[:, :-1]
+        * teacher.object_confidence[:, None]
+    )
     correct = F.cosine_similarity(assignment[:, 1:], assignment[:, :-1], dim=-1)
     shuffled = F.cosine_similarity(
         assignment[:, 1:], assignment[:, :-1].roll(1, dims=2), dim=-1
@@ -74,12 +79,19 @@ def batch_metrics(model, features, evidence, output, amp_context):
     mean_owner = mean_owner / visible.sum(dim=1).clamp_min(1.0)[..., None]
     object_mean = mean_owner[..., : model.config.object_slots]
     relation_similarity = torch.einsum("bpk,bqk->bpq", object_mean, object_mean)
-    identity = F.cosine_similarity(
-        prediction.identity.float(), teacher.track_identity[:, None].float(), dim=-1
+    object_pair = (
+        teacher.object_confidence[:, :, None]
+        * teacher.object_confidence[:, None]
     )
-    identity_shuffled = F.cosine_similarity(
-        prediction.identity.float(), teacher.track_identity.roll(1, dims=1)[:, None].float(), dim=-1
+    identity = F.normalize(prediction.identity.float(), dim=-1, eps=1e-6)
+    mean_identity = (identity * visible[..., None]).sum(dim=1)
+    mean_identity = F.normalize(
+        mean_identity / visible.sum(dim=1).clamp_min(1.0)[..., None],
+        dim=-1,
+        eps=1e-6,
     )
+    identity_temporal = (identity * mean_identity[:, None]).sum(dim=-1)
+    identity_relation = torch.einsum("bpd,bqd->bpq", mean_identity, mean_identity)
     motion_error = F.smooth_l1_loss(
         prediction.motion.float(), teacher.motion.float(), reduction="none"
     ).mean(dim=-1)
@@ -104,15 +116,20 @@ def batch_metrics(model, features, evidence, output, amp_context):
     values = {
         "track_consistency": weighted(correct, pair_visible),
         "track_shuffled_consistency": weighted(shuffled, pair_visible),
-        "same_relation_similarity": weighted(relation_similarity, teacher.same_confidence),
+        "same_relation_similarity": weighted(
+            relation_similarity, teacher.same_confidence * object_pair
+        ),
         "different_relation_similarity": weighted(
-            relation_similarity, teacher.different_confidence
+            relation_similarity, teacher.different_confidence * object_pair
         ),
-        "identity_cosine": weighted(
-            identity, visible * teacher.object_confidence[:, None]
+        "identity_temporal_cosine": weighted(
+            identity_temporal, object_weight
         ),
-        "identity_shuffled_cosine": weighted(
-            identity_shuffled, visible * teacher.object_confidence[:, None]
+        "identity_same_similarity": weighted(
+            identity_relation, teacher.same_confidence * object_pair
+        ),
+        "identity_different_similarity": weighted(
+            identity_relation, teacher.different_confidence * object_pair
         ),
         "motion_error": weighted(motion_error, motion_weight),
         "zero_motion_error": weighted(zero_motion, motion_weight),
@@ -188,7 +205,10 @@ def evaluate_condition(model, loader, dino, tracker, device, amp_context):
     metrics = {name: value / max(count, 1) for name, value in sums.items()}
     metrics["track_margin"] = metrics["track_consistency"] - metrics["track_shuffled_consistency"]
     metrics["relation_margin"] = metrics["same_relation_similarity"] - metrics["different_relation_similarity"]
-    metrics["identity_margin"] = metrics["identity_cosine"] - metrics["identity_shuffled_cosine"]
+    metrics["identity_margin"] = (
+        metrics["identity_same_similarity"]
+        - metrics["identity_different_similarity"]
+    )
     metrics["motion_gain_over_zero"] = (
         metrics["zero_motion_error"] - metrics["motion_error"]
     ) / max(metrics["zero_motion_error"], 1e-6)
@@ -198,7 +218,8 @@ def evaluate_condition(model, loader, dino, tracker, device, amp_context):
     checks = {
         "track_correspondence": metrics["track_margin"] >= 0.03,
         "relation_separation": metrics["relation_margin"] >= 0.10,
-        "identity_separation": metrics["identity_margin"] >= 0.03,
+        "identity_temporal_stability": metrics["identity_temporal_cosine"] >= 0.90,
+        "identity_separation": metrics["identity_margin"] >= 0.10,
         "motion_decodable": metrics["motion_gain_over_zero"] >= 0.10,
         "lifecycle_decodable": metrics["visibility_accuracy"] >= 0.75
         and metrics["presence_accuracy"] >= 0.75,

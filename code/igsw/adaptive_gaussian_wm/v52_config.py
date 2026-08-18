@@ -32,6 +32,7 @@ class LearningObjectiveObjectStateConfig:
     decoder_spatial_rank: int = 4
     identity_update_rate: float = 0.20
     lifecycle_visible_track_fraction: float = 0.20
+    # Trailing observed-history horizons, never future-prediction horizons.
     dynamic_horizons: tuple[int, ...] = (1, 2, 4, 8)
     dropout: float = 0.0
 

@@ -37,6 +37,8 @@ $$
 
 Only identity is temporally invariant. Dynamic state, geometry, visibility, and support are expected to change.
 
+The dynamic target at time $t$ uses only observed trailing motion $t-h\rightarrow t$ for several history horizons $h$. It does not ask the Object State encoder to predict $t\rightarrow t+h$. Future transition prediction remains outside v52.
+
 ## Supervision boundary
 
 - Deployment Student input: observed RGB history only, encoded by frozen DINO and the causal Student.
@@ -44,6 +46,9 @@ Only identity is temporally invariant. Dynamic state, geometry, visibility, and 
 - Allowed teacher claims: same surface point, observed visibility, measured relative motion, high-confidence pair relations.
 - Forbidden teacher claims: fixed object index, semantic instance truth, absence inferred from missing visibility alone.
 - Unknown evidence contributes no target gradient.
+- Persistent cycle, pair-relation, and identity-negative losses are gated by object evidence. Static scene tracks cannot be pulled into object roots by a relation loss that conflicts with their scene target.
+- Scene tracks use the scene-owner target and low-weight compositional reconstruction. Transient tracks receive an owner target but no identity-permanence target.
+- DINO appearance helps form confidence-weighted pair evidence and the auxiliary compositional reconstruction. A root identity is not regressed to a surface-point DINO vector, because different parts of one object need not share the same patch appearance.
 
 ## Objective falsification gate
 

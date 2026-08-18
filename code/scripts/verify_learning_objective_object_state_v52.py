@@ -198,14 +198,20 @@ def teacher_isolation_contract(model, features, batch, evidence, output, amp_con
 
 def factorized_gradient_contract(config, device) -> dict[str, float]:
     teacher, evidence, base = build_synthetic_objective_contract(config, device)
+    perturbed_identity = base.identity.detach().float().clone()
+    perturbed_identity[:, perturbed_identity.shape[1] // 2 :] = perturbed_identity[
+        :, perturbed_identity.shape[1] // 2 :
+    ].roll(1, dims=-1)
+    decoder_assignment = 0.90 * base.decoder_assignment.detach().float()
+    decoder_assignment = decoder_assignment + 0.10 / config.owner_count
     tensors = {
         "assignment": base.assignment.detach().float().requires_grad_(True),
-        "identity": base.identity.detach().float().requires_grad_(True),
-        "motion": base.motion.detach().float().requires_grad_(True),
-        "center": base.center.detach().float().requires_grad_(True),
+        "identity": perturbed_identity.requires_grad_(True),
+        "motion": (base.motion.detach().float() + 0.05).requires_grad_(True),
+        "center": (base.center.detach().float() + 0.05).requires_grad_(True),
         "visibility": base.visibility.detach().float().requires_grad_(True),
         "presence": base.presence.detach().float().requires_grad_(True),
-        "decoder_assignment": base.decoder_assignment.detach().float().requires_grad_(True),
+        "decoder_assignment": decoder_assignment.requires_grad_(True),
     }
     prediction = ObjectStatePredictions(**tensors)
     terms = object_state_target_terms(prediction, teacher, evidence, config)

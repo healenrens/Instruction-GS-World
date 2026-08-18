@@ -151,8 +151,8 @@ def _motion_targets(evidence: PointTrackEvidence, frame_times: torch.Tensor, con
             dim=2, keepdim=True
         ).clamp_min(1.0)[..., None]
         residual = (displacement - global_displacement) / dt[..., None, None].clamp_min(1e-4)
-        target[:, :-horizon, :, horizon_index] = residual
-        valid[:, :-horizon, :, horizon_index] = pair_valid
+        target[:, horizon:, :, horizon_index] = residual
+        valid[:, horizon:, :, horizon_index] = pair_valid
     return target, valid
 
 

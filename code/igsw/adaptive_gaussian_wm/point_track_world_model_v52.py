@@ -29,7 +29,6 @@ class LearningObjectiveObjectWorldModel(nn.Module):
         self.student_tracklets = CausalStudentTrackletEncoder(config)
         self.state_encoder = PointTrackObjectStateEncoder(config)
         self.decoder = PointTrackCompositionalDecoder(config)
-        self.identity_readout = nn.Linear(config.identity_dim, config.patch_dim)
         self.motion_readout = nn.Linear(
             config.dynamic_dim, len(config.dynamic_horizons) * 2
         )
@@ -68,9 +67,7 @@ class LearningObjectiveObjectWorldModel(nn.Module):
         objects = encoder_assignment[..., : self.config.object_slots]
         object_probability = objects.sum(dim=-1, keepdim=True).clamp_min(1e-6)
         normalized = (objects / object_probability).detach()
-        root_identity = F.normalize(
-            self.identity_readout(state["identity"].float()), dim=-1, eps=1e-6
-        )
+        root_identity = F.normalize(state["identity"].float(), dim=-1, eps=1e-6)
         identity = torch.einsum("btpk,btkd->btpd", normalized, root_identity)
         root_motion = self.motion_readout(state["dynamic"].float()).reshape(
             *state["dynamic"].shape[:3], len(self.config.dynamic_horizons), 2
@@ -119,6 +116,10 @@ class LearningObjectiveObjectWorldModel(nn.Module):
             valid.float(),
         )
         loss = terms["target_total"] + self.config.reconstruction_weight * reconstruction_loss
+        object_pair = (
+            teacher.object_confidence[:, :, None]
+            * teacher.object_confidence[:, None]
+        )
         parts = {
             "loss": loss,
             "loss_object_state": loss,
@@ -126,6 +127,12 @@ class LearningObjectiveObjectWorldModel(nn.Module):
             "loss_reconstruction_auxiliary": reconstruction_loss,
             "teacher_same_relation_weight": teacher.same_confidence.mean(),
             "teacher_different_relation_weight": teacher.different_confidence.mean(),
+            "teacher_supervised_same_relation_weight": (
+                teacher.same_confidence * object_pair
+            ).mean(),
+            "teacher_supervised_different_relation_weight": (
+                teacher.different_confidence * object_pair
+            ).mean(),
             "teacher_object_confidence": teacher.object_confidence.mean(),
             "teacher_scene_confidence": teacher.scene_confidence.mean(),
             "teacher_transient_confidence": teacher.transient_confidence.mean(),

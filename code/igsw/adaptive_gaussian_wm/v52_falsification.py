@@ -59,8 +59,8 @@ def build_synthetic_objective_contract(config, device: torch.device):
     motion = torch.zeros(
         batch, frames, points, len(config.dynamic_horizons), 2, device=device
     )
-    motion[:, :, 0:2, :, 0] = 0.25
-    motion[:, :, 2:4, :, 0] = -0.25
+    motion[:, :, 0:2, :, 0] = 0.50
+    motion[:, :, 2:4, :, 0] = -0.50
     motion_valid = visibility[..., None].expand_as(motion[..., 0]).clone()
     teacher = TrajectoryRelationTeacher(
         track_identity=track_identity,
@@ -93,7 +93,13 @@ def build_synthetic_objective_contract(config, device: torch.device):
         device=device,
     )[None, None].expand(batch, frames, -1).clone()
     assignment = _one_hot_owner(owner_index, owners)
-    identity = track_identity[:, None].expand(-1, frames, -1, -1).clone()
+    identity = torch.zeros(
+        batch, frames, points, config.identity_dim, device=device
+    )
+    identity[:, :, 0:2, 0] = 1.0
+    identity[:, :, 2:4, 1] = 1.0
+    identity[:, :, 4:6, 2] = 1.0
+    identity[:, :, 6:8, 3] = 1.0
     center = coordinates.clone()
     visible_prediction = visibility.float() * 0.98 + (~visibility).float() * 0.02
     prediction = ObjectStatePredictions(
@@ -139,8 +145,8 @@ def _corruptions(prediction, teacher, config):
         prediction, _one_hot_owner(swap_index, config.owner_count)
     )
     swapped_identity = identity_swap.identity.clone()
-    swapped_identity[:, 3:, 0:2] = teacher.track_identity[:, None, 2:3]
-    swapped_identity[:, 3:, 2:4] = teacher.track_identity[:, None, 0:1]
+    swapped_identity[:, 3:, 0:2] = prediction.identity[:, :1, 2:3]
+    swapped_identity[:, 3:, 2:4] = prediction.identity[:, :1, 0:1]
     identity_swap = replace(identity_swap, identity=swapped_identity)
 
     scene_index = torch.where(
@@ -196,7 +202,7 @@ def run_objective_falsification(config, device: torch.device) -> dict:
     expected = {
         "merge_all": "different_relation",
         "split_by_time": "track_cycle",
-        "identity_swap": "track_cycle",
+        "identity_swap": "identity",
         "all_scene": "owner_evidence",
         "background_lock": "owner_evidence",
         "track_per_slot": "same_relation",
