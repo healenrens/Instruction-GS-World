@@ -16,6 +16,10 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
 from igsw.adaptive_gaussian_wm.frozen_video_encoder import FrozenDinoVideoRuntime  # noqa: E402
 from igsw.adaptive_gaussian_wm.gradient_health import clip_finite_grad_norm_  # noqa: E402
+from igsw.adaptive_gaussian_wm.multisource_point_track_dataset import (  # noqa: E402
+    MULTISOURCE_POINT_TRACK_CONTRACT,
+    MultiSourcePointTrackObjectVideoDataset,
+)
 from igsw.adaptive_gaussian_wm.object_state_target_v52 import (  # noqa: E402
     ObjectStatePredictions,
     object_state_target_terms,
@@ -57,6 +61,7 @@ def maximum_difference(left: torch.Tensor, right: torch.Tensor) -> float:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True)
+    parser.add_argument("--data_index", default="")
     parser.add_argument("--output", required=True)
     parser.add_argument("--source_revision", required=True)
     parser.add_argument("--dino_checkpoint", required=True)
@@ -249,8 +254,14 @@ def main() -> None:
     config.validate()
     falsification = run_objective_falsification(config, device)
     require(falsification["status"] == "passed", "v52 objective falsification failed")
-    dataset = PointTrackObjectVideoDataset(
-        args.data, "train", max_items=64, seed=args.seed
+    dataset = (
+        MultiSourcePointTrackObjectVideoDataset(
+            args.data_index, "train", max_items=0, seed=args.seed
+        )
+        if args.data_index
+        else PointTrackObjectVideoDataset(
+            args.data, "train", max_items=64, seed=args.seed
+        )
     )
     sample = dataset[(0, args.chunk_length)]
     forbidden = {
@@ -258,6 +269,20 @@ def main() -> None:
         "action", "dino",
     }
     require(not forbidden.intersection(sample), "v52 dataset exposed forbidden supervision")
+    source_probe_count = 1
+    if args.data_index:
+        probes = [dataset[(index, args.chunk_length)] for index in dataset.source_probe_indices]
+        require(len(probes) == len(dataset.source_names), "v52 did not probe every video source")
+        require(
+            all(tuple(item["video_rgb"].shape[-2:]) == (518, 518) for item in probes),
+            "v52 multisource RGB preprocessing differs",
+        )
+        require(
+            all(bool((item["frame_times"][1:] > item["frame_times"][:-1]).all()) for item in probes),
+            "v52 multisource frame times are not strictly increasing",
+        )
+        sample = probes[0]
+        source_probe_count = len(probes)
     batch = default_collate([sample])
     batch = {
         name: value.to(device) if torch.is_tensor(value) else value
@@ -299,9 +324,18 @@ def main() -> None:
         "status": "passed",
         "checkpoint_version": CHECKPOINT_VERSION,
         "architecture": ARCHITECTURE,
-        "contract": POINT_TRACK_VIDEO_CONTRACT,
+        "contract": (
+            MULTISOURCE_POINT_TRACK_CONTRACT
+            if args.data_index else POINT_TRACK_VIDEO_CONTRACT
+        ),
         "git_commit": args.source_revision,
         "data": os.path.abspath(args.data),
+        "data_index": os.path.abspath(args.data_index) if args.data_index else "",
+        "source_names": list(getattr(dataset, "source_names", ("robotwin",))),
+        "source_episode_counts": list(getattr(dataset, "source_episode_counts", ())),
+        "source_task_counts": list(getattr(dataset, "source_task_counts", ())),
+        "source_target_samples": list(getattr(dataset, "source_target_samples", ())),
+        "source_probe_count": source_probe_count,
         "historical_checkpoint_used": False,
         "hard_component_pseudo_labels": False,
         "point_tracker_role": "training_only_correspondence_and_relation_evidence",

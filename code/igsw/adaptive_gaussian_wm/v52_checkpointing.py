@@ -59,7 +59,8 @@ def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
         raise ValueError("v52 resume model config differs")
     saved = checkpoint.get("args", {})
     immutable = (
-        "data", "chunk_lengths", "temporal_strides", "batch", "grad_accum",
+        "data", "data_index", "chunk_lengths", "temporal_strides",
+        "temporal_step_ms", "batch", "grad_accum",
         "target_global_batch", "steps", "lr", "lr_floor", "weight_decay",
         "warmup_steps", "seed", "amp", "dino_checkpoint", "tracker_checkpoint",
         "tracker_sequence_batch",

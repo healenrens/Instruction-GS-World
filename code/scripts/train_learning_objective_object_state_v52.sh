@@ -7,6 +7,7 @@ ROOT="${ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 DATA="${DATA:-${RUNTIME_ROOT}/data/rt2_visual_episodes_rgb_native_30hz_v4}"
+DATA_INDEX="${DATA_INDEX:-}"
 SOURCE_REVISION="${SOURCE_REVISION:-}"
 RUN_NAME="${RUN_NAME:-learning_objective_object_state_v52_seed17_${SOURCE_REVISION:0:7}}"
 OUT="${OUT:-${RUNTIME_ROOT}/outputs/${RUN_NAME}}"
@@ -115,11 +116,14 @@ ARGS=(
   --wandb_tags "${WANDB_TAGS:-v52,pure-video,objective-first,object-state}"
   --wandb_dir "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}"
 )
+if [ -n "${DATA_INDEX}" ]; then
+  ARGS+=(--data_index "${DATA_INDEX}" --temporal_step_ms "${TEMPORAL_STEP_MS:-33,67,100,133}")
+fi
 if [ -n "${RESUME:-}" ]; then ARGS+=(--resume "${RESUME}"); fi
 if [ -n "${WANDB_RUN_ID:-}" ]; then ARGS+=(--wandb_run_id "${WANDB_RUN_ID}"); fi
 if [ -n "${MAX_TRAIN_ITEMS:-}" ]; then ARGS+=(--max_train_items "${MAX_TRAIN_ITEMS}"); fi
 
-echo "[object-state-v52] root=${ROOT} data=${DATA} out=${OUT}"
+echo "[object-state-v52] root=${ROOT} data=${DATA} data_index=${DATA_INDEX} out=${OUT}"
 echo "[object-state-v52] world=${NPROC_PER_NODE} gpu_memory_mib=${MIN_GPU_MEMORY_MIB} batch_per_gpu=${BATCH_PER_GPU} grad_accum=${GRAD_ACCUM} effective_batch=${TARGET_GLOBAL_BATCH}"
 echo "[object-state-v52] dino_frame_batch=${DINO_FRAME_BATCH} workers_per_rank=${WORKERS_PER_RANK}"
 echo "[object-state-v52] source_revision=${SOURCE_REVISION} target_step=22500"

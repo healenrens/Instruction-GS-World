@@ -26,7 +26,7 @@ def checkpoint_due(step: int, args):
     return None
 
 
-def summarize_window(by_length, counts, world_size):
+def summarize_window(by_length, counts, source_counts, task_groups, source_names, world_size):
     total = sum(counts.values())
     if total < 1:
         raise ValueError("v52 metric window is empty")
@@ -50,6 +50,21 @@ def summarize_window(by_length, counts, world_size):
         stride_sum += stride * count
     result.update({name: value / total for name, value in global_sums.items()})
     result.update(chunk_length=chunk_sum / total, temporal_stride=stride_sum / total)
+    source_total = sum(source_counts.values())
+    if source_total:
+        fractions = {
+            f"source_{name}_sample_fraction": source_counts.get(index, 0) / source_total
+            for index, name in enumerate(source_names)
+        }
+        result.update(reduce_metrics(fractions, world_size))
+        coverage = reduce_metrics(
+            {
+                "source_coverage_rank_mean": float(len(source_counts)),
+                "task_group_coverage_rank_mean": float(len(task_groups)),
+            },
+            world_size,
+        )
+        result.update(coverage)
     return result
 
 
@@ -76,6 +91,8 @@ def train_v52(
     trainable = [(name, value) for name, value in model.named_parameters() if value.requires_grad]
     optimizer.zero_grad(set_to_none=True)
     metric_by_length, metric_counts = {}, {}
+    source_counts, task_groups = {}, set()
+    source_names = tuple(getattr(loader.dataset, "source_names", ("robotwin",)))
     while step < args.steps:
         sampler.set_epoch(args.seed + epoch)
         direct_batch_offset = 0
@@ -114,6 +131,14 @@ def train_v52(
                 **output["parts"],
                 "_temporal_stride": batch["temporal_stride"].float().mean(),
             }
+            if "temporal_step_seconds" in batch:
+                values["temporal_step_seconds"] = batch["temporal_step_seconds"].float().mean()
+            for source_index in batch.get(
+                "source_index", torch.zeros(args.batch, device=device, dtype=torch.long)
+            ).tolist():
+                source_counts[int(source_index)] = source_counts.get(int(source_index), 0) + 1
+            if "task_group_index" in batch:
+                task_groups.update(int(value) for value in batch["task_group_index"].tolist())
             for name, value in values.items():
                 parts[name] = parts.get(name, value.detach() * 0.0) + value.detach()
             metric_counts[length] = metric_counts.get(length, 0) + 1
@@ -140,8 +165,12 @@ def train_v52(
             micro_count = 0
             metrics = None
             if collect:
-                metrics = summarize_window(metric_by_length, metric_counts, context.world_size)
+                metrics = summarize_window(
+                    metric_by_length, metric_counts, source_counts, task_groups,
+                    source_names, context.world_size,
+                )
                 metric_by_length, metric_counts = {}, {}
+                source_counts, task_groups = {}, set()
             reduced_norms = reduce_metrics(norms, context.world_size) if norms else {}
             if context.is_main and collect:
                 effective_batch = args.batch * context.world_size * args.grad_accum

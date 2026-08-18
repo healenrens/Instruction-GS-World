@@ -23,6 +23,9 @@ from igsw.adaptive_gaussian_wm.experiment_tracking import (  # noqa: E402
 )
 from igsw.adaptive_gaussian_wm.frozen_video_encoder import FrozenDinoVideoRuntime  # noqa: E402
 from igsw.adaptive_gaussian_wm.group_balanced_sampler import build_training_sampler  # noqa: E402
+from igsw.adaptive_gaussian_wm.multisource_point_track_dataset import (  # noqa: E402
+    MultiSourcePointTrackObjectVideoDataset,
+)
 from igsw.adaptive_gaussian_wm.point_track_dataset import PointTrackObjectVideoDataset  # noqa: E402
 from igsw.adaptive_gaussian_wm.point_track_teacher import FrozenPointTrackerRuntime  # noqa: E402
 from igsw.adaptive_gaussian_wm.point_track_world_model_v52 import (  # noqa: E402
@@ -45,6 +48,7 @@ from igsw.distributed import assert_same_paths, init_torchrun  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True)
+    parser.add_argument("--data_index", default="")
     parser.add_argument("--out", required=True)
     parser.add_argument("--gate_report", required=True)
     parser.add_argument("--source_revision", required=True)
@@ -53,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", default="")
     parser.add_argument("--chunk_lengths", default="8,16,24,32")
     parser.add_argument("--temporal_strides", default="1,2,3,4")
+    parser.add_argument("--temporal_step_ms", default="33,67,100,133")
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--grad_accum", type=int, required=True)
     parser.add_argument("--target_global_batch", type=int, default=256)
@@ -79,6 +84,8 @@ def parse_args() -> argparse.Namespace:
 def validate_arguments(args, world_size: int, config) -> None:
     if args.resume and not os.path.isfile(args.resume):
         raise ValueError(f"v52 resume checkpoint is missing: {args.resume}")
+    if args.data_index and not os.path.isfile(args.data_index):
+        raise ValueError(f"v52 multisource video index is missing: {args.data_index}")
     dimensions = (
         args.batch, args.grad_accum, args.workers + 1, args.prefetch_factor,
         args.dino_frame_batch, args.tracker_sequence_batch, args.steps,
@@ -130,7 +137,7 @@ def read_gate(path: str, args) -> dict:
 def main() -> None:
     args = parse_args()
     for name in (
-        "data", "out", "gate_report", "dino_checkpoint", "tracker_checkpoint", "resume",
+        "data", "data_index", "out", "gate_report", "dino_checkpoint", "tracker_checkpoint", "resume",
     ):
         value = getattr(args, name)
         if value:
@@ -151,11 +158,24 @@ def main() -> None:
     )
     if checkpoint is not None:
         validate_resume(checkpoint, args, context.world_size, config)
-    dataset = PointTrackObjectVideoDataset(
-        args.data, "train", args.chunk_lengths, args.temporal_strides,
-        args.max_train_items, args.seed,
+    dataset = (
+        MultiSourcePointTrackObjectVideoDataset(
+            args.data_index, "train", args.chunk_lengths, args.temporal_step_ms,
+            args.max_train_items, args.seed,
+        )
+        if args.data_index
+        else PointTrackObjectVideoDataset(
+            args.data, "train", args.chunk_lengths, args.temporal_strides,
+            args.max_train_items, args.seed,
+        )
     )
     assert_same_paths(dataset.paths, context, dataset.contract_label)
+    source_summary = {
+        "source_names": list(getattr(dataset, "source_names", ("robotwin",))),
+        "source_episode_counts": list(getattr(dataset, "source_episode_counts", ())),
+        "source_task_counts": list(getattr(dataset, "source_task_counts", ())),
+        "source_target_samples": list(getattr(dataset, "source_target_samples", ())),
+    }
     model = LearningObjectiveObjectWorldModel(config).to(device)
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model"], strict=True)
@@ -218,6 +238,8 @@ def main() -> None:
             "dynamics_present": False,
             "latent_effect_present": False,
             "dino_fully_frozen": True,
+            "multisource_video_index": args.data_index,
+            **source_summary,
             "config": config.to_dict(),
             "args": vars(args),
             "startup_gate": gate,
@@ -237,6 +259,8 @@ def main() -> None:
             "git_commit": args.git_commit,
             "historical_checkpoint_used": False,
             "hard_component_pseudo_labels": False,
+            "multisource_video_index": args.data_index,
+            **source_summary,
             **config.to_dict(),
             **vars(args),
         },
@@ -246,6 +270,7 @@ def main() -> None:
             "event": "v52_start",
             "global_step": start_step,
             "examples": len(dataset),
+            **source_summary,
             "world_size": context.world_size,
             "micro_batch": args.batch,
             "grad_accum": args.grad_accum,

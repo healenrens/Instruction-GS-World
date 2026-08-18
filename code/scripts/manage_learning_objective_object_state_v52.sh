@@ -8,6 +8,7 @@ ROOT="${ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 DATA="${DATA:-${RUNTIME_ROOT}/data/rt2_visual_episodes_rgb_native_30hz_v4}"
+DATA_INDEX="${DATA_INDEX:-}"
 SOURCE_REVISION="${SOURCE_REVISION:-}"
 RUN_NAME="${RUN_NAME:-learning_objective_object_state_v52_seed17_${SOURCE_REVISION:0:7}}"
 OUT="${OUT:-${RUNTIME_ROOT}/outputs/${RUN_NAME}}"
@@ -18,7 +19,7 @@ TRACKER_CHECKPOINT="${TRACKER_CHECKPOINT:-${RUNTIME_ROOT}/checkpoints/cotracker/
 PY="${VENV_ROOT}/.venv/bin/python"
 PID_FILE="${LOG_ROOT}/launcher.pid"
 LAUNCH_LOG="${LOG_ROOT}/launcher.log"
-export ROOT RUNTIME_ROOT VENV_ROOT DATA SOURCE_REVISION RUN_NAME OUT LOG_ROOT
+export ROOT RUNTIME_ROOT VENV_ROOT DATA DATA_INDEX SOURCE_REVISION RUN_NAME OUT LOG_ROOT
 export GATE_REPORT DINO_CHECKPOINT TRACKER_CHECKPOINT
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export PYTHONPATH="${RUNTIME_ROOT}/third_party/co-tracker:${ROOT}/code:${PYTHONPATH:-}"
@@ -30,14 +31,18 @@ verify_run() {
   fi
   mkdir -p "$(dirname "${GATE_REPORT}")"
   rm -f "${GATE_REPORT}"
+  VERIFY_ARGS=(
+    --data "${DATA}" --output "${GATE_REPORT}"
+    --source_revision "${SOURCE_REVISION}"
+    --dino_checkpoint "${DINO_CHECKPOINT}"
+    --tracker_checkpoint "${TRACKER_CHECKPOINT}"
+    --dino_frame_batch "${VERIFY_DINO_FRAME_BATCH:-16}"
+    --chunk_length "${VERIFY_CHUNK_LENGTH:-8}" --amp "${AMP:-bf16}"
+  )
+  if [ -n "${DATA_INDEX}" ]; then VERIFY_ARGS+=(--data_index "${DATA_INDEX}"); fi
   CUDA_VISIBLE_DEVICES="${VERIFY_CUDA_VISIBLE_DEVICES:-0}" \
     "${PY}" "${ROOT}/code/scripts/verify_learning_objective_object_state_v52.py" \
-      --data "${DATA}" --output "${GATE_REPORT}" \
-      --source_revision "${SOURCE_REVISION}" \
-      --dino_checkpoint "${DINO_CHECKPOINT}" \
-      --tracker_checkpoint "${TRACKER_CHECKPOINT}" \
-      --dino_frame_batch "${VERIFY_DINO_FRAME_BATCH:-16}" \
-      --chunk_length "${VERIFY_CHUNK_LENGTH:-8}" --amp "${AMP:-bf16}"
+      "${VERIFY_ARGS[@]}"
 }
 
 foreground() {
