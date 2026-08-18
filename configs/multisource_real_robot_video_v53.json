@@ -1,0 +1,54 @@
+{
+  "contract": "multisource_robot_video_source_spec_v1",
+  "samples_per_task": 256,
+  "start_step_seconds": 0.5,
+  "sources": [
+    {
+      "builder": "rgb_episode_cache",
+      "name": "robotwin",
+      "root": "/mnt/pfs/public/xuhaoming/instruct_gs_world/data/rt2_visual_episodes_rgb_native_30hz_v4",
+      "weight": 1.0
+    },
+    {
+      "builder": "lerobot_v30_task_tree",
+      "camera_priority": [
+        "observation.images.head"
+      ],
+      "name": "agibot",
+      "root": "/mnt/pfs/public/agibot_world_beta_lerobot_3.0",
+      "weight": 1.0
+    },
+    {
+      "builder": "lerobot_v30_task_tree",
+      "camera_priority": [
+        "observation.images.exterior_1_left",
+        "observation.images.exterior_2_left",
+        "observation.images.wrist_left"
+      ],
+      "name": "droid",
+      "root": "/mnt/pfs/public/droid_1.0.1/lerobot",
+      "weight": 1.0
+    },
+    {
+      "builder": "lerobot_v30_task_tree",
+      "camera_priority": [
+        "observation.images.camera_observations.color_images.camera_front",
+        "observation.images.camera_observations.color_images.camera_top",
+        "observation.images.camera_observations.color_images.camera_left",
+        "observation.images.camera_observations.color_images.camera_right"
+      ],
+      "name": "robomind",
+      "root": "/mnt/pfs/public/RoboMINDv2_LeRobot",
+      "weight": 1.0
+    },
+    {
+      "builder": "lerobot_v30_task_tree",
+      "camera_priority": [
+        "observation.images.image_0"
+      ],
+      "name": "bridge",
+      "root": "/mnt/pfs/public/bridge_lerobot_v30",
+      "weight": 1.0
+    }
+  ]
+}

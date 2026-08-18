@@ -50,6 +50,7 @@ class DistributedGroupBalancedSampler(Sampler[int]):
         rank: int,
         seed: int,
         samples_per_rank: int,
+        require_full_group_coverage: bool = True,
     ):
         if num_replicas <= 0:
             raise ValueError("num_replicas must be positive")
@@ -67,9 +68,10 @@ class DistributedGroupBalancedSampler(Sampler[int]):
             raise ValueError("sampling groups do not cover the dataset")
 
         targets = tuple(int(value) for value in group_targets)
-        if len(targets) != len(spans) or any(
-            target < end - start
-            for target, (start, end) in zip(targets, spans)
+        if len(targets) != len(spans) or any(target < 1 for target in targets):
+            raise ValueError("group targets must be positive")
+        if require_full_group_coverage and any(
+            target < end - start for target, (start, end) in zip(targets, spans)
         ):
             raise ValueError("group targets must cover every source index")
         if samples_per_rank <= 0:
@@ -241,6 +243,9 @@ def build_training_sampler(
             rank=rank,
             seed=seed,
             samples_per_rank=optimizer_steps * batch_size * grad_accum,
+            require_full_group_coverage=not bool(
+                getattr(dataset, "sampling_group_targets_may_undersample", False)
+            ),
         )
     else:
         sampler = DistributedSampler(
