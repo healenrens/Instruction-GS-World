@@ -53,8 +53,8 @@ def cache_episodes(source: dict, source_index: int) -> list[dict]:
 
 def find_task_roots(root: str) -> list[str]:
     roots = []
-    for directory, names, _ in os.walk(root):
-        if "info.json" in names and os.path.basename(directory) == "meta":
+    for directory, _, filenames in os.walk(root):
+        if "info.json" in filenames and os.path.basename(directory) == "meta":
             roots.append(os.path.dirname(directory))
     return sorted(roots)
 
@@ -238,7 +238,10 @@ def build(spec: dict) -> dict:
                 "camera_priority": list(source.get("camera_priority", ())),
             }
         )
-        episodes.extend(builders[builder_name](source, source_index))
+        source_episodes = builders[builder_name](source, source_index)
+        if not source_episodes:
+            raise ValueError(f"source produced no episodes: {source['name']}")
+        episodes.extend(source_episodes)
     if not sources or not episodes:
         raise ValueError("source spec produced an empty video index")
     return {
