@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from glob import glob
 import json
 import os
+import re
 import sys
+import time
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
@@ -148,6 +151,14 @@ def lerobot_v30_episodes(source: dict, source_index: int) -> list[dict]:
         if not str(info.get("codebase_version", "")).startswith("v3"):
             raise ValueError(f"LeRobot v3 metadata expected in {task_root}")
         camera = select_camera(info, source, task_root)
+        video_root = os.path.join(task_root, "videos", camera)
+        if not os.path.isdir(video_root):
+            continue
+        available_videos = set(
+            glob(os.path.join(video_root, "chunk-*", "file-*.mp4"))
+        )
+        if not available_videos:
+            continue
         episode_paths = sorted(
             glob(os.path.join(task_root, "meta", "episodes", "chunk-*", "file-*.parquet"))
         )
@@ -178,6 +189,8 @@ def lerobot_v30_episodes(source: dict, source_index: int) -> list[dict]:
                 task_root,
                 template.format(video_key=camera, chunk_index=chunk, file_index=file_index),
             )
+            if path not in available_videos:
+                continue
             result.append(
                 {
                     "source_index": source_index,
@@ -190,6 +203,126 @@ def lerobot_v30_episodes(source: dict, source_index: int) -> list[dict]:
                     "frame_offset": round(start_time * fps),
                 }
             )
+    return result
+
+
+def _numeric_video_key(path: str) -> tuple[int, int]:
+    match = re.search(r"/chunk-(\d+)/file-(\d+)\.mp4$", path)
+    if match is None:
+        raise ValueError(f"unknown converted video path: {path}")
+    return int(match.group(1)), int(match.group(2))
+
+
+def _video_frame_count(path: str, expected_fps: float) -> int:
+    import av
+
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        frames = int(stream.frames)
+        rate = float(stream.average_rate)
+    if frames <= 0:
+        raise ValueError(f"video container has no indexed frame count: {path}")
+    if abs(rate - expected_fps) > 1e-3:
+        raise ValueError(f"video fps {rate} differs from metadata {expected_fps}: {path}")
+    return frames
+
+
+def _hy_episode_tasks(converted_table: str, minimum_age_seconds: float) -> dict[int, int]:
+    import pyarrow.parquet as pq
+
+    cutoff = time.time() - minimum_age_seconds
+    result = {}
+    paths = sorted(glob(os.path.join(converted_table, "data", "chunk-*", "file-*.parquet")))
+    for path in paths:
+        if os.path.getmtime(path) > cutoff:
+            continue
+        table = pq.read_table(path, columns=["episode_index", "task_index"])
+        episode_ids = set(int(value) for value in table["episode_index"].to_pylist())
+        if len(episode_ids) != 1:
+            raise ValueError(f"HY converted parquet mixes episodes: {path}")
+        counts = Counter(int(value) for value in table["task_index"].to_pylist())
+        if not counts:
+            raise ValueError(f"HY converted parquet has no task rows: {path}")
+        episode_index = episode_ids.pop()
+        result[episode_index] = min(
+            counts, key=lambda value: (-counts[value], value)
+        )
+    return result
+
+
+def _hy_episode_rows(table_root: str) -> list[dict]:
+    paths = sorted(glob(os.path.join(table_root, "meta", "episodes", "**", "*.parquet"), recursive=True))
+    if not paths:
+        raise ValueError(f"HY episode metadata is missing: {table_root}")
+    return parquet_rows(
+        paths,
+        ("episode_index", "length", "dataset_from_index", "dataset_to_index"),
+        ("tasks", "task_index"),
+    )
+
+
+def hy_converted_video_episodes(source: dict, source_index: int) -> list[dict]:
+    raw_root = os.path.abspath(source["root"])
+    converted_root = os.path.abspath(source["converted_root"])
+    camera = str(source["camera"])
+    minimum_age_seconds = float(source.get("minimum_file_age_seconds", 300.0))
+    cutoff = time.time() - minimum_age_seconds
+    result = []
+    converted_tables = sorted(
+        path for path in glob(os.path.join(converted_root, "table_*"))
+        if os.path.isdir(path)
+    )
+    for converted_table in converted_tables:
+        table_name = os.path.basename(converted_table)
+        raw_table = os.path.join(raw_root, table_name)
+        info = read_json(os.path.join(raw_table, "meta", "info.json"))
+        fps = float(info["fps"])
+        episode_tasks = _hy_episode_tasks(converted_table, minimum_age_seconds)
+        rows = _hy_episode_rows(raw_table)
+        rows.sort(key=lambda row: int(row["dataset_from_index"]))
+        videos = sorted(
+            (
+                path
+                for path in glob(
+                    os.path.join(converted_table, "videos", camera, "chunk-*", "file-*.mp4")
+                )
+                if os.path.getmtime(path) <= cutoff
+            ),
+            key=_numeric_video_key,
+        )
+        if not videos:
+            continue
+        row_position = 0
+        shard_start = 0
+        for video_path in videos:
+            shard_end = shard_start + _video_frame_count(video_path, fps)
+            while row_position < len(rows):
+                row = rows[row_position]
+                episode_start = int(row["dataset_from_index"])
+                episode_end = int(row["dataset_to_index"])
+                if episode_start >= shard_end:
+                    break
+                if episode_start < shard_start or episode_end > shard_end:
+                    raise ValueError(
+                        f"HY video shard cuts through episode {row['episode_index']}: {video_path}"
+                    )
+                original_episode = int(row["episode_index"])
+                if original_episode in episode_tasks:
+                    task_index = episode_tasks[original_episode]
+                    result.append(
+                        {
+                            "source_index": source_index,
+                            "episode_index": len(result),
+                            "split": "train",
+                            "group": f"{table_name}/task_{task_index}",
+                            "path": video_path,
+                            "fps": fps,
+                            "frame_count": int(row["length"]),
+                            "frame_offset": episode_start - shard_start,
+                        }
+                    )
+                row_position += 1
+            shard_start = shard_end
     return result
 
 
@@ -222,6 +355,7 @@ def build(spec: dict) -> dict:
         "rgb_episode_cache": cache_episodes,
         "lerobot_v21_task_tree": lerobot_v21_episodes,
         "lerobot_v30_task_tree": lerobot_v30_episodes,
+        "hy_converted_video": hy_converted_video_episodes,
         "external_episode_index": external_index_episodes,
     }
     for source_index, raw in enumerate(spec.get("sources", [])):
