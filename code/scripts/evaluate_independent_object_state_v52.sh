@@ -49,6 +49,15 @@ exec "${PY}" "${ROOT}/code/scripts/evaluate_independent_object_state_v52.py" \
   --minimum_reappearance_cases "${MINIMUM_REAPPEARANCE_CASES:-8}" \
   --minimum_occluded_cases "${MINIMUM_OCCLUDED_CASES:-8}" \
   --minimum_absent_cases "${MINIMUM_ABSENT_CASES:-8}" \
+  --minimum_different_object_pairs "${MINIMUM_DIFFERENT_OBJECT_PAIRS:-16}" \
+  --minimum_motion_active_cases "${MINIMUM_MOTION_ACTIVE_CASES:-16}" \
+  --minimum_items_per_split "${MINIMUM_ITEMS_PER_SPLIT:-16}" \
+  --minimum_objects_per_split "${MINIMUM_OBJECTS_PER_SPLIT:-32}" \
+  --minimum_reappearance_cases_per_split "${MINIMUM_REAPPEARANCE_CASES_PER_SPLIT:-4}" \
+  --minimum_occluded_cases_per_split "${MINIMUM_OCCLUDED_CASES_PER_SPLIT:-4}" \
+  --minimum_absent_cases_per_split "${MINIMUM_ABSENT_CASES_PER_SPLIT:-4}" \
+  --minimum_different_object_pairs_per_split "${MINIMUM_DIFFERENT_OBJECT_PAIRS_PER_SPLIT:-8}" \
+  --minimum_motion_active_cases_per_split "${MINIMUM_MOTION_ACTIVE_CASES_PER_SPLIT:-8}" \
   --wandb_mode "${WANDB_MODE:-online}" \
   --wandb_project "${WANDB_PROJECT:-instruct-gs-world}" \
   --wandb_entity "${WANDB_ENTITY:-}" --wandb_name "${WANDB_NAME:-${EVAL_NAME}}" \

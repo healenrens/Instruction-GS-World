@@ -75,6 +75,8 @@ def _validate_annotation(payload: dict, entry: dict, episode: dict) -> None:
     visible = torch.stack([(masks == object_id).flatten(1).any(dim=1) for object_id in object_ids], dim=1)
     if not bool((presence[visible] == 1).all()):
         raise ValueError("visible independent objects must be present")
+    if not bool((visible.sum(dim=0) >= 2).all()):
+        raise ValueError("each independent object needs at least two visible frames")
     if not bool((presence >= 0).any(dim=0).all()):
         raise ValueError("each independent object needs known lifecycle evidence")
 
@@ -268,17 +270,27 @@ def independent_object_metrics(model, features, state, decoder_assignment, truth
     sums["object_assignment_temporal_similarity"] = _mean(
         temporal_similarity, visibility
     )
-    identity_values, center_values = [], []
-    reappearance_values = []
+    identity_values, identity_same_values, center_values = [], [], []
+    reappearance_values, reappearance_other_values = [], []
+    object_identities, object_visibility = [], []
     grid_coordinates = features.coordinates[0]
     for object_index, object_id in enumerate(object_ids):
         slot = int(canonical_slot[object_index])
         object_visible = visibility[:, object_index]
         identity = F.normalize(state["identity"][0, :, slot].float(), dim=-1, eps=1e-6)
+        object_identities.append(identity)
+        object_visibility.append(object_visible)
         mean_identity = F.normalize(
             identity[object_visible].mean(dim=0), dim=-1, eps=1e-6
         )
         identity_values.extend((identity[object_visible] * mean_identity).sum(dim=-1))
+        visible_identity = identity[object_visible]
+        if len(visible_identity) > 1:
+            similarity = visible_identity @ visible_identity.T
+            off_diagonal = ~torch.eye(
+                len(visible_identity), device=similarity.device, dtype=torch.bool
+            )
+            identity_same_values.extend(similarity[off_diagonal])
         for frame in torch.where(object_visible)[0].tolist():
             support = masks[frame] == object_id
             target_center = grid_coordinates[frame, support].float().mean(dim=0)
@@ -288,28 +300,83 @@ def independent_object_metrics(model, features, state, decoder_assignment, truth
         visible_indices = torch.where(object_visible)[0]
         for left, right in zip(visible_indices[:-1], visible_indices[1:]):
             if int(right - left) > 1:
-                reappearance_values.append((identity[left] * identity[right]).sum())
+                other_values = []
+                for other_index in range(len(object_ids)):
+                    if other_index == object_index:
+                        continue
+                    other_support = masks[right] == object_ids[other_index]
+                    if bool(other_support.any()):
+                        other_slot = int(canonical_slot[other_index])
+                        other_identity = F.normalize(
+                            state["identity"][0, right, other_slot].float(),
+                            dim=-1,
+                            eps=1e-6,
+                        )
+                        other_values.append((identity[left] * other_identity).sum())
+                if other_values:
+                    reappearance_values.append((identity[left] * identity[right]).sum())
+                    reappearance_other_values.extend(other_values)
+    identity_different_values = []
+    for left in range(len(object_ids)):
+        for right in range(left + 1, len(object_ids)):
+            co_visible = object_visibility[left] & object_visibility[right]
+            identity_different_values.extend(
+                (object_identities[left][co_visible] * object_identities[right][co_visible])
+                .sum(dim=-1)
+            )
     identity_tensor = torch.stack(identity_values) if identity_values else assignment.new_zeros(0)
+    identity_same_tensor = (
+        torch.stack(identity_same_values)
+        if identity_same_values else assignment.new_zeros(0)
+    )
+    identity_different_tensor = (
+        torch.stack(identity_different_values)
+        if identity_different_values else assignment.new_zeros(0)
+    )
     center_tensor = torch.stack(center_values) if center_values else assignment.new_zeros(0)
     reappearance_tensor = (
         torch.stack(reappearance_values) if reappearance_values else assignment.new_zeros(0)
     )
+    reappearance_other_tensor = (
+        torch.stack(reappearance_other_values)
+        if reappearance_other_values else assignment.new_zeros(0)
+    )
     sums["identity_temporal_cosine"] = (float(identity_tensor.sum()), float(len(identity_tensor)))
+    sums["identity_same_object_cosine"] = (
+        float(identity_same_tensor.sum()),
+        float(len(identity_same_tensor)),
+    )
+    sums["identity_different_object_cosine"] = (
+        float(identity_different_tensor.sum()),
+        float(len(identity_different_tensor)),
+    )
     sums["relative_center_error"] = (float(center_tensor.sum()), float(len(center_tensor)))
     sums["reappearance_identity_cosine"] = (
         float(reappearance_tensor.sum()), float(len(reappearance_tensor))
     )
+    sums["reappearance_other_identity_cosine"] = (
+        float(reappearance_other_tensor.sum()),
+        float(len(reappearance_other_tensor)),
+    )
+    sums["identity_different_pairs"] = (float(len(identity_different_tensor)), 1.0)
 
     visibility_scores, presence_scores = [], []
     visibility_targets, presence_targets = [], []
+    occluded_presence_scores, absent_presence_scores = [], []
     truth_presence = truth["object_presence"]
     for object_index in range(len(object_ids)):
         slot = int(canonical_slot[object_index])
-        visibility_scores.append(state["visibility"][0, :, slot].float())
+        visibility_score = state["visibility"][0, :, slot].float()
+        presence_score = state["presence"][0, :, slot].float()
+        visibility_scores.append(visibility_score)
         visibility_targets.append(visibility[:, object_index].float())
         known = truth_presence[:, object_index] >= 0
-        presence_scores.append(state["presence"][0, known, slot].float())
+        presence_scores.append(presence_score[known])
         presence_targets.append(truth_presence[known, object_index].float())
+        occluded = (truth_presence[:, object_index] == 1) & ~visibility[:, object_index]
+        absent = truth_presence[:, object_index] == 0
+        occluded_presence_scores.extend(presence_score[occluded])
+        absent_presence_scores.extend(presence_score[absent])
     visibility_score = torch.cat(visibility_scores)
     visibility_target = torch.cat(visibility_targets)
     presence_score = torch.cat(presence_scores)
@@ -321,6 +388,29 @@ def independent_object_metrics(model, features, state, decoder_assignment, truth
     sums["presence_accuracy"] = _mean(
         ((presence_score >= 0.5) == presence_target.bool()).float(),
         torch.ones_like(presence_target, dtype=torch.bool),
+    )
+    visible = visibility_target.bool()
+    sums["visible_visibility_recall"] = _mean(
+        (visibility_score >= 0.5).float(), visible
+    )
+    sums["invisible_visibility_rejection"] = _mean(
+        (visibility_score < 0.5).float(), ~visible
+    )
+    occluded_presence = (
+        torch.stack(occluded_presence_scores)
+        if occluded_presence_scores else assignment.new_zeros(0)
+    )
+    absent_presence = (
+        torch.stack(absent_presence_scores)
+        if absent_presence_scores else assignment.new_zeros(0)
+    )
+    sums["occluded_presence_recall"] = (
+        float((occluded_presence >= 0.5).float().sum()),
+        float(len(occluded_presence)),
+    )
+    sums["absent_presence_rejection"] = (
+        float((absent_presence < 0.5).float().sum()),
+        float(len(absent_presence)),
     )
     occluded = (truth_presence == 1) & ~visibility
     absent = truth_presence == 0
@@ -341,28 +431,31 @@ def independent_deletion_metrics(model, features, state, truth, amp_context) -> 
         assignment, masks, truth["object_ids"], model.config.object_slots
     )
     areas = torch.stack([(masks == object_id).sum(dim=1) for object_id in truth["object_ids"]], dim=1)
-    object_index = int(areas.sum(dim=0).argmax())
-    frame = int(areas[:, object_index].argmax())
-    if not bool(visibility[frame, object_index]):
-        return {"deletion_inside": (0.0, 0.0), "deletion_outside": (0.0, 0.0)}
-    slot = int(distribution[:, object_index].sum(dim=0).argmax())
-    frame_state = {
-        name: value[0:1, frame]
-        for name, value in state.items()
-        if name not in ("assignment", "mass")
-    }
-    coordinates, valid = features.coordinates[0:1, frame], features.valid[0:1, frame]
-    with amp_context():
-        reference, _ = model.decoder(frame_state, coordinates, valid)
-        object_valid = torch.ones(
-            1, model.config.object_slots, device=reference.device, dtype=torch.bool
-        )
-        object_valid[:, slot] = False
-        deleted, _ = model.decoder(frame_state, coordinates, valid, object_valid)
-    change = 1.0 - F.cosine_similarity(reference.float(), deleted.float(), dim=-1)
-    inside = (masks[frame] == truth["object_ids"][object_index]) & valid[0]
-    outside = (masks[frame] >= 0) & ~inside & valid[0]
-    return {
-        "deletion_inside": _mean(change[0], inside),
-        "deletion_outside": _mean(change[0], outside),
-    }
+    totals = {"deletion_inside": [0.0, 0.0], "deletion_outside": [0.0, 0.0]}
+    for object_index, object_id in enumerate(truth["object_ids"]):
+        frame = int(areas[:, object_index].argmax())
+        if not bool(visibility[frame, object_index]):
+            continue
+        slot = int(distribution[:, object_index].sum(dim=0).argmax())
+        frame_state = {
+            name: value[0:1, frame]
+            for name, value in state.items()
+            if name not in ("assignment", "mass")
+        }
+        coordinates = features.coordinates[0:1, frame]
+        valid = features.valid[0:1, frame]
+        with amp_context():
+            reference, _ = model.decoder(frame_state, coordinates, valid)
+            object_valid = torch.ones(
+                1, model.config.object_slots, device=reference.device, dtype=torch.bool
+            )
+            object_valid[:, slot] = False
+            deleted, _ = model.decoder(frame_state, coordinates, valid, object_valid)
+        change = 1.0 - F.cosine_similarity(reference.float(), deleted.float(), dim=-1)
+        inside = (masks[frame] == object_id) & valid[0]
+        outside = (masks[frame] >= 0) & ~inside & valid[0]
+        for name, mask in (("deletion_inside", inside), ("deletion_outside", outside)):
+            value_sum, value_count = _mean(change[0], mask)
+            totals[name][0] += value_sum
+            totals[name][1] += value_count
+    return {name: tuple(value) for name, value in totals.items()}

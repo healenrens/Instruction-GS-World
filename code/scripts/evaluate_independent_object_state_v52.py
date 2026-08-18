@@ -20,6 +20,9 @@ from igsw.adaptive_gaussian_wm.independent_object_truth_v52 import (  # noqa: E4
     independent_deletion_metrics,
     independent_object_metrics,
 )
+from igsw.adaptive_gaussian_wm.independent_object_dynamics_v52 import (  # noqa: E402
+    independent_motion_metrics,
+)
 from igsw.adaptive_gaussian_wm.point_track_world_model_v52 import (  # noqa: E402
     LearningObjectiveObjectWorldModel,
 )
@@ -49,6 +52,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minimum_reappearance_cases", type=int, default=8)
     parser.add_argument("--minimum_occluded_cases", type=int, default=8)
     parser.add_argument("--minimum_absent_cases", type=int, default=8)
+    parser.add_argument("--minimum_different_object_pairs", type=int, default=16)
+    parser.add_argument("--minimum_motion_active_cases", type=int, default=16)
+    parser.add_argument("--minimum_items_per_split", type=int, default=16)
+    parser.add_argument("--minimum_objects_per_split", type=int, default=32)
+    parser.add_argument("--minimum_reappearance_cases_per_split", type=int, default=4)
+    parser.add_argument("--minimum_occluded_cases_per_split", type=int, default=4)
+    parser.add_argument("--minimum_absent_cases_per_split", type=int, default=4)
+    parser.add_argument("--minimum_different_object_pairs_per_split", type=int, default=8)
+    parser.add_argument("--minimum_motion_active_cases_per_split", type=int, default=8)
     parser.add_argument("--wandb_mode", choices=("disabled", "online", "offline"), default="online")
     parser.add_argument("--wandb_project", default="instruct-gs-world")
     parser.add_argument("--wandb_entity", default="")
@@ -105,6 +117,18 @@ def normalized_metrics(totals: dict[str, list[float]]) -> dict[str, float]:
         metrics["decoder_same_object_similarity"]
         - metrics["decoder_different_object_similarity"]
     )
+    metrics["identity_object_relation_margin"] = (
+        metrics["identity_same_object_cosine"]
+        - metrics["identity_different_object_cosine"]
+    )
+    metrics["reappearance_identity_margin"] = (
+        metrics["reappearance_identity_cosine"]
+        - metrics["reappearance_other_identity_cosine"]
+    )
+    metrics["dynamic_motion_relative_gain"] = 1.0 - (
+        metrics["dynamic_motion_error"]
+        / max(metrics["dynamic_zero_motion_error"], 1e-8)
+    )
     metrics["deletion_locality_ratio"] = metrics["deletion_inside"] / max(
         metrics["deletion_outside"], 1e-8
     )
@@ -113,6 +137,8 @@ def normalized_metrics(totals: dict[str, list[float]]) -> dict[str, float]:
         "reappearance_cases",
         "occluded_cases",
         "absent_cases",
+        "identity_different_pairs",
+        "motion_active_cases",
         "annotated_frames",
     ):
         metrics[f"{name}_total"] = totals[name][0]
@@ -138,10 +164,29 @@ def quality_checks(metrics: dict) -> dict[str, bool]:
             metrics["object_assignment_temporal_similarity"] >= 0.80
         ),
         "identity_persistent": metrics["identity_temporal_cosine"] >= 0.90,
+        "identity_distinguishes_objects": (
+            metrics["identity_object_relation_margin"] >= 0.30
+        ),
         "identity_reappears": metrics["reappearance_identity_cosine"] >= 0.80,
+        "reappearance_matches_correct_identity": (
+            metrics["reappearance_identity_margin"] >= 0.30
+        ),
         "relative_geometry_decodable": metrics["relative_center_error"] <= 0.20,
+        "dynamic_state_beats_zero_motion": (
+            metrics["dynamic_motion_relative_gain"] >= 0.10
+        ),
         "visibility_decodable": metrics["visibility_accuracy"] >= 0.75,
+        "visible_objects_are_visible": metrics["visible_visibility_recall"] >= 0.75,
+        "unobserved_objects_are_not_visible": (
+            metrics["invisible_visibility_rejection"] >= 0.75
+        ),
         "presence_decodable": metrics["presence_accuracy"] >= 0.75,
+        "occluded_objects_remain_present": (
+            metrics["occluded_presence_recall"] >= 0.75
+        ),
+        "absent_objects_are_rejected": (
+            metrics["absent_presence_rejection"] >= 0.75
+        ),
         "slot_deletion_changes_object": metrics["deletion_inside"] >= 0.01,
         "slot_deletion_is_local": metrics["deletion_locality_ratio"] >= 1.50,
     }
@@ -158,7 +203,41 @@ def promotion_checks(metrics: dict, items: int, args) -> dict[str, bool]:
         ),
         "coverage_occlusion": metrics["occluded_cases_total"] >= args.minimum_occluded_cases,
         "coverage_absence": metrics["absent_cases_total"] >= args.minimum_absent_cases,
+        "coverage_different_object_pairs": (
+            metrics["identity_different_pairs_total"]
+            >= args.minimum_different_object_pairs
+        ),
+        "coverage_motion_active": (
+            metrics["motion_active_cases_total"] >= args.minimum_motion_active_cases
+        ),
         **quality_checks(metrics),
+    }
+
+
+def split_coverage_checks(metrics: dict, items: int, args) -> dict[str, bool]:
+    return {
+        "coverage_items": items >= args.minimum_items_per_split,
+        "coverage_objects": (
+            metrics["independent_objects_total"] >= args.minimum_objects_per_split
+        ),
+        "coverage_reappearance": (
+            metrics["reappearance_cases_total"]
+            >= args.minimum_reappearance_cases_per_split
+        ),
+        "coverage_occlusion": (
+            metrics["occluded_cases_total"] >= args.minimum_occluded_cases_per_split
+        ),
+        "coverage_absence": (
+            metrics["absent_cases_total"] >= args.minimum_absent_cases_per_split
+        ),
+        "coverage_different_object_pairs": (
+            metrics["identity_different_pairs_total"]
+            >= args.minimum_different_object_pairs_per_split
+        ),
+        "coverage_motion_active": (
+            metrics["motion_active_cases_total"]
+            >= args.minimum_motion_active_cases_per_split
+        ),
     }
 
 
@@ -214,6 +293,7 @@ def main() -> None:
             values = independent_object_metrics(
                 model, features, state, decoder_assignment, truth
             )
+            values.update(independent_motion_metrics(model, features, state, truth))
             values.update(
                 independent_deletion_metrics(model, features, state, truth, amp_context)
             )
@@ -243,7 +323,10 @@ def main() -> None:
         for split, values in split_totals.items()
     }
     for condition in conditions.values():
-        condition["checks"] = quality_checks(condition["metrics"])
+        condition["checks"] = {
+            **split_coverage_checks(condition["metrics"], condition["items"], args),
+            **quality_checks(condition["metrics"]),
+        }
     passed = all(checks.values()) and all(
         all(condition["checks"].values()) for condition in conditions.values()
     )
