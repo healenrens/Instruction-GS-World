@@ -107,6 +107,12 @@ class IndependentObjectTruthDataset(Dataset):
         entries = [entry for entry in truth.get("items", ()) if entry.get("split") in splits]
         if not entries:
             raise ValueError("independent object-truth manifest has no requested items")
+        available_splits = {entry.get("split") for entry in entries}
+        missing_splits = set(splits) - available_splits
+        if missing_splits:
+            raise ValueError(
+                f"independent object-truth manifest is missing splits: {sorted(missing_splits)}"
+            )
         for entry in entries:
             filename = entry.get("episode_filename")
             if filename not in episodes:
@@ -256,6 +262,8 @@ def independent_object_metrics(model, features, state, decoder_assignment, truth
     root_distribution, visibility = _object_root_distributions(
         assignment, masks, object_ids, model.config.object_slots
     )
+    if not bool((visibility.sum(dim=0) >= 2).all()):
+        raise ValueError("independent object disappears at the DINO patch grid")
     canonical = root_distribution.sum(dim=0)
     canonical = canonical / visibility.sum(dim=0).clamp_min(1.0)[:, None]
     canonical_slot = canonical.argmax(dim=-1)
@@ -299,7 +307,8 @@ def independent_object_metrics(model, features, state, decoder_assignment, truth
             )
         visible_indices = torch.where(object_visible)[0]
         for left, right in zip(visible_indices[:-1], visible_indices[1:]):
-            if int(right - left) > 1:
+            occluded_between = truth["object_presence"][left + 1 : right, object_index]
+            if int(right - left) > 1 and bool((occluded_between == 1).all()):
                 other_values = []
                 for other_index in range(len(object_ids)):
                     if other_index == object_index:

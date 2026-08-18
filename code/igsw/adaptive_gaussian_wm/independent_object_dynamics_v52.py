@@ -34,6 +34,8 @@ def independent_motion_metrics(model, features, state, truth) -> dict:
     slots, visible = _canonical_slots(
         assignment, masks, object_ids, model.config.object_slots
     )
+    if not bool((visible.sum(dim=0) >= 2).all()):
+        raise ValueError("independent object disappears at the DINO patch grid")
     coordinates = features.coordinates[0].float()
     centers = assignment.new_zeros(len(masks), len(object_ids), 2)
     for frame in range(len(masks)):
