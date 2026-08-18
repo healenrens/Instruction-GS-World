@@ -123,15 +123,41 @@ def _identity_term(prediction, teacher, config):
 
 
 def _motion_geometry_terms(prediction, teacher, evidence):
+    relation = teacher.same_confidence.float()
+    relation_strength = relation.sum(dim=-1)
+    diagonal = torch.eye(
+        relation.shape[-1], device=relation.device, dtype=relation.dtype
+    )[None]
+    pooling = relation + diagonal * relation_strength[..., None]
+
+    coordinate_valid = teacher.visibility.float()
+    coordinate_weight = pooling[:, None] * coordinate_valid[:, :, None]
+    coordinate_normalizer = coordinate_weight.sum(dim=-1).clamp_min(1e-6)
+    target_center = torch.einsum(
+        "btpq,btqd->btpd", coordinate_weight, evidence.coordinates.float()
+    )
+    target_center = target_center / coordinate_normalizer[..., None]
+
+    motion_valid = teacher.motion_valid.float()
+    motion_pooling = pooling[:, None, :, :, None] * motion_valid[:, :, None]
+    motion_normalizer = motion_pooling.sum(dim=3).clamp_min(1e-6)
+    target_motion = torch.einsum(
+        "btpqh,btqhd->btphd", motion_pooling, teacher.motion.float()
+    )
+    target_motion = target_motion / motion_normalizer[..., None]
     motion_error = F.smooth_l1_loss(
-        prediction.motion.float(), teacher.motion.float(), reduction="none"
+        prediction.motion.float(), target_motion, reduction="none"
     ).mean(dim=-1)
-    motion_weight = teacher.motion_valid.float() * teacher.object_confidence[:, None, :, None]
+    relation_known = (relation_strength > 0.0).float()
+    motion_weight = (motion_normalizer > 1e-6).float()
+    motion_weight = motion_weight * teacher.object_confidence[:, None, :, None]
+    motion_weight = motion_weight * relation_known[:, None, :, None]
     motion = weighted_mean(motion_error, motion_weight)
     center_error = F.smooth_l1_loss(
-        prediction.center.float(), evidence.coordinates.float(), reduction="none"
+        prediction.center.float(), target_center, reduction="none"
     ).mean(dim=-1)
     center_weight = teacher.visibility.float() * teacher.object_confidence[:, None]
+    center_weight = center_weight * relation_known[:, None]
     geometry = weighted_mean(center_error, center_weight)
     return motion, geometry
 

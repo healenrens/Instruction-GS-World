@@ -101,6 +101,8 @@ def build_synthetic_objective_contract(config, device: torch.device):
     identity[:, :, 4:6, 2] = 1.0
     identity[:, :, 6:8, 3] = 1.0
     center = coordinates.clone()
+    center[:, :, 0:2] = coordinates[:, :, 0:2].mean(dim=2, keepdim=True)
+    center[:, :, 2:4] = coordinates[:, :, 2:4].mean(dim=2, keepdim=True)
     visible_prediction = visibility.float() * 0.98 + (~visibility).float() * 0.02
     prediction = ObjectStatePredictions(
         assignment=assignment,

@@ -106,12 +106,14 @@ def _owner_evidence(
     motion = (evidence.motion_salience.float() * pair_visible.float()).amax(dim=1)
     moving = _ramp(motion, config.object_motion_floor) * persistence
     propagated = (same * moving[:, None]).amax(dim=-1)
-    object_confidence = torch.maximum(moving, propagated) * persistence
+    object_confidence = propagated * persistence
     static = (1.0 - moving) * persistence
     scene_confidence = static * (1.0 - propagated) * config.scene_evidence_scale
-    transient = (persistence > 0.0).float() * (
+    short_lived = (persistence > 0.0).float() * (
         1.0 - _ramp(persistence, config.transient_visible_fraction)
     )
+    unsupported_motion = moving * (1.0 - propagated)
+    transient = torch.maximum(short_lived, unsupported_motion)
     transient = transient * (1.0 - object_confidence)
     return object_confidence, scene_confidence, transient
 
