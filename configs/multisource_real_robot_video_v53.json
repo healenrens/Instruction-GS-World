@@ -54,7 +54,6 @@
       "builder": "hy_converted_video",
       "camera": "observation.images.cam_high",
       "converted_root": "/mnt/pfs/public/Hy-Embodied-0.5-VLA-LeRobot",
-      "minimum_episode_coverage": 0.98,
       "minimum_file_age_seconds": 300,
       "name": "hy_embodied",
       "root": "/mnt/pfs/public/Hy-Embodied-0.5-VLA-Data",

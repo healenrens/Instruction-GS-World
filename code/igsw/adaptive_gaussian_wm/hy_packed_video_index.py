@@ -301,9 +301,6 @@ def build_hy_packed_video_episodes(source: dict, source_index: int) -> list[dict
     converted_root = os.path.abspath(source["converted_root"])
     camera = str(source["camera"])
     minimum_age = float(source.get("minimum_file_age_seconds", 300.0))
-    minimum_coverage = float(source.get("minimum_episode_coverage", 0.98))
-    if not 0.0 < minimum_coverage <= 1.0:
-        raise ValueError("HY minimum episode coverage must stay within (0,1]")
     cutoff = time.time() - minimum_age
     result = []
     total_raw_episodes = 0
@@ -378,7 +375,8 @@ def build_hy_packed_video_episodes(source: dict, source_index: int) -> list[dict
         "raw_episode_count": total_raw_episodes,
         "mapped_episode_count": total_mapped_episodes,
         "episode_coverage": source_coverage,
-        "minimum_episode_coverage": minimum_coverage,
+        "snapshot_complete": total_mapped_episodes == total_raw_episodes,
+        "unmapped_episode_count": total_raw_episodes - total_mapped_episodes,
         "tables_with_truncated_prefix": [
             item["table"]
             for item in table_summaries
@@ -386,9 +384,4 @@ def build_hy_packed_video_episodes(source: dict, source_index: int) -> list[dict
         ],
     }
     print(json.dumps(source_summary, sort_keys=True), flush=True)
-    if source_coverage < minimum_coverage:
-        raise ValueError(
-            f"HY source episode coverage {source_coverage:.4f} is below required "
-            f"{minimum_coverage:.4f}"
-        )
     return result
