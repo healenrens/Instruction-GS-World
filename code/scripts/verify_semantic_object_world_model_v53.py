@@ -1,4 +1,4 @@
-"""One-batch CUDA contract verification for v53 and its selected stage."""
+"""Multisource CUDA and numerical stability verification for v53."""
 
 from __future__ import annotations
 
@@ -21,11 +21,15 @@ from igsw.adaptive_gaussian_wm.multisource_point_track_dataset import (  # noqa:
 from igsw.adaptive_gaussian_wm.semantic_object_world_model_v53 import (  # noqa: E402
     SemanticObjectLatentWorldModel,
 )
+from igsw.adaptive_gaussian_wm.gradient_health import (  # noqa: E402
+    clip_finite_grad_norm_,
+)
 from igsw.adaptive_gaussian_wm.train_runtime import move_to_device  # noqa: E402
 from igsw.adaptive_gaussian_wm.v53_checkpointing import validate_init_from  # noqa: E402
 from igsw.adaptive_gaussian_wm.v53_config import (  # noqa: E402
     ARCHITECTURE,
     CHECKPOINT_VERSION,
+    DECODER_CONTRACT,
     STAGES,
     SemanticObjectWorldModelConfig,
 )
@@ -44,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temporal_step_ms", default="100,200,400")
     parser.add_argument("--dino_frame_batch", type=int, default=8)
     parser.add_argument("--amp", choices=("bf16", "fp32"), default="bf16")
+    parser.add_argument("--stability_steps_per_source", type=int, default=2)
+    parser.add_argument("--stability_batch_per_source", type=int, default=2)
     return parser.parse_args()
 
 
@@ -59,6 +65,111 @@ def _write(path: str, payload: dict) -> None:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
     os.replace(temporary, path)
+
+
+def _require_finite(name: str, value: torch.Tensor) -> None:
+    require(bool(torch.isfinite(value).all()), f"v53 non-finite tensor: {name}")
+
+
+def _require_finite_model(model, optimizer) -> None:
+    for name, parameter in model.named_parameters():
+        _require_finite(f"parameter.{name}", parameter)
+    for parameter, state in optimizer.state.items():
+        parameter_name = next(
+            name for name, candidate in model.named_parameters() if candidate is parameter
+        )
+        for state_name, value in state.items():
+            if torch.is_tensor(value):
+                _require_finite(f"optimizer.{parameter_name}.{state_name}", value)
+
+
+def _batch_for_source(dataset, source_index: int, round_index: int, args):
+    start = dataset.source_probe_indices[source_index]
+    offset = round_index * args.stability_batch_per_source
+    items = [
+        dataset[(start + offset + item, args.chunk_length)]
+        for item in range(args.stability_batch_per_source)
+    ]
+    observed = {int(item["source_index"]) for item in items}
+    require(observed == {source_index}, "v53 source stability batch crossed sources")
+    return default_collate(items)
+
+
+def _mixed_source_batch(dataset, args):
+    items = [
+        dataset[(index, args.chunk_length)] for index in dataset.source_probe_indices
+    ]
+    return default_collate(items)
+
+
+def _verify_numerical_stability(model, dino, dataset, device, amp_context, args):
+    require(args.stability_steps_per_source > 0, "stability steps must be positive")
+    require(args.stability_batch_per_source > 0, "stability batch must be positive")
+    require(
+        len(dataset.source_probe_indices) == len(dataset.source_names),
+        "v53 verifier cannot probe every data source",
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
+    trainable = [
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+    batches = []
+    labels = []
+    for round_index in range(args.stability_steps_per_source):
+        for source_index, source_name in enumerate(dataset.source_names):
+            batches.append(_batch_for_source(dataset, source_index, round_index, args))
+            labels.append(source_name)
+    batches.append(_mixed_source_batch(dataset, args))
+    labels.append("mixed")
+    source_losses: dict[str, list[float]] = {}
+    maximum_gradients: dict[str, float] = {}
+    last_output = last_features = last_batch = None
+    for cpu_batch, label in zip(batches, labels, strict=True):
+        batch = select_stage_frames(move_to_device(cpu_batch, device), args.stage)
+        features = dino(batch)
+        optimizer.zero_grad(set_to_none=True)
+        with amp_context():
+            output = model(
+                features.patches,
+                features.coordinates,
+                features.valid,
+                batch["frame_times"],
+            )
+        _require_finite("loss", output["loss"])
+        for name, value in vars(output["encoding"]).items():
+            _require_finite(f"encoding.{name}", value)
+        for name, value in output["parts"].items():
+            _require_finite(f"metric.{name}", value)
+        output["loss"].backward()
+        missing = [name for name, parameter in trainable if parameter.grad is None]
+        require(not missing, f"v53 trainable parameters lack gradients: {missing}")
+        for name, parameter in trainable:
+            _require_finite(f"gradient.{name}", parameter.grad)
+            maximum_gradients[name] = max(
+                maximum_gradients.get(name, 0.0),
+                float(parameter.grad.detach().abs().max().float()),
+            )
+        clip_finite_grad_norm_(trainable, 5.0)
+        optimizer.step()
+        _require_finite_model(model, optimizer)
+        source_losses.setdefault(label, []).append(float(output["loss"].detach()))
+        last_output, last_features, last_batch = output, features, batch
+    return {
+        "output": last_output,
+        "features": last_features,
+        "batch": last_batch,
+        "trainable": trainable,
+        "source_losses": {
+            name: sum(values) / len(values) for name, values in source_losses.items()
+        },
+        "maximum_gradient": max(maximum_gradients.values()),
+        "coordinate_basis_weight_maximum_gradient": maximum_gradients.get(
+            "tokenizer.decoder.coordinate_basis.2.weight", 0.0
+        ),
+        "updates": len(batches),
+    }
 
 
 def main() -> None:
@@ -86,21 +197,12 @@ def main() -> None:
         "train",
         str(args.chunk_length),
         args.temporal_step_ms,
-        max_items=8,
+        max_items=0,
         seed=173,
     )
-    batch = default_collate(
-        [dataset[(0, args.chunk_length)], dataset[(1, args.chunk_length)]]
-    )
     device = torch.device("cuda:0")
-    batch = select_stage_frames(move_to_device(batch, device), args.stage)
     dino = FrozenDinoVideoRuntime(
         config, device, args.amp, args.dino_frame_batch, args.dino_checkpoint
-    )
-    features = dino(batch)
-    require(
-        not features.patches.requires_grad,
-        "frozen DINO features unexpectedly require grad",
     )
     model = SemanticObjectLatentWorldModel(config).to(device)
     if args.init_from:
@@ -115,28 +217,13 @@ def main() -> None:
         if args.amp == "bf16"
         else nullcontext
     )
-    with amp_context():
-        output = model(
-            features.patches,
-            features.coordinates,
-            features.valid,
-            batch["frame_times"],
-        )
-    require(bool(torch.isfinite(output["loss"])), "v53 verifier loss is not finite")
-    output["loss"].backward()
-    trainable = [
-        (name, parameter)
-        for name, parameter in model.named_parameters()
-        if parameter.requires_grad
-    ]
-    gradients = [
-        parameter.grad for _, parameter in trainable if parameter.grad is not None
-    ]
-    require(bool(gradients), "v53 selected stage produced no gradients")
-    require(
-        all(bool(torch.isfinite(value).all()) for value in gradients),
-        "v53 has non-finite gradients",
+    stability = _verify_numerical_stability(
+        model, dino, dataset, device, amp_context, args
     )
+    output = stability["output"]
+    features = stability["features"]
+    trainable = stability["trainable"]
+    require(not features.patches.requires_grad, "frozen DINO features require grad")
     frozen_with_grad = [
         name
         for name, parameter in model.named_parameters()
@@ -187,6 +274,7 @@ def main() -> None:
         "status": "passed",
         "checkpoint_version": CHECKPOINT_VERSION,
         "architecture": ARCHITECTURE,
+        "decoder_contract": DECODER_CONTRACT,
         "stage": args.stage,
         "git_commit": args.source_revision,
         "data_index": args.data_index,
@@ -205,7 +293,14 @@ def main() -> None:
         "source_future_swap_max_difference": float(source_difference),
         "target_future_swap_max_difference": float(target_difference),
         "trainable_parameter_tensors": len(trainable),
-        "gradient_parameter_tensors": len(gradients),
+        "gradient_parameter_tensors": len(trainable),
+        "numerical_stability_status": "passed",
+        "numerical_stability_updates": stability["updates"],
+        "numerical_stability_source_losses": stability["source_losses"],
+        "maximum_parameter_gradient": stability["maximum_gradient"],
+        "coordinate_basis_weight_maximum_gradient": stability[
+            "coordinate_basis_weight_maximum_gradient"
+        ],
         "loss": float(output["loss"].detach().float()),
         "metrics": parts,
     }

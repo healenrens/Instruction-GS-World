@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -38,6 +39,7 @@ from igsw.adaptive_gaussian_wm.v53_checkpointing import (  # noqa: E402
 from igsw.adaptive_gaussian_wm.v53_config import (  # noqa: E402
     ARCHITECTURE,
     CHECKPOINT_VERSION,
+    DECODER_CONTRACT,
     STAGES,
     SemanticObjectWorldModelConfig,
 )
@@ -127,10 +129,12 @@ def read_gate(args) -> dict:
         "status": "passed",
         "checkpoint_version": CHECKPOINT_VERSION,
         "architecture": ARCHITECTURE,
+        "decoder_contract": DECODER_CONTRACT,
         "git_commit": args.git_commit,
         "stage": args.stage,
         "point_tracker_used": False,
         "rgb_reconstruction_used": False,
+        "numerical_stability_status": "passed",
     }
     differences = {
         name: (report.get(name), value)
@@ -139,6 +143,19 @@ def read_gate(args) -> dict:
     }
     if differences:
         raise ValueError(f"v53 startup gate differs: {differences}")
+    sources = report.get("source_names", [])
+    losses = report.get("numerical_stability_source_losses", {})
+    if set(losses) != set(sources) | {"mixed"}:
+        raise ValueError("v53 startup gate did not test every source and a mixed batch")
+    if report.get("numerical_stability_updates", 0) < len(sources) + 1:
+        raise ValueError("v53 startup gate ran too few numerical stability updates")
+    scalar_health = (
+        *losses.values(),
+        report.get("maximum_parameter_gradient", float("nan")),
+        report.get("coordinate_basis_weight_maximum_gradient", float("nan")),
+    )
+    if not all(math.isfinite(value) for value in scalar_health):
+        raise ValueError("v53 startup gate contains non-finite numerical health")
     return report
 
 

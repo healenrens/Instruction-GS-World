@@ -16,6 +16,9 @@ class SemanticObjectEncoding:
     slots: torch.Tensor
     assignments: torch.Tensor
     reconstruction: torch.Tensor
+    decoder_pre_norm: torch.Tensor
+    decoder_basis_max: torch.Tensor
+    decoder_residual_ratio: torch.Tensor
 
 
 class CompetitiveSlotAttention(nn.Module):
@@ -79,25 +82,47 @@ class LowRankCompositionalDecoder(nn.Module):
         self.coordinate_basis = nn.Sequential(
             nn.Linear(2, config.slot_dim),
             nn.GELU(),
-            nn.Linear(config.slot_dim, config.decoder_rank * config.patch_dim),
+            nn.Linear(config.slot_dim, config.decoder_rank),
         )
+        self.feature_basis = nn.Parameter(
+            torch.empty(config.decoder_rank, config.patch_dim)
+        )
+        nn.init.normal_(self.feature_basis, std=config.patch_dim**-0.5)
 
     def forward(
         self,
         slots: torch.Tensor,
         assignments: torch.Tensor,
         coordinates: torch.Tensor,
-    ) -> torch.Tensor:
-        base = self.slot_base(slots)
-        coefficients = self.slot_coefficients(slots)
-        basis = self.coordinate_basis(coordinates).reshape(
-            *coordinates.shape[:-1], self.rank, self.patch_dim
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # The decoder is a numerically sensitive auxiliary target. Keep its
+        # linear maps, reductions and normalization in FP32 under BF16 training.
+        with torch.autocast(device_type=slots.device.type, enabled=False):
+            slots = slots.float()
+            assignments = assignments.float()
+            coordinates = coordinates.float()
+            base = self.slot_base(slots)
+            slot_coefficients = self.slot_coefficients(slots).tanh()
+            coordinate_coefficients = self.coordinate_basis(coordinates).tanh()
+            mixed_coefficients = torch.einsum(
+                "bkp,bkr->bpr", assignments, slot_coefficients
+            )
+            residual = (
+                mixed_coefficients * coordinate_coefficients
+            ) @ self.feature_basis
+            base_field = torch.einsum("bkp,bkd->bpd", assignments, base)
+            reconstructed = base_field + residual
+            pre_norm = reconstructed.norm(dim=-1)
+            normalized = F.normalize(reconstructed, dim=-1, eps=1e-4)
+            residual_ratio = residual.norm(dim=-1) / base_field.norm(dim=-1).clamp_min(
+                1e-4
+            )
+        return (
+            normalized,
+            pre_norm,
+            coordinate_coefficients.abs().amax(dim=-1),
+            residual_ratio,
         )
-        reconstructed = torch.einsum("bkp,bkd->bpd", assignments, base)
-        reconstructed = reconstructed + torch.einsum(
-            "bkp,bkr,bprd->bpd", assignments, coefficients, basis
-        )
-        return F.normalize(reconstructed.float(), dim=-1, eps=1e-6)
 
 
 class SemanticObjectTokenizer(nn.Module):
@@ -149,21 +174,28 @@ class SemanticObjectTokenizer(nn.Module):
         )
         slots = self.initial_slots(patches.shape[0])
         states, assignments, reconstructions = [], [], []
+        decoder_pre_norms, decoder_basis_maxima, decoder_residual_ratios = [], [], []
         for frame in range(patches.shape[1]):
             slots, assignment = self.attention(
                 projected[:, frame], slots, valid[:, frame]
             )
             slots = self.output_norm(slots)
-            reconstruction = self.decoder(
+            reconstruction, pre_norm, basis_max, residual_ratio = self.decoder(
                 slots, assignment, coordinates[:, frame].float()
             )
             states.append(slots)
             assignments.append(assignment)
             reconstructions.append(reconstruction)
+            decoder_pre_norms.append(pre_norm)
+            decoder_basis_maxima.append(basis_max)
+            decoder_residual_ratios.append(residual_ratio)
         return SemanticObjectEncoding(
             slots=torch.stack(states, dim=1),
             assignments=torch.stack(assignments, dim=1),
             reconstruction=torch.stack(reconstructions, dim=1),
+            decoder_pre_norm=torch.stack(decoder_pre_norms, dim=1),
+            decoder_basis_max=torch.stack(decoder_basis_maxima, dim=1),
+            decoder_residual_ratio=torch.stack(decoder_residual_ratios, dim=1),
         )
 
 
@@ -235,6 +267,11 @@ def tokenizer_objective(
         "object_effective_slot_count": effective.mean().detach(),
         "object_max_slot_mass": normalized_mass.max(dim=-1).values.mean().detach(),
         "scene_assignment_fraction": encoding.assignments[:, :, -1].mean().detach(),
+        "decoder_pre_norm_min": encoding.decoder_pre_norm.min().detach(),
+        "decoder_pre_norm_mean": encoding.decoder_pre_norm.mean().detach(),
+        "decoder_pre_norm_max": encoding.decoder_pre_norm.max().detach(),
+        "decoder_coordinate_basis_max": encoding.decoder_basis_max.max().detach(),
+        "decoder_residual_to_base_ratio": encoding.decoder_residual_ratio.mean().detach(),
         **{name: value.detach() for name, value in affinity_metrics.items()},
     }
     return loss, parts

@@ -7,11 +7,13 @@ from dataclasses import asdict, dataclass
 
 CHECKPOINT_VERSION = 53
 ARCHITECTURE = "semantic_object_latent_dynamics_v1"
+DECODER_CONTRACT = "separable_low_rank_fp32_v1"
 STAGES = ("tokenizer", "dynamics")
 
 
 @dataclass(frozen=True)
 class SemanticObjectWorldModelConfig:
+    decoder_contract: str = DECODER_CONTRACT
     dino_model_name: str = "vit_large_patch14_dinov2.lvd142m"
     dino_image_size: int = 224
     patch_dim: int = 1024
@@ -42,6 +44,8 @@ class SemanticObjectWorldModelConfig:
         return self.object_slots + self.scene_slots
 
     def validate(self) -> None:
+        if self.decoder_contract != DECODER_CONTRACT:
+            raise ValueError("v53 decoder contract differs")
         dimensions = (
             self.dino_image_size,
             self.patch_dim,
