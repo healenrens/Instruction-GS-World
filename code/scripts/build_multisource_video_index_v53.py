@@ -9,6 +9,7 @@ from glob import glob
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -69,13 +70,16 @@ def select_camera(info: dict, source: dict, task_root: str) -> str:
     if priorities is None:
         priorities = [source["camera"]]
     video_keys = {
-        key for key, value in info.get("features", {}).items()
+        key
+        for key, value in info.get("features", {}).items()
         if isinstance(value, dict) and value.get("dtype") == "video"
     }
     for camera in priorities:
         if camera in video_keys:
             return str(camera)
-    raise ValueError(f"none of the requested cameras exist in {task_root}: {priorities}")
+    raise ValueError(
+        f"none of the requested cameras exist in {task_root}: {priorities}"
+    )
 
 
 def format_video_path(task_root: str, info: dict, camera: str, episode: int) -> str:
@@ -97,7 +101,9 @@ def lerobot_v21_episodes(source: dict, source_index: int) -> list[dict]:
         camera = select_camera(info, source, task_root)
         episodes_path = os.path.join(task_root, "meta", "episodes.jsonl")
         if not os.path.isfile(episodes_path):
-            raise ValueError(f"LeRobot v2.1 episode metadata is missing: {episodes_path}")
+            raise ValueError(
+                f"LeRobot v2.1 episode metadata is missing: {episodes_path}"
+            )
         group = os.path.relpath(task_root, root)
         fps = float(info["fps"])
         for raw in read_jsonl(episodes_path):
@@ -118,7 +124,9 @@ def lerobot_v21_episodes(source: dict, source_index: int) -> list[dict]:
     return result
 
 
-def parquet_rows(paths: list[str], required: tuple[str, ...], optional: tuple[str, ...]) -> list[dict]:
+def parquet_rows(
+    paths: list[str], required: tuple[str, ...], optional: tuple[str, ...]
+) -> list[dict]:
     import pyarrow.parquet as pq
 
     rows = []
@@ -154,13 +162,13 @@ def lerobot_v30_episodes(source: dict, source_index: int) -> list[dict]:
         video_root = os.path.join(task_root, "videos", camera)
         if not os.path.isdir(video_root):
             continue
-        available_videos = set(
-            glob(os.path.join(video_root, "chunk-*", "file-*.mp4"))
-        )
+        available_videos = set(glob(os.path.join(video_root, "chunk-*", "file-*.mp4")))
         if not available_videos:
             continue
         episode_paths = sorted(
-            glob(os.path.join(task_root, "meta", "episodes", "chunk-*", "file-*.parquet"))
+            glob(
+                os.path.join(task_root, "meta", "episodes", "chunk-*", "file-*.parquet")
+            )
         )
         if not episode_paths:
             raise ValueError(f"LeRobot v3 episode metadata is missing in {task_root}")
@@ -184,10 +192,14 @@ def lerobot_v30_episodes(source: dict, source_index: int) -> list[dict]:
             end_time = float(row[f"videos/{camera}/to_timestamp"])
             length = int(row["length"])
             if round((end_time - start_time) * fps) != length:
-                raise ValueError(f"video episode duration differs from length in {task_root}")
+                raise ValueError(
+                    f"video episode duration differs from length in {task_root}"
+                )
             path = os.path.join(
                 task_root,
-                template.format(video_key=camera, chunk_index=chunk, file_index=file_index),
+                template.format(
+                    video_key=camera, chunk_index=chunk, file_index=file_index
+                ),
             )
             if path not in available_videos:
                 continue
@@ -207,32 +219,54 @@ def lerobot_v30_episodes(source: dict, source_index: int) -> list[dict]:
 
 
 def _numeric_video_key(path: str) -> tuple[int, int]:
-    match = re.search(r"/chunk-(\d+)/file-(\d+)\.mp4$", path)
+    match = re.search(r"/chunk-(\d+)/file-(\d+)\.(?:mp4|parquet)$", path)
     if match is None:
-        raise ValueError(f"unknown converted video path: {path}")
+        raise ValueError(f"unknown converted shard path: {path}")
     return int(match.group(1)), int(match.group(2))
 
 
-def _video_frame_count(path: str, expected_fps: float) -> int:
-    import av
+def _video_is_readable(path: str, expected_fps: float) -> bool:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate",
+            "-of",
+            "json",
+            path,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    streams = json.loads(result.stdout).get("streams", [])
+    if len(streams) != 1:
+        return False
+    numerator, denominator = streams[0]["avg_frame_rate"].split("/", maxsplit=1)
+    if float(denominator) == 0.0:
+        return False
+    rate = float(numerator) / float(denominator)
+    return abs(rate - expected_fps) <= 1e-3
 
-    with av.open(path) as container:
-        stream = container.streams.video[0]
-        frames = int(stream.frames)
-        rate = float(stream.average_rate)
-    if frames <= 0:
-        raise ValueError(f"video container has no indexed frame count: {path}")
-    if abs(rate - expected_fps) > 1e-3:
-        raise ValueError(f"video fps {rate} differs from metadata {expected_fps}: {path}")
-    return frames
 
-
-def _hy_episode_tasks(converted_table: str, minimum_age_seconds: float) -> dict[int, int]:
+def _hy_episode_tasks(
+    converted_table: str, minimum_age_seconds: float
+) -> tuple[dict[int, int], dict[tuple[int, int], int]]:
     import pyarrow.parquet as pq
 
     cutoff = time.time() - minimum_age_seconds
     result = {}
-    paths = sorted(glob(os.path.join(converted_table, "data", "chunk-*", "file-*.parquet")))
+    shard_frames = {}
+    paths = sorted(
+        glob(os.path.join(converted_table, "data", "chunk-*", "file-*.parquet"))
+    )
     for path in paths:
         if os.path.getmtime(path) > cutoff:
             continue
@@ -244,14 +278,18 @@ def _hy_episode_tasks(converted_table: str, minimum_age_seconds: float) -> dict[
         if not counts:
             raise ValueError(f"HY converted parquet has no task rows: {path}")
         episode_index = episode_ids.pop()
-        result[episode_index] = min(
-            counts, key=lambda value: (-counts[value], value)
-        )
-    return result
+        result[episode_index] = min(counts, key=lambda value: (-counts[value], value))
+        shard_frames[_numeric_video_key(path)] = table.num_rows
+    return result, shard_frames
 
 
 def _hy_episode_rows(table_root: str) -> list[dict]:
-    paths = sorted(glob(os.path.join(table_root, "meta", "episodes", "**", "*.parquet"), recursive=True))
+    paths = sorted(
+        glob(
+            os.path.join(table_root, "meta", "episodes", "**", "*.parquet"),
+            recursive=True,
+        )
+    )
     if not paths:
         raise ValueError(f"HY episode metadata is missing: {table_root}")
     return parquet_rows(
@@ -269,7 +307,8 @@ def hy_converted_video_episodes(source: dict, source_index: int) -> list[dict]:
     cutoff = time.time() - minimum_age_seconds
     result = []
     converted_tables = sorted(
-        path for path in glob(os.path.join(converted_root, "table_*"))
+        path
+        for path in glob(os.path.join(converted_root, "table_*"))
         if os.path.isdir(path)
     )
     for converted_table in converted_tables:
@@ -277,25 +316,46 @@ def hy_converted_video_episodes(source: dict, source_index: int) -> list[dict]:
         raw_table = os.path.join(raw_root, table_name)
         info = read_json(os.path.join(raw_table, "meta", "info.json"))
         fps = float(info["fps"])
-        episode_tasks = _hy_episode_tasks(converted_table, minimum_age_seconds)
+        episode_tasks, shard_frames = _hy_episode_tasks(
+            converted_table, minimum_age_seconds
+        )
         rows = _hy_episode_rows(raw_table)
         rows.sort(key=lambda row: int(row["dataset_from_index"]))
-        videos = sorted(
-            (
-                path
-                for path in glob(
-                    os.path.join(converted_table, "videos", camera, "chunk-*", "file-*.mp4")
-                )
-                if os.path.getmtime(path) <= cutoff
-            ),
-            key=_numeric_video_key,
-        )
-        if not videos:
+        video_paths = {
+            _numeric_video_key(path): path
+            for path in glob(
+                os.path.join(converted_table, "videos", camera, "chunk-*", "file-*.mp4")
+            )
+        }
+        if not shard_frames:
             continue
         row_position = 0
         shard_start = 0
-        for video_path in videos:
-            shard_end = shard_start + _video_frame_count(video_path, fps)
+        for video_key, frame_count in sorted(shard_frames.items()):
+            video_path = video_paths.get(
+                video_key,
+                os.path.join(
+                    converted_table,
+                    "videos",
+                    camera,
+                    f"chunk-{video_key[0]:03d}",
+                    f"file-{video_key[1]:03d}.mp4",
+                ),
+            )
+            shard_end = shard_start + frame_count
+            video_is_readable = (
+                os.path.isfile(video_path)
+                and os.path.getmtime(video_path) <= cutoff
+                and _video_is_readable(video_path, fps)
+            )
+            if not video_is_readable:
+                print(
+                    json.dumps(
+                        {"event": "skip_unusable_hy_video", "path": video_path},
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
             while row_position < len(rows):
                 row = rows[row_position]
                 episode_start = int(row["dataset_from_index"])
@@ -307,7 +367,7 @@ def hy_converted_video_episodes(source: dict, source_index: int) -> list[dict]:
                         f"HY video shard cuts through episode {row['episode_index']}: {video_path}"
                     )
                 original_episode = int(row["episode_index"])
-                if original_episode in episode_tasks:
+                if video_is_readable and original_episode in episode_tasks:
                     task_index = episode_tasks[original_episode]
                     result.append(
                         {
@@ -366,7 +426,9 @@ def build(spec: dict) -> dict:
         sources.append(
             {
                 "name": str(source["name"]),
-                "adapter": "rgb_episode_cache" if builder_name == "rgb_episode_cache" else "video_file",
+                "adapter": "rgb_episode_cache"
+                if builder_name == "rgb_episode_cache"
+                else "video_file",
                 "weight": float(source.get("weight", 1.0)),
                 "builder": builder_name,
                 "root": os.path.abspath(source["root"]),
