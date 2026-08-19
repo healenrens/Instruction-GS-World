@@ -84,43 +84,43 @@ def _row_group_episode_tasks(
     parquet_file,
     row_group: int,
     path: str,
-) -> list[tuple[int, int]]:
+) -> list[tuple[int, int, int]]:
     episode_index = _column_index(parquet_file, "episode_index", path)
     task_index = _column_index(parquet_file, "task_index", path)
     episode = _constant_row_group_value(parquet_file, row_group, episode_index)
     task = _constant_row_group_value(parquet_file, row_group, task_index)
     if episode is not None and task is not None:
-        return [(episode, task)]
+        rows = parquet_file.metadata.row_group(row_group).num_rows
+        return [(episode, task, rows)]
 
     table = parquet_file.read_row_group(
         row_group,
         columns=["episode_index", "task_index"],
     )
-    grouped = table.group_by("episode_index").aggregate(
-        [("task_index", "min"), ("task_index", "max")]
+    grouped = table.group_by(["episode_index", "task_index"]).aggregate(
+        [("task_index", "count")]
     )
-    result = []
-    for row in grouped.to_pylist():
-        minimum = int(row["task_index_min"])
-        maximum = int(row["task_index_max"])
-        if minimum != maximum:
-            raise ValueError(
-                f"HY episode {row['episode_index']} mixes task_index values: {path}"
-            )
-        result.append((int(row["episode_index"]), minimum))
-    return result
+    return [
+        (
+            int(row["episode_index"]),
+            int(row["task_index"]),
+            int(row["task_index_count"]),
+        )
+        for row in grouped.to_pylist()
+    ]
 
 
 def _episode_task_labels(
     converted_table: str,
-    required_episodes: set[int],
+    required_lengths: dict[int, int],
     cutoff: float,
-) -> tuple[dict[int, int], int]:
+) -> tuple[dict[int, tuple[int, ...]], int]:
     import pyarrow.parquet as pq
 
-    if not required_episodes:
+    if not required_lengths:
         return {}, 0
-    labels = {}
+    counts: dict[int, dict[int, int]] = {}
+    observed_rows: dict[int, int] = {}
     recent_files = 0
     paths = sorted(
         glob(os.path.join(converted_table, "data", "chunk-*", "file-*.parquet")),
@@ -132,17 +132,22 @@ def _episode_task_labels(
             continue
         parquet_file = pq.ParquetFile(path)
         for row_group in range(parquet_file.num_row_groups):
-            for episode, task in _row_group_episode_tasks(
+            for episode, task, count in _row_group_episode_tasks(
                 parquet_file, row_group, path
             ):
-                if episode not in required_episodes:
+                if episode not in required_lengths:
                     continue
-                previous = labels.setdefault(episode, task)
-                if previous != task:
+                task_counts = counts.setdefault(episode, {})
+                task_counts[task] = task_counts.get(task, 0) + count
+                observed_rows[episode] = observed_rows.get(episode, 0) + count
+                if observed_rows[episode] > required_lengths[episode]:
                     raise ValueError(
-                        f"HY episode {episode} has conflicting task labels"
+                        f"HY converted rows exceed episode {episode} length"
                     )
-        if len(labels) == len(required_episodes):
+        if len(observed_rows) == len(required_lengths) and all(
+            observed_rows[episode] == length
+            for episode, length in required_lengths.items()
+        ):
             break
         if position % 2000 == 0:
             print(
@@ -151,14 +156,27 @@ def _episode_task_labels(
                         "event": "hy_task_label_progress",
                         "table": os.path.basename(converted_table),
                         "files_scanned": position,
-                        "labels_found": len(labels),
-                        "labels_required": len(required_episodes),
+                        "labels_found": len(observed_rows),
+                        "labels_required": len(required_lengths),
                     },
                     sort_keys=True,
                 ),
                 flush=True,
             )
-    return labels, recent_files
+    incomplete = {
+        episode: (observed_rows.get(episode, 0), length)
+        for episode, length in required_lengths.items()
+        if observed_rows.get(episode, 0) != length
+    }
+    if incomplete:
+        raise ValueError(
+            f"HY converted rows do not cover mapped episodes: "
+            f"{list(incomplete.items())[:8]}"
+        )
+    return {
+        episode: tuple(sorted(task_counts))
+        for episode, task_counts in counts.items()
+    }, recent_files
 
 
 def _frame_rate(value: str) -> float:
@@ -305,11 +323,14 @@ def build_hy_packed_video_episodes(source: dict, source_index: int) -> list[dict
             converted_table, camera, fps, cutoff
         )
         mapped = _map_video_prefix(rows, videos)
-        required_episodes = {item["episode"] for item in mapped}
+        required_lengths = {
+            item["episode"]: item["frame_count"] for item in mapped
+        }
         task_labels, recent_labels = _episode_task_labels(
-            converted_table, required_episodes, cutoff
+            converted_table, required_lengths, cutoff
         )
-        missing_labels = sorted(required_episodes - task_labels.keys())
+        missing_labels = sorted(required_lengths.keys() - task_labels.keys())
+        task_signatures = set(task_labels.values())
         coverage = len(mapped) / len(rows)
         summary = {
             "event": "hy_packed_video_audit",
@@ -321,6 +342,10 @@ def build_hy_packed_video_episodes(source: dict, source_index: int) -> list[dict
             "usable_prefix_video_count": len(videos),
             "first_unusable_video": first_gap,
             "missing_task_label_count": len(missing_labels),
+            "multi_task_episode_count": sum(
+                len(signature) > 1 for signature in task_labels.values()
+            ),
+            "task_signature_count": len(task_signatures),
             "recent_task_label_file_count": recent_labels,
         }
         table_summaries.append(summary)
@@ -332,12 +357,15 @@ def build_hy_packed_video_episodes(source: dict, source_index: int) -> list[dict
         total_raw_episodes += len(rows)
         total_mapped_episodes += len(mapped)
         for item in mapped:
+            signature = "-".join(
+                str(task) for task in task_labels[item["episode"]]
+            )
             result.append(
                 {
                     "source_index": source_index,
                     "episode_index": len(result),
                     "split": "train",
-                    "group": f"{table_name}/task_{task_labels[item['episode']]}",
+                    "group": f"{table_name}/taskset_{signature}",
                     "path": item["path"],
                     "fps": fps,
                     "frame_count": item["frame_count"],
