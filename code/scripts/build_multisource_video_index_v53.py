@@ -8,6 +8,7 @@ from glob import glob
 import json
 import os
 import sys
+import time
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
@@ -126,17 +127,15 @@ def lerobot_v21_episodes(source: dict, source_index: int) -> list[dict]:
 def parquet_rows(
     paths: list[str], required: tuple[str, ...], optional: tuple[str, ...]
 ) -> list[dict]:
-    import pyarrow.parquet as pq
+    import pyarrow.dataset as ds
 
-    rows = []
-    for path in paths:
-        available = set(pq.ParquetFile(path).schema_arrow.names)
-        missing = set(required) - available
-        if missing:
-            raise ValueError(f"episode metadata is missing {sorted(missing)}: {path}")
-        columns = list(required) + [name for name in optional if name in available]
-        rows.extend(pq.read_table(path, columns=columns).to_pylist())
-    return rows
+    dataset = ds.dataset(paths, format="parquet")
+    available = set(dataset.schema.names)
+    missing = set(required) - available
+    if missing:
+        raise ValueError(f"episode metadata is missing {sorted(missing)}: {paths[0]}")
+    columns = list(required) + [name for name in optional if name in available]
+    return dataset.to_table(columns=columns, use_threads=True).to_pylist()
 
 
 def episode_group(row: dict, fallback: str) -> str:
@@ -180,11 +179,13 @@ def lerobot_v30_episodes(source: dict, source_index: int) -> list[dict]:
             f"videos/{camera}/from_timestamp",
             f"videos/{camera}/to_timestamp",
         )
-        for row in parquet_rows(
+        metadata_rows = parquet_rows(
             episode_paths,
             ("episode_index", "length", *video_columns),
             ("split", "tasks", "task_index"),
-        ):
+        )
+        metadata_rows.sort(key=lambda row: int(row["episode_index"]))
+        for row in metadata_rows:
             chunk = int(row[f"videos/{camera}/chunk_index"])
             file_index = int(row[f"videos/{camera}/file_index"])
             start_time = float(row[f"videos/{camera}/from_timestamp"])
@@ -267,10 +268,35 @@ def build(spec: dict) -> dict:
                 "camera_priority": list(source.get("camera_priority", ())),
             }
         )
+        started = time.monotonic()
+        print(
+            json.dumps(
+                {
+                    "event": "source_index_start",
+                    "source": source["name"],
+                    "builder": builder_name,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
         source_episodes = builders[builder_name](source, source_index)
         if not source_episodes:
             raise ValueError(f"source produced no episodes: {source['name']}")
         episodes.extend(source_episodes)
+        print(
+            json.dumps(
+                {
+                    "event": "source_index_complete",
+                    "source": source["name"],
+                    "builder": builder_name,
+                    "episodes": len(source_episodes),
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
     if not sources or not episodes:
         raise ValueError("source spec produced an empty video index")
     return {
