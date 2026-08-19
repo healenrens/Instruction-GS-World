@@ -63,27 +63,52 @@ def _raw_episode_rows(table_root: str) -> list[dict]:
     return rows
 
 
-def _constant_parquet_value(parquet_file, column: str, path: str) -> int:
+def _column_index(parquet_file, column: str, path: str) -> int:
     names = parquet_file.schema_arrow.names
     if column not in names:
         raise ValueError(f"HY converted parquet is missing {column}: {path}")
-    column_index = names.index(column)
-    values = set()
-    statistics_complete = True
-    for row_group in range(parquet_file.num_row_groups):
-        statistics = parquet_file.metadata.row_group(row_group).column(column_index).statistics
-        if statistics is None or not statistics.has_min_max:
-            statistics_complete = False
-            break
-        values.update((int(statistics.min), int(statistics.max)))
-    if not statistics_complete:
-        values = set(
-            int(value)
-            for value in parquet_file.read(columns=[column])[column].to_pylist()
-        )
-    if len(values) != 1:
-        raise ValueError(f"HY converted parquet mixes {column} values: {path}")
-    return values.pop()
+    return names.index(column)
+
+
+def _constant_row_group_value(parquet_file, row_group: int, column_index: int):
+    statistics = (
+        parquet_file.metadata.row_group(row_group).column(column_index).statistics
+    )
+    if statistics is None or not statistics.has_min_max:
+        return None
+    minimum, maximum = int(statistics.min), int(statistics.max)
+    return minimum if minimum == maximum else None
+
+
+def _row_group_episode_tasks(
+    parquet_file,
+    row_group: int,
+    path: str,
+) -> list[tuple[int, int]]:
+    episode_index = _column_index(parquet_file, "episode_index", path)
+    task_index = _column_index(parquet_file, "task_index", path)
+    episode = _constant_row_group_value(parquet_file, row_group, episode_index)
+    task = _constant_row_group_value(parquet_file, row_group, task_index)
+    if episode is not None and task is not None:
+        return [(episode, task)]
+
+    table = parquet_file.read_row_group(
+        row_group,
+        columns=["episode_index", "task_index"],
+    )
+    grouped = table.group_by("episode_index").aggregate(
+        [("task_index", "min"), ("task_index", "max")]
+    )
+    result = []
+    for row in grouped.to_pylist():
+        minimum = int(row["task_index_min"])
+        maximum = int(row["task_index_max"])
+        if minimum != maximum:
+            raise ValueError(
+                f"HY episode {row['episode_index']} mixes task_index values: {path}"
+            )
+        result.append((int(row["episode_index"]), minimum))
+    return result
 
 
 def _episode_task_labels(
@@ -106,13 +131,17 @@ def _episode_task_labels(
             recent_files += 1
             continue
         parquet_file = pq.ParquetFile(path)
-        episode = _constant_parquet_value(parquet_file, "episode_index", path)
-        if episode not in required_episodes:
-            continue
-        task = _constant_parquet_value(parquet_file, "task_index", path)
-        previous = labels.setdefault(episode, task)
-        if previous != task:
-            raise ValueError(f"HY episode {episode} has conflicting task labels")
+        for row_group in range(parquet_file.num_row_groups):
+            for episode, task in _row_group_episode_tasks(
+                parquet_file, row_group, path
+            ):
+                if episode not in required_episodes:
+                    continue
+                previous = labels.setdefault(episode, task)
+                if previous != task:
+                    raise ValueError(
+                        f"HY episode {episode} has conflicting task labels"
+                    )
         if len(labels) == len(required_episodes):
             break
         if position % 2000 == 0:
