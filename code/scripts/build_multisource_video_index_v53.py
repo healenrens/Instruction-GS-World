@@ -140,13 +140,22 @@ def parquet_rows(
 
 def episode_group(row: dict, fallback: str) -> str:
     tasks = row.get("tasks")
-    if isinstance(tasks, list) and tasks:
-        return str(tasks[0])
-    if tasks:
-        return str(tasks)
-    if "task_index" in row:
-        return f"task_{int(row['task_index'])}"
-    return fallback
+    candidates = tasks if isinstance(tasks, list) else [tasks]
+    for candidate in candidates:
+        label = str(candidate or "").strip()
+        if label:
+            return label
+    task_index = row.get("task_index")
+    if task_index is not None:
+        return f"task_{int(task_index)}"
+    label = str(fallback).strip()
+    if not label:
+        raise ValueError("episode group fallback is empty")
+    return label
+
+
+def episode_split(row: dict) -> str:
+    return str(row.get("split") or "train").strip()
 
 
 def lerobot_v30_episodes(source: dict, source_index: int) -> list[dict]:
@@ -207,7 +216,7 @@ def lerobot_v30_episodes(source: dict, source_index: int) -> list[dict]:
                 {
                     "source_index": source_index,
                     "episode_index": len(result),
-                    "split": str(row.get("split", "train")),
+                    "split": episode_split(row),
                     "group": episode_group(row, fallback_group),
                     "path": path,
                     "fps": fps,
