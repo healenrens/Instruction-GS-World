@@ -55,6 +55,7 @@
       "camera": "observation.images.cam_high",
       "converted_root": "/mnt/pfs/public/Hy-Embodied-0.5-VLA-LeRobot",
       "minimum_file_age_seconds": 300,
+      "minimum_usable_video_fraction": 0.98,
       "name": "hy_embodied",
       "root": "/mnt/pfs/public/Hy-Embodied-0.5-VLA-Data",
       "weight": 1.0

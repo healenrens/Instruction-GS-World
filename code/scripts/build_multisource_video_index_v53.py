@@ -225,7 +225,7 @@ def _numeric_video_key(path: str) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
-def _video_is_readable(path: str, expected_fps: float) -> bool:
+def _video_probe(path: str, expected_fps: float) -> tuple[bool, str]:
     result = subprocess.run(
         [
             "ffprobe",
@@ -245,15 +245,17 @@ def _video_is_readable(path: str, expected_fps: float) -> bool:
         check=False,
     )
     if result.returncode != 0:
-        return False
+        return False, "ffprobe_error"
     streams = json.loads(result.stdout).get("streams", [])
     if len(streams) != 1:
-        return False
+        return False, "missing_video_stream"
     numerator, denominator = streams[0]["avg_frame_rate"].split("/", maxsplit=1)
     if float(denominator) == 0.0:
-        return False
+        return False, "invalid_frame_rate"
     rate = float(numerator) / float(denominator)
-    return abs(rate - expected_fps) <= 1e-3
+    if abs(rate - expected_fps) > 1e-3:
+        return False, "fps_mismatch"
+    return True, "usable"
 
 
 def _hy_episode_tasks(
@@ -304,6 +306,9 @@ def hy_converted_video_episodes(source: dict, source_index: int) -> list[dict]:
     converted_root = os.path.abspath(source["converted_root"])
     camera = str(source["camera"])
     minimum_age_seconds = float(source.get("minimum_file_age_seconds", 300.0))
+    minimum_usable_fraction = float(source.get("minimum_usable_video_fraction", 0.98))
+    if not 0.0 < minimum_usable_fraction <= 1.0:
+        raise ValueError("HY minimum usable video fraction must stay within (0,1]")
     cutoff = time.time() - minimum_age_seconds
     result = []
     converted_tables = sorted(
@@ -331,6 +336,8 @@ def hy_converted_video_episodes(source: dict, source_index: int) -> list[dict]:
             continue
         row_position = 0
         shard_start = 0
+        usability = Counter()
+        unusable_examples = []
         for video_key, frame_count in sorted(shard_frames.items()):
             video_path = video_paths.get(
                 video_key,
@@ -343,19 +350,15 @@ def hy_converted_video_episodes(source: dict, source_index: int) -> list[dict]:
                 ),
             )
             shard_end = shard_start + frame_count
-            video_is_readable = (
-                os.path.isfile(video_path)
-                and os.path.getmtime(video_path) <= cutoff
-                and _video_is_readable(video_path, fps)
-            )
-            if not video_is_readable:
-                print(
-                    json.dumps(
-                        {"event": "skip_unusable_hy_video", "path": video_path},
-                        sort_keys=True,
-                    ),
-                    flush=True,
-                )
+            if not os.path.isfile(video_path):
+                video_is_readable, reason = False, "missing_video"
+            elif os.path.getmtime(video_path) > cutoff:
+                video_is_readable, reason = False, "recent_video"
+            else:
+                video_is_readable, reason = _video_probe(video_path, fps)
+            usability[reason] += 1
+            if not video_is_readable and len(unusable_examples) < 8:
+                unusable_examples.append({"reason": reason, "path": video_path})
             while row_position < len(rows):
                 row = rows[row_position]
                 episode_start = int(row["dataset_from_index"])
@@ -383,6 +386,22 @@ def hy_converted_video_episodes(source: dict, source_index: int) -> list[dict]:
                     )
                 row_position += 1
             shard_start = shard_end
+        total_videos = sum(usability.values())
+        usable_fraction = usability["usable"] / total_videos
+        summary = {
+            "event": "hy_table_video_audit",
+            "table": table_name,
+            "total_stable_shards": total_videos,
+            "usable_fraction": usable_fraction,
+            "counts": dict(sorted(usability.items())),
+            "unusable_examples": unusable_examples,
+        }
+        print(json.dumps(summary, sort_keys=True), flush=True)
+        if usable_fraction < minimum_usable_fraction:
+            raise ValueError(
+                f"HY {table_name} usable video fraction {usable_fraction:.4f} "
+                f"is below required {minimum_usable_fraction:.4f}"
+            )
     return result
 
 
