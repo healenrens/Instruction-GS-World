@@ -1,4 +1,4 @@
-"""Task-diverse, source-balanced video clips for the v52 Object State model."""
+"""Task-diverse, source-balanced RGB clips from native robot-video sources."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from .video_file_decoder import decode_video_frames, square_dino_rgb
 
 
 MULTISOURCE_POINT_TRACK_CONTRACT = "multisource_point_track_object_video_v1"
+MULTISOURCE_VIDEO_CONTRACT = "multisource_native_robot_video_v1"
 
 
 def _stable_integer(*parts: object) -> int:
@@ -94,10 +95,10 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         self._group_source_indices = tuple(source for source, _ in group_keys)
         self.sampling_group_names = tuple(group for _, group in group_keys)
         records = []
-        minimum_frames = self.dynamic_history_lengths[0]
+        required_frames = self.dynamic_history_lengths[-1]
         for sequence_index, episode in enumerate(selected):
             minimum_stride = max(1, round(self.temporal_step_ms[0] * episode.fps / 1000.0))
-            last_start = episode.frame_count - 1 - (minimum_frames - 1) * minimum_stride
+            last_start = episode.frame_count - 1 - (required_frames - 1) * minimum_stride
             if last_start < 0:
                 continue
             start_stride = max(1, round(self.start_step_seconds * episode.fps))
@@ -296,3 +297,6 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             "temporal_stride": torch.tensor(stride, dtype=torch.long),
             "temporal_step_seconds": torch.tensor(stride / record.fps),
         }
+
+
+MultiSourceRobotVideoDataset = MultiSourcePointTrackObjectVideoDataset

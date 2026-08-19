@@ -8,34 +8,25 @@ ROOT="${ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 PY="${VENV_ROOT}/.venv/bin/python"
+STAGE="${STAGE:-tokenizer}"
 SPEC="${MULTISOURCE_SPEC:-${ROOT}/configs/multisource_real_robot_video_v53.json}"
 INDEX_ROOT="${MULTISOURCE_INDEX_ROOT:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53}"
 DATA_INDEX="${DATA_INDEX:-${INDEX_ROOT}/index.json}"
 DATA_REPORT="${DATA_REPORT:-${INDEX_ROOT}/verification.json}"
-DATA="${DATA:-${RUNTIME_ROOT}/data/rt2_visual_episodes_rgb_native_30hz_v4}"
-SOURCE_REVISION="${SOURCE_REVISION:-$(git -C "${ROOT}" rev-parse HEAD)}"
-GATE_REPORT="${GATE_REPORT:-${RUNTIME_ROOT}/outputs/v53_gates/${SOURCE_REVISION}_startup.json}"
-RUN_NAME="${RUN_NAME:-multisource_object_state_world_model_v53_seed17_${SOURCE_REVISION:0:7}}"
+SOURCE_REVISION="${SOURCE_REVISION:-}"
+RUN_NAME="${RUN_NAME:-semantic_object_world_model_v53_${STAGE}_seed17_${SOURCE_REVISION:0:7}}"
 OUT="${OUT:-${RUNTIME_ROOT}/outputs/${RUN_NAME}}"
 LOG_ROOT="${LOG_ROOT:-${RUNTIME_ROOT}/logs/${RUN_NAME}}"
+GATE_REPORT="${GATE_REPORT:-${RUNTIME_ROOT}/outputs/v53_gates/${SOURCE_REVISION}_${STAGE}.json}"
+DINO_CHECKPOINT="${DINO_CHECKPOINT:-${RUNTIME_ROOT}/models/dinov2_vitl14/model.safetensors}"
+PID_FILE="${LOG_ROOT}/launcher.pid"
+LAUNCH_LOG="${LOG_ROOT}/launcher.log"
 
-export ROOT RUNTIME_ROOT VENV_ROOT DATA DATA_INDEX SOURCE_REVISION GATE_REPORT
-export RUN_NAME OUT LOG_ROOT
+export ROOT RUNTIME_ROOT VENV_ROOT STAGE DATA_INDEX SOURCE_REVISION RUN_NAME OUT LOG_ROOT
+export GATE_REPORT DINO_CHECKPOINT
 export MULTISOURCE_SPEC="${SPEC}" MULTISOURCE_INDEX_ROOT="${INDEX_ROOT}"
-export DINO_CHECKPOINT="${DINO_CHECKPOINT:-${RUNTIME_ROOT}/models/dinov2_vitl14/model.safetensors}"
-export TRACKER_CHECKPOINT="${TRACKER_CHECKPOINT:-${RUNTIME_ROOT}/checkpoints/cotracker/scaled_offline.pth}"
-export NPROC_PER_NODE="${NPROC_PER_NODE:-auto}"
-export BATCH_PER_GPU="${BATCH_PER_GPU:-auto}"
-export GRAD_ACCUM="${GRAD_ACCUM:-auto}"
-export TARGET_GLOBAL_BATCH="${TARGET_GLOBAL_BATCH:-256}"
-export WORKERS_PER_RANK="${WORKERS_PER_RANK:-auto}"
-export DINO_FRAME_BATCH="${DINO_FRAME_BATCH:-auto}"
-export TEMPORAL_STEP_MS="${TEMPORAL_STEP_MS:-33,67,100,133}"
-export WANDB_MODE="${WANDB_MODE:-online}"
-export WANDB_PROJECT="${WANDB_PROJECT:-instruct-gs-world}"
-export WANDB_GROUP="${WANDB_GROUP:-multisource-object-state-world-model-v53}"
-export WANDB_NAME="${WANDB_NAME:-${RUN_NAME}}"
-export WANDB_TAGS="${WANDB_TAGS:-v53,multisource,task-diverse,pure-video,world-model,object-state}"
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
+export PYTHONPATH="${ROOT}/code:${PYTHONPATH:-}"
 
 build_index() {
   mkdir -p "${INDEX_ROOT}"
@@ -49,35 +40,73 @@ verify_data() {
 }
 
 verify_model() {
-  bash "${ROOT}/code/scripts/manage_learning_objective_object_state_v52.sh" verify
+  if [ -z "${SOURCE_REVISION}" ]; then
+    echo "[semantic-object-v53-manager] SOURCE_REVISION is missing"
+    return 2
+  fi
+  mkdir -p "$(dirname "${GATE_REPORT}")"
+  VERIFY_ARGS=(
+    --stage "${STAGE}" --data_index "${DATA_INDEX}"
+    --dino_checkpoint "${DINO_CHECKPOINT}"
+    --source_revision "${SOURCE_REVISION}" --output "${GATE_REPORT}"
+    --chunk_length "${VERIFY_CHUNK_LENGTH:-3}"
+    --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400}"
+    --dino_frame_batch "${VERIFY_DINO_FRAME_BATCH:-8}" --amp "${AMP:-bf16}"
+  )
+  if [ -n "${INIT_FROM:-}" ]; then VERIFY_ARGS+=(--init_from "${INIT_FROM}"); fi
+  CUDA_VISIBLE_DEVICES="${VERIFY_CUDA_VISIBLE_DEVICES:-0}" \
+    "${PY}" "${ROOT}/code/scripts/verify_semantic_object_world_model_v53.py" \
+      "${VERIFY_ARGS[@]}"
+}
+
+foreground() {
+  bash "${ROOT}/code/scripts/train_semantic_object_world_model_v53.sh"
+}
+
+background() {
+  mkdir -p "${LOG_ROOT}"
+  nohup bash "${ROOT}/code/scripts/train_semantic_object_world_model_v53.sh" \
+    >"${LAUNCH_LOG}" 2>&1 &
+  PID=$!
+  printf '%s\n' "${PID}" >"${PID_FILE}"
+  echo "[semantic-object-v53-manager] started pid=${PID} log=${LAUNCH_LOG}"
+}
+
+status() {
+  if [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
+    echo "[semantic-object-v53-manager] state=running pid=$(cat "${PID_FILE}")"
+  else
+    echo "[semantic-object-v53-manager] state=stopped"
+  fi
+  echo "[semantic-object-v53-manager] stage=${STAGE} out=${OUT} gate=${GATE_REPORT}"
+  if [ -f "${LAUNCH_LOG}" ]; then tail -n "${STATUS_LINES:-80}" "${LAUNCH_LOG}"; fi
+  if [ -f "${OUT}/train.jsonl" ]; then tail -n "${STATUS_LINES:-80}" "${OUT}/train.jsonl"; fi
 }
 
 case "${COMMAND}" in
   build-index) build_index ;;
   verify-data) verify_data ;;
-  verify-model) verify_model ;;
-  prepare)
-    build_index && verify_data && verify_model
-    ;;
-  foreground)
-    bash "${ROOT}/code/scripts/manage_learning_objective_object_state_v52.sh" foreground
-    ;;
-  start)
-    bash "${ROOT}/code/scripts/manage_learning_objective_object_state_v52.sh" start
-    ;;
-  resume-foreground)
-    export RESUME="${RESUME:-${OUT}/latest.pt}"
-    bash "${ROOT}/code/scripts/manage_learning_objective_object_state_v52.sh" resume-foreground
-    ;;
+  prepare-data) build_index && verify_data ;;
+  verify) verify_model ;;
+  foreground) foreground ;;
+  start) background ;;
   resume)
+    unset INIT_FROM
     export RESUME="${RESUME:-${OUT}/latest.pt}"
-    bash "${ROOT}/code/scripts/manage_learning_objective_object_state_v52.sh" resume
-    ;;
-  status)
-    bash "${ROOT}/code/scripts/manage_learning_objective_object_state_v52.sh" status
-    ;;
+    background ;;
+  resume-foreground)
+    unset INIT_FROM
+    export RESUME="${RESUME:-${OUT}/latest.pt}"
+    foreground ;;
+  status) status ;;
+  stop)
+    if [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
+      kill "$(cat "${PID_FILE}")"
+      echo "[semantic-object-v53-manager] stop requested pid=$(cat "${PID_FILE}")"
+    else
+      echo "[semantic-object-v53-manager] no running launcher"
+    fi ;;
   *)
-    echo "usage: $0 {build-index|verify-data|verify-model|prepare|foreground|start|resume-foreground|resume|status}"
-    exit 2
-    ;;
+    echo "usage: $0 {build-index|verify-data|prepare-data|verify|foreground|start|resume|resume-foreground|status|stop}"
+    exit 2 ;;
 esac
