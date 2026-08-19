@@ -259,6 +259,9 @@ def tokenizer_objective(
     normalized_mass = mass / mass.sum(dim=-1, keepdim=True).clamp_min(1e-6)
     entropy = -(normalized_mass.clamp_min(1e-8).log() * normalized_mass).sum(dim=-1)
     effective = entropy.exp()
+    valid_pre_norm = encoding.decoder_pre_norm[valid]
+    valid_basis_max = encoding.decoder_basis_max[valid]
+    valid_residual_ratio = encoding.decoder_residual_ratio[valid]
     parts = {
         "loss": loss.detach(),
         "object_feature_reconstruction_error": reconstruction.detach(),
@@ -267,11 +270,11 @@ def tokenizer_objective(
         "object_effective_slot_count": effective.mean().detach(),
         "object_max_slot_mass": normalized_mass.max(dim=-1).values.mean().detach(),
         "scene_assignment_fraction": encoding.assignments[:, :, -1].mean().detach(),
-        "decoder_pre_norm_min": encoding.decoder_pre_norm.min().detach(),
-        "decoder_pre_norm_mean": encoding.decoder_pre_norm.mean().detach(),
-        "decoder_pre_norm_max": encoding.decoder_pre_norm.max().detach(),
-        "decoder_coordinate_basis_max": encoding.decoder_basis_max.max().detach(),
-        "decoder_residual_to_base_ratio": encoding.decoder_residual_ratio.mean().detach(),
+        "decoder_pre_norm_min": valid_pre_norm.min().detach(),
+        "decoder_pre_norm_mean": valid_pre_norm.mean().detach(),
+        "decoder_pre_norm_max": valid_pre_norm.max().detach(),
+        "decoder_coordinate_basis_max": valid_basis_max.max().detach(),
+        "decoder_residual_to_base_ratio": valid_residual_ratio.mean().detach(),
         **{name: value.detach() for name, value in affinity_metrics.items()},
     }
     return loss, parts
