@@ -45,11 +45,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--init_from", default="")
     parser.add_argument("--chunk_length", type=int, default=3)
+    parser.add_argument("--training_chunk_lengths", default="3,4,6,8")
     parser.add_argument("--temporal_step_ms", default="100,200,400")
     parser.add_argument("--dino_frame_batch", type=int, default=8)
     parser.add_argument("--amp", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--stability_steps_per_source", type=int, default=2)
     parser.add_argument("--stability_batch_per_source", type=int, default=2)
+    parser.add_argument("--stability_training_batch", type=int, default=32)
     return parser.parse_args()
 
 
@@ -96,15 +98,25 @@ def _batch_for_source(dataset, source_index: int, round_index: int, args):
 
 
 def _mixed_source_batch(dataset, args):
-    items = [
-        dataset[(index, args.chunk_length)] for index in dataset.source_probe_indices
-    ]
+    source_count = len(dataset.source_probe_indices)
+    items = []
+    for item_index in range(args.stability_training_batch):
+        source_index = item_index % source_count
+        source_offset = item_index // source_count
+        index = dataset.source_probe_indices[source_index] + source_offset
+        item = dataset[(index, args.chunk_length)]
+        require(
+            int(item["source_index"]) == source_index,
+            "v53 mixed stability batch crossed sources",
+        )
+        items.append(item)
     return default_collate(items)
 
 
 def _verify_numerical_stability(model, dino, dataset, device, amp_context, args):
     require(args.stability_steps_per_source > 0, "stability steps must be positive")
     require(args.stability_batch_per_source > 0, "stability batch must be positive")
+    require(args.stability_training_batch > 0, "training batch must be positive")
     require(
         len(dataset.source_probe_indices) == len(dataset.source_names),
         "v53 verifier cannot probe every data source",
@@ -169,6 +181,7 @@ def _verify_numerical_stability(model, dino, dataset, device, amp_context, args)
             "tokenizer.decoder.coordinate_basis.2.weight", 0.0
         ),
         "updates": len(batches),
+        "maximum_micro_batch": args.stability_training_batch,
     }
 
 
@@ -195,7 +208,7 @@ def main() -> None:
     dataset = MultiSourceRobotVideoDataset(
         args.data_index,
         "train",
-        str(args.chunk_length),
+        args.training_chunk_lengths,
         args.temporal_step_ms,
         max_items=0,
         seed=173,
@@ -296,6 +309,9 @@ def main() -> None:
         "gradient_parameter_tensors": len(trainable),
         "numerical_stability_status": "passed",
         "numerical_stability_updates": stability["updates"],
+        "numerical_stability_maximum_micro_batch": stability[
+            "maximum_micro_batch"
+        ],
         "numerical_stability_source_losses": stability["source_losses"],
         "maximum_parameter_gradient": stability["maximum_gradient"],
         "coordinate_basis_weight_maximum_gradient": stability[

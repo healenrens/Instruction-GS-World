@@ -149,6 +149,8 @@ def read_gate(args) -> dict:
         raise ValueError("v53 startup gate did not test every source and a mixed batch")
     if report.get("numerical_stability_updates", 0) < len(sources) + 1:
         raise ValueError("v53 startup gate ran too few numerical stability updates")
+    if report.get("numerical_stability_maximum_micro_batch", 0) < args.batch:
+        raise ValueError("v53 startup gate did not cover the training micro-batch")
     scalar_health = (
         *losses.values(),
         report.get("maximum_parameter_gradient", float("nan")),

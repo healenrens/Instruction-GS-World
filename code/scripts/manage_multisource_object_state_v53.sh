@@ -50,10 +50,12 @@ verify_model() {
     --dino_checkpoint "${DINO_CHECKPOINT}"
     --source_revision "${SOURCE_REVISION}" --output "${GATE_REPORT}"
     --chunk_length "${VERIFY_CHUNK_LENGTH:-3}"
+    --training_chunk_lengths "${CHUNK_LENGTHS:-3,4,6,8}"
     --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400}"
     --dino_frame_batch "${VERIFY_DINO_FRAME_BATCH:-8}" --amp "${AMP:-bf16}"
     --stability_steps_per_source "${VERIFY_STEPS_PER_SOURCE:-2}"
     --stability_batch_per_source "${VERIFY_BATCH_PER_SOURCE:-2}"
+    --stability_training_batch "${VERIFY_TRAINING_BATCH:-32}"
   )
   if [ -n "${INIT_FROM:-}" ]; then VERIFY_ARGS+=(--init_from "${INIT_FROM}"); fi
   CUDA_VISIBLE_DEVICES="${VERIFY_CUDA_VISIBLE_DEVICES:-0}" \
