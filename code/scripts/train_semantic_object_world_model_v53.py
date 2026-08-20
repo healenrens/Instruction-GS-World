@@ -131,10 +131,6 @@ def validate_arguments(args, world_size: int) -> None:
         "contract": "multisource_v53_distributed_decode_frontier_v1",
         "decoder_contract": VIDEO_DECODER_CONTRACT,
         "data_index": args.data_index,
-        "world_size": world_size,
-        "batch_size": args.batch,
-        "workers_per_rank": args.workers,
-        "prefetch_factor": args.prefetch_factor,
         "sampler_epoch": args.seed,
     }
     differences = {
