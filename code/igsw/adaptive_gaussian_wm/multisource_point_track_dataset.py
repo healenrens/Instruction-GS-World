@@ -204,6 +204,7 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         namespace = f"{index_stat.st_size}_{index_stat.st_mtime_ns}_{split}"
         root = os.environ.get("V53_DECODE_QUARANTINE_ROOT", "/dev/shm")
         path = os.path.join(root, f"igsw_v53_decode_quarantine_{namespace}.bin")
+        self._decode_quarantine_path = path
         descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         os.ftruncate(descriptor, len(self._records))
         self._decode_quarantine = mmap.mmap(descriptor, len(self._records))
