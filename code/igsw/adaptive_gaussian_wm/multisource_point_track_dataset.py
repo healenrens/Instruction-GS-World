@@ -189,15 +189,21 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
     def _build_replacement_pools(self) -> None:
         group_records: dict[int, list[int]] = {}
         source_records: dict[int, list[int]] = {}
+        path_records: dict[str, list[int]] = {}
         for record_index, record in enumerate(self._records):
             group_records.setdefault(record.group_index, []).append(record_index)
             source_records.setdefault(record.source_index, []).append(record_index)
+            path_records.setdefault(record.path, []).append(record_index)
         self._group_replacement_records = {
             group: tuple(indices) for group, indices in group_records.items()
         }
         self._source_replacement_records = {
             source: tuple(indices) for source, indices in source_records.items()
         }
+        self._path_replacement_records = {
+            path: tuple(indices) for path, indices in path_records.items()
+        }
+        self._all_replacement_records = tuple(range(len(self._records)))
 
     def _open_decode_quarantine(self, split: str) -> None:
         index_stat = os.stat(self.index_path)
@@ -270,10 +276,11 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         candidates = [record_index]
         seen_records = {record_index}
         pools = (
-            self._group_replacement_records[record.group_index],
-            self._source_replacement_records[record.source_index],
+            (self._group_replacement_records[record.group_index], 16),
+            (self._source_replacement_records[record.source_index], 64),
+            (self._all_replacement_records, 64),
         )
-        for scope_index, pool in enumerate(pools):
+        for scope_index, (pool, scope_limit) in enumerate(pools):
             if len(pool) < 2:
                 continue
             start = _stable_integer(
@@ -284,15 +291,29 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             ) % len(pool) or 1
             while math.gcd(step, len(pool)) != 1:
                 step = step % len(pool) + 1
+            accepted = 0
             for offset in range(len(pool)):
                 candidate = pool[(start + offset * step) % len(pool)]
                 if candidate in seen_records:
                     continue
                 seen_records.add(candidate)
                 candidates.append(candidate)
-                if len(candidates) == 33:
-                    return tuple(candidates)
+                accepted += 1
+                if accepted == scope_limit:
+                    break
         return tuple(candidates)
+
+    def _quarantine_decode_failure(
+        self, record_index: int, error: VideoDecodeError
+    ) -> None:
+        record = self._records[record_index]
+        affected = (
+            self._path_replacement_records[record.path]
+            if error.path_unusable
+            else (record_index,)
+        )
+        for affected_index in affected:
+            self._decode_quarantine[affected_index] = 1
 
     @staticmethod
     def _decode_cache(path: str, indices: torch.Tensor) -> torch.Tensor:
@@ -389,7 +410,7 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             try:
                 sample = self._sample_record(record, replacement_ordinal, chunk_length)
             except VideoDecodeError as error:
-                self._decode_quarantine[replacement_index] = 1
+                self._quarantine_decode_failure(replacement_index, error)
                 last_error = error
                 continue
             sample["decode_replaced"] = torch.tensor(

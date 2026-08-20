@@ -14,12 +14,18 @@ VIDEO_DECODER_CONTRACT = "pyav_single_thread_exact_index_v1"
 class VideoDecodeError(ValueError):
     """The requested frames cannot be read from an otherwise valid index entry."""
 
+    def __init__(self, message: str, *, path_unusable: bool = False):
+        super().__init__(message)
+        self.path_unusable = path_unusable
+
 
 def decode_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.Tensor:
     import av
 
     if not os.path.isfile(path):
-        raise VideoDecodeError(f"video payload is missing: {path}")
+        raise VideoDecodeError(
+            f"video payload is missing: {path}", path_unusable=True
+        )
     wanted = [int(value) for value in indices.tolist()]
     targets = set(wanted)
     first, last = min(wanted), max(wanted)
@@ -51,7 +57,9 @@ def decode_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.T
                 if frame_index >= last:
                     break
     except (av.error.FFmpegError, OSError) as error:
-        raise VideoDecodeError(f"video decoder rejected {path}: {error}") from error
+        raise VideoDecodeError(
+            f"video decoder rejected {path}: {error}", path_unusable=True
+        ) from error
     missing = [index for index in wanted if index not in decoded]
     if missing:
         raise VideoDecodeError(
