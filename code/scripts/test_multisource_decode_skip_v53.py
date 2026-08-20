@@ -158,7 +158,7 @@ def worker_runtime_disappearance_contract() -> None:
                     "group": "task",
                     "path": path,
                     "fps": 30,
-                    "frame_count": 20,
+                    "frame_count": 50,
                     "frame_offset": 0,
                 }
                 for index, path in enumerate((missing, missing, replacement))
