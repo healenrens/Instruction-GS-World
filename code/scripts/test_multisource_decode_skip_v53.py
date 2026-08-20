@@ -56,7 +56,7 @@ def replacement_contract() -> None:
     ]
     dataset._prefix = [4, 8, 12]
     dataset._full_length = dataset._length = 12
-    dataset._unusable_episodes = set()
+    dataset._decode_quarantine = bytearray(len(dataset._records))
     dataset._build_replacement_pools()
     attempts = []
 
@@ -80,7 +80,7 @@ def replacement_contract() -> None:
     dataset[(0, 3)]
     assert attempts.count("/bad-a.mp4") == 1
 
-    dataset._unusable_episodes.add(dataset._episode_key(dataset._records[1]))
+    dataset._decode_quarantine[1] = 1
     fallback = dataset[(0, 3)]
     assert int(fallback["source_index"]) == 0
     assert int(fallback["task_group_index"]) == 1

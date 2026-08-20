@@ -5,6 +5,7 @@ from __future__ import annotations
 import bisect
 import hashlib
 import math
+import mmap
 import os
 from dataclasses import dataclass
 
@@ -89,8 +90,8 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         self.runtime_missing_video_count = int(
             payload.get("runtime_missing_video_count", 0)
         )
-        self._unusable_episodes: set[tuple[str, int, int]] = set()
         self._build_index(episodes, split, max_items)
+        self._open_decode_quarantine(split)
 
     def _build_index(self, episodes, split: str, max_items: int) -> None:
         selected = [episode for episode in episodes if episode.split == split]
@@ -198,9 +199,15 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             source: tuple(indices) for source, indices in source_records.items()
         }
 
-    @staticmethod
-    def _episode_key(record: _EpisodeRecord) -> tuple[str, int, int]:
-        return record.path, record.frame_offset, record.frame_count
+    def _open_decode_quarantine(self, split: str) -> None:
+        index_stat = os.stat(self.index_path)
+        namespace = f"{index_stat.st_size}_{index_stat.st_mtime_ns}_{split}"
+        root = os.environ.get("V53_DECODE_QUARANTINE_ROOT", "/dev/shm")
+        path = os.path.join(root, f"igsw_v53_decode_quarantine_{namespace}.bin")
+        descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.ftruncate(descriptor, len(self._records))
+        self._decode_quarantine = mmap.mmap(descriptor, len(self._records))
+        os.close(descriptor)
 
     def _task_diverse_targets(self, group_bounds) -> tuple[int, ...]:
         groups_by_source = {}
@@ -365,8 +372,7 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             record_index, int(base_index)
         ):
             record = self._records[replacement_index]
-            episode_key = self._episode_key(record)
-            if episode_key in self._unusable_episodes:
+            if self._decode_quarantine[replacement_index]:
                 continue
             replacement_ordinal = (
                 ordinal
@@ -382,7 +388,7 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             try:
                 sample = self._sample_record(record, replacement_ordinal, chunk_length)
             except VideoDecodeError as error:
-                self._unusable_episodes.add(episode_key)
+                self._decode_quarantine[replacement_index] = 1
                 last_error = error
                 continue
             sample["decode_replaced"] = torch.tensor(
