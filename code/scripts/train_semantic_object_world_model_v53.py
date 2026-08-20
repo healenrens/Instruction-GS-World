@@ -307,6 +307,7 @@ def main() -> None:
         "source_episode_counts": list(dataset.source_episode_counts),
         "source_task_counts": list(dataset.source_task_counts),
         "source_target_samples": list(dataset.source_target_samples),
+        "runtime_missing_video_count": dataset.runtime_missing_video_count,
     }
     if context.is_main:
         os.makedirs(args.out, exist_ok=True)

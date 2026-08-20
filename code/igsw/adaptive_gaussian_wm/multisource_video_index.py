@@ -35,7 +35,9 @@ def _require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
-def load_multisource_index(path: str) -> tuple[list[VideoSource], list[VideoEpisode], dict]:
+def load_multisource_index(
+    path: str, *, skip_missing_payloads: bool = False
+) -> tuple[list[VideoSource], list[VideoEpisode], dict]:
     path = os.path.abspath(path)
     with open(path, encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -60,6 +62,7 @@ def load_multisource_index(path: str) -> tuple[list[VideoSource], list[VideoEpis
     episodes = []
     identities = set()
     checked_paths = set()
+    missing_paths = set()
     for raw in raw_episodes:
         source_index = int(raw.get("source_index", -1))
         episode_index = int(raw.get("episode_index", -1))
@@ -74,8 +77,13 @@ def load_multisource_index(path: str) -> tuple[list[VideoSource], list[VideoEpis
         _require(identity not in identities, f"duplicate episode identity: {identity}")
         _require(split and group, f"episode {identity} has an empty split or group")
         if episode_path not in checked_paths:
-            _require(os.path.isfile(episode_path), f"episode payload is missing: {episode_path}")
             checked_paths.add(episode_path)
+            if not os.path.isfile(episode_path):
+                missing_paths.add(episode_path)
+        if episode_path in missing_paths:
+            if skip_missing_payloads:
+                continue
+            raise ValueError(f"episode payload is missing: {episode_path}")
         _require(fps > 0.0 and frame_count > 0 and frame_offset >= 0, f"invalid timing for {identity}")
         identities.add(identity)
         episodes.append(
@@ -84,4 +92,6 @@ def load_multisource_index(path: str) -> tuple[list[VideoSource], list[VideoEpis
                 fps, frame_count, frame_offset,
             )
         )
-    return sources, episodes, payload
+    result_payload = dict(payload)
+    result_payload["runtime_missing_video_count"] = len(missing_paths)
+    return sources, episodes, result_payload

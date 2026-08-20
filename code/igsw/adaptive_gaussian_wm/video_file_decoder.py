@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 from .sequence_contract import preprocess_vggt_rgb
 
@@ -9,39 +11,52 @@ from .sequence_contract import preprocess_vggt_rgb
 VIDEO_DECODER_CONTRACT = "pyav_single_thread_exact_index_v1"
 
 
+class VideoDecodeError(ValueError):
+    """The requested frames cannot be read from an otherwise valid index entry."""
+
+
 def decode_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.Tensor:
     import av
 
+    if not os.path.isfile(path):
+        raise VideoDecodeError(f"video payload is missing: {path}")
     wanted = [int(value) for value in indices.tolist()]
     targets = set(wanted)
     first, last = min(wanted), max(wanted)
     decoded = {}
-    with av.open(path) as container:
-        stream = container.streams.video[0]
-        stream.codec_context.thread_count = 1
-        stream.thread_type = "NONE"
-        time_base = stream.time_base
-        start_pts = int(stream.start_time or 0)
-        seek_time = max(first / fps - 1.0, 0.0)
-        container.seek(
-            start_pts + int(seek_time / float(time_base)),
-            backward=True,
-            any_frame=False,
-            stream=stream,
-        )
-        for frame in container.decode(stream):
-            if frame.pts is None:
-                raise ValueError(f"video frame has no timestamp: {path}")
-            frame_index = int(round(float((frame.pts - start_pts) * time_base) * fps))
-            if frame_index in targets:
-                decoded[frame_index] = torch.from_numpy(
-                    frame.to_ndarray(format="rgb24")
+    try:
+        with av.open(path) as container:
+            stream = container.streams.video[0]
+            stream.codec_context.thread_count = 1
+            stream.thread_type = "NONE"
+            time_base = stream.time_base
+            start_pts = int(stream.start_time or 0)
+            seek_time = max(first / fps - 1.0, 0.0)
+            container.seek(
+                start_pts + int(seek_time / float(time_base)),
+                backward=True,
+                any_frame=False,
+                stream=stream,
+            )
+            for frame in container.decode(stream):
+                if frame.pts is None:
+                    raise VideoDecodeError(f"video frame has no timestamp: {path}")
+                frame_index = int(
+                    round(float((frame.pts - start_pts) * time_base) * fps)
                 )
-            if frame_index >= last:
-                break
+                if frame_index in targets:
+                    decoded[frame_index] = torch.from_numpy(
+                        frame.to_ndarray(format="rgb24")
+                    )
+                if frame_index >= last:
+                    break
+    except (av.error.FFmpegError, OSError) as error:
+        raise VideoDecodeError(f"video decoder rejected {path}: {error}") from error
     missing = [index for index in wanted if index not in decoded]
     if missing:
-        raise ValueError(f"video decode missed frames {missing[:8]} in {path}")
+        raise VideoDecodeError(
+            f"video decode missed frames {missing[:8]} in {path}"
+        )
     return torch.stack([decoded[index] for index in wanted])
 
 

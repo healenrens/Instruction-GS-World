@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import math
 import os
 from dataclasses import dataclass
 
@@ -13,7 +14,7 @@ from torchvision.io import ImageReadMode, decode_jpeg
 
 from .multisource_video_index import load_multisource_index
 from .temporal_object_dataset import parse_int_choices
-from .video_file_decoder import decode_video_frames, square_dino_rgb
+from .video_file_decoder import VideoDecodeError, decode_video_frames, square_dino_rgb
 
 
 MULTISOURCE_POINT_TRACK_CONTRACT = "multisource_point_track_object_video_v1"
@@ -65,7 +66,9 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         seed: int = 17,
     ):
         self.index_path = os.path.abspath(index_path)
-        self.sources, episodes, payload = load_multisource_index(self.index_path)
+        self.sources, episodes, payload = load_multisource_index(
+            self.index_path, skip_missing_payloads=True
+        )
         self.dynamic_history_lengths = parse_int_choices(chunk_lengths, "chunk lengths")
         self.temporal_step_ms = _parse_milliseconds(temporal_step_ms)
         if self.dynamic_history_lengths[0] < 3 or self.dynamic_history_lengths[-1] > 32:
@@ -83,6 +86,10 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         self.data_sha256 = ""
         self.paths = [self.index_path]
         self.source_names = tuple(source.name for source in self.sources)
+        self.runtime_missing_video_count = int(
+            payload.get("runtime_missing_video_count", 0)
+        )
+        self._unusable_episodes: set[tuple[str, int, int]] = set()
         self._build_index(episodes, split, max_items)
 
     def _build_index(self, episodes, split: str, max_items: int) -> None:
@@ -122,6 +129,7 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         if not records:
             raise ValueError("multisource index has no usable episode")
         self._records = records
+        self._build_replacement_pools()
         self._prefix = []
         source_probe_full_indices = {}
         source_offset_probe_full_indices = {}
@@ -177,6 +185,23 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         )
         self.rgb_height = self.rgb_width = 518
 
+    def _build_replacement_pools(self) -> None:
+        group_records: dict[int, list[int]] = {}
+        source_records: dict[int, list[int]] = {}
+        for record_index, record in enumerate(self._records):
+            group_records.setdefault(record.group_index, []).append(record_index)
+            source_records.setdefault(record.source_index, []).append(record_index)
+        self._group_replacement_records = {
+            group: tuple(indices) for group, indices in group_records.items()
+        }
+        self._source_replacement_records = {
+            source: tuple(indices) for source, indices in source_records.items()
+        }
+
+    @staticmethod
+    def _episode_key(record: _EpisodeRecord) -> tuple[str, int, int]:
+        return record.path, record.frame_offset, record.frame_count
+
     def _task_diverse_targets(self, group_bounds) -> tuple[int, ...]:
         groups_by_source = {}
         for _, _, group_index in group_bounds:
@@ -224,11 +249,42 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             return 0
         return index * (self._full_length - 1) // (self._length - 1)
 
-    def _locate(self, index: int) -> tuple[_EpisodeRecord, int]:
+    def _locate(self, index: int) -> tuple[int, _EpisodeRecord, int]:
         full_index = self._full_index(index)
         record_index = bisect.bisect_right(self._prefix, full_index)
         previous = self._prefix[record_index - 1] if record_index else 0
-        return self._records[record_index], full_index - previous
+        return record_index, self._records[record_index], full_index - previous
+
+    def _replacement_records(
+        self, record_index: int, sample_index: int
+    ) -> tuple[int, ...]:
+        record = self._records[record_index]
+        candidates = [record_index]
+        seen_records = {record_index}
+        pools = (
+            self._group_replacement_records[record.group_index],
+            self._source_replacement_records[record.source_index],
+        )
+        for scope_index, pool in enumerate(pools):
+            if len(pool) < 2:
+                continue
+            start = _stable_integer(
+                "decode-replacement-start", self.seed, sample_index, scope_index
+            ) % len(pool)
+            step = _stable_integer(
+                "decode-replacement-step", self.seed, sample_index, scope_index
+            ) % len(pool) or 1
+            while math.gcd(step, len(pool)) != 1:
+                step = step % len(pool) + 1
+            for offset in range(len(pool)):
+                candidate = pool[(start + offset * step) % len(pool)]
+                if candidate in seen_records:
+                    continue
+                seen_records.add(candidate)
+                candidates.append(candidate)
+                if len(candidates) == 33:
+                    return tuple(candidates)
+        return tuple(candidates)
 
     @staticmethod
     def _decode_cache(path: str, indices: torch.Tensor) -> torch.Tensor:
@@ -255,13 +311,12 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             frames = decode_video_frames(record.path, absolute, record.fps)
         return square_dino_rgb(frames, self.rgb_height)
 
-    def __getitem__(self, index) -> dict[str, torch.Tensor]:
-        base_index, chunk_length = (
-            index if isinstance(index, tuple) else (index, self.dynamic_history_lengths[-1])
-        )
-        if chunk_length not in self.dynamic_history_lengths:
-            raise ValueError(f"unsupported v52 chunk length: {chunk_length}")
-        record, ordinal = self._locate(int(base_index))
+    def _sample_record(
+        self,
+        record: _EpisodeRecord,
+        ordinal: int,
+        chunk_length: int,
+    ) -> dict[str, torch.Tensor]:
         strides = sorted(
             {
                 max(1, round(milliseconds * record.fps / 1000.0))
@@ -297,6 +352,50 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             "temporal_stride": torch.tensor(stride, dtype=torch.long),
             "temporal_step_seconds": torch.tensor(stride / record.fps),
         }
+
+    def __getitem__(self, index) -> dict[str, torch.Tensor]:
+        base_index, chunk_length = (
+            index if isinstance(index, tuple) else (index, self.dynamic_history_lengths[-1])
+        )
+        if chunk_length not in self.dynamic_history_lengths:
+            raise ValueError(f"unsupported v52 chunk length: {chunk_length}")
+        record_index, original, ordinal = self._locate(int(base_index))
+        last_error = None
+        for replacement_index in self._replacement_records(
+            record_index, int(base_index)
+        ):
+            record = self._records[replacement_index]
+            episode_key = self._episode_key(record)
+            if episode_key in self._unusable_episodes:
+                continue
+            replacement_ordinal = (
+                ordinal
+                if replacement_index == record_index
+                else _stable_integer(
+                    "decode-replacement-ordinal",
+                    self.seed,
+                    int(base_index),
+                    record.episode_index,
+                )
+                % record.start_count
+            )
+            try:
+                sample = self._sample_record(record, replacement_ordinal, chunk_length)
+            except VideoDecodeError as error:
+                self._unusable_episodes.add(episode_key)
+                last_error = error
+                continue
+            sample["decode_replaced"] = torch.tensor(
+                replacement_index != record_index, dtype=torch.bool
+            )
+            sample["requested_sequence_index"] = torch.tensor(
+                original.sequence_index, dtype=torch.long
+            )
+            return sample
+        raise VideoDecodeError(
+            f"no decodable replacement for source={original.source_index} "
+            f"group={original.group_index}; last error: {last_error}"
+        )
 
 
 MultiSourceRobotVideoDataset = MultiSourcePointTrackObjectVideoDataset

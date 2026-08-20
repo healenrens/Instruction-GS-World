@@ -139,6 +139,7 @@ def train_v53(
                 "temporal_stride": batch["temporal_stride"].float().mean(),
                 "temporal_step_seconds": batch["temporal_step_seconds"].float().mean(),
                 "chunk_length": batch["chunk_length"].float().mean(),
+                "decode_replacement_fraction": batch["decode_replaced"].float().mean(),
             }
             for name, value in values.items():
                 metric_sums[name] = (
