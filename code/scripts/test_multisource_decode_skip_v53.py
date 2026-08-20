@@ -10,6 +10,7 @@ import tempfile
 import types
 
 import torch
+from torch.utils.data import DataLoader, Subset
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
@@ -140,6 +141,64 @@ def path_quarantine_contract() -> None:
     assert dataset._decode_quarantine == bytearray((1, 1, 0))
 
 
+def worker_runtime_disappearance_contract() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        missing = os.path.join(directory, "missing.mp4")
+        replacement = os.path.join(directory, "replacement.mp4")
+        open(missing, "wb").close()
+        open(replacement, "wb").close()
+        payload = {
+            "contract": MULTISOURCE_VIDEO_CONTRACT,
+            "sources": [{"name": "source", "adapter": "video_file", "weight": 1}],
+            "episodes": [
+                {
+                    "source_index": 0,
+                    "episode_index": index,
+                    "split": "train",
+                    "group": "task",
+                    "path": path,
+                    "fps": 30,
+                    "frame_count": 20,
+                    "frame_offset": 0,
+                }
+                for index, path in enumerate((missing, missing, replacement))
+            ],
+        }
+        index_path = os.path.join(directory, "index.json")
+        with open(index_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        dataset = MultiSourcePointTrackObjectVideoDataset(
+            index_path,
+            "train",
+            chunk_lengths="3",
+            temporal_step_ms="100",
+            seed=17,
+        )
+
+        def decode(self, item, indices):
+            if item.path == missing:
+                raise VideoDecodeError("runtime disappearance", path_unusable=True)
+            frames = len(indices)
+            return (
+                torch.zeros(frames, 3, 4, 4, dtype=torch.uint8),
+                torch.ones(frames, 4, 4, dtype=torch.bool),
+            )
+
+        dataset._decode = types.MethodType(decode, dataset)
+        os.remove(missing)
+        loader = DataLoader(
+            Subset(dataset, tuple(range(8))),
+            batch_size=8,
+            num_workers=2,
+            shuffle=False,
+        )
+        batch = next(iter(loader))
+        assert len(batch["source_index"]) == 8
+        assert bool(batch["decode_replaced"].any())
+        missing_records = dataset._path_replacement_records[missing]
+        assert all(dataset._decode_quarantine[index] for index in missing_records)
+
+
 def missing_payload_contract() -> None:
     with tempfile.TemporaryDirectory() as directory:
         present = os.path.join(directory, "present.mp4")
@@ -182,5 +241,6 @@ if __name__ == "__main__":
     replacement_contract()
     exhausted_scope_contract()
     path_quarantine_contract()
+    worker_runtime_disappearance_contract()
     missing_payload_contract()
     print("multisource decode skip v53: passed")
