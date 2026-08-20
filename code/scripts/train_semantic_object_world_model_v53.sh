@@ -12,6 +12,7 @@ STAGE="${STAGE:-tokenizer}"
 DATA_INDEX="${DATA_INDEX:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json}"
 SOURCE_REVISION="${SOURCE_REVISION:-}"
 GATE_REPORT="${GATE_REPORT:-}"
+DECODE_REPORT="${DECODE_REPORT:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/decode_frontier.json}"
 RUN_NAME="${RUN_NAME:-semantic_object_world_model_v53_${STAGE}_seed17_${SOURCE_REVISION:0:7}}"
 OUT="${OUT:-${RUNTIME_ROOT}/outputs/${RUN_NAME}}"
 DINO_CHECKPOINT="${DINO_CHECKPOINT:-${RUNTIME_ROOT}/models/dinov2_vitl14/model.safetensors}"
@@ -26,6 +27,10 @@ if [ -z "${SOURCE_REVISION}" ]; then
 fi
 if [ -z "${GATE_REPORT}" ] || [ ! -f "${GATE_REPORT}" ]; then
   echo "[semantic-object-v53] GATE_REPORT is missing: ${GATE_REPORT}"
+  exit 2
+fi
+if [ ! -f "${DECODE_REPORT}" ]; then
+  echo "[semantic-object-v53] DECODE_REPORT is missing: ${DECODE_REPORT}"
   exit 2
 fi
 if [ ! -f "${DATA_INDEX}" ] || [ ! -f "${DINO_CHECKPOINT}" ]; then
@@ -99,6 +104,7 @@ mkdir -p "${OUT}" "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}"
 ARGS=(
   --stage "${STAGE}" --data_index "${DATA_INDEX}" --out "${OUT}"
   --gate_report "${GATE_REPORT}" --source_revision "${SOURCE_REVISION}"
+  --decode_report "${DECODE_REPORT}"
   --dino_checkpoint "${DINO_CHECKPOINT}"
   --chunk_lengths "${CHUNK_LENGTHS:-3,4,6,8}"
   --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400}"

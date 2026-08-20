@@ -6,6 +6,9 @@ import torch
 from .sequence_contract import preprocess_vggt_rgb
 
 
+VIDEO_DECODER_CONTRACT = "pyav_single_thread_exact_index_v1"
+
+
 def decode_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.Tensor:
     import av
 
@@ -15,7 +18,8 @@ def decode_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.T
     decoded = {}
     with av.open(path) as container:
         stream = container.streams.video[0]
-        stream.thread_type = "AUTO"
+        stream.codec_context.thread_count = 1
+        stream.thread_type = "NONE"
         time_base = stream.time_base
         start_pts = int(stream.start_time or 0)
         seek_time = max(first / fps - 1.0, 0.0)

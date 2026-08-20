@@ -27,6 +27,9 @@ from igsw.adaptive_gaussian_wm.group_balanced_sampler import build_training_samp
 from igsw.adaptive_gaussian_wm.multisource_point_track_dataset import (  # noqa: E402
     MultiSourceRobotVideoDataset,
 )
+from igsw.adaptive_gaussian_wm.video_file_decoder import (  # noqa: E402
+    VIDEO_DECODER_CONTRACT,
+)
 from igsw.adaptive_gaussian_wm.semantic_object_world_model_v53 import (  # noqa: E402
     SemanticObjectLatentWorldModel,
 )
@@ -53,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data_index", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--gate_report", required=True)
+    parser.add_argument("--decode_report", required=True)
     parser.add_argument("--source_revision", required=True)
     parser.add_argument("--dino_checkpoint", required=True)
     parser.add_argument("--init_from", default="")
@@ -83,7 +87,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_arguments(args, world_size: int) -> None:
-    for name in ("data_index", "gate_report", "dino_checkpoint"):
+    for name in ("data_index", "gate_report", "decode_report", "dino_checkpoint"):
         if not os.path.isfile(getattr(args, name)):
             raise ValueError(f"v53 {name} is missing: {getattr(args, name)}")
     if args.resume and args.init_from:
@@ -120,6 +124,26 @@ def validate_arguments(args, world_size: int) -> None:
     if min(args.save_every, args.recovery_every, args.log_every) < 1:
         raise ValueError("v53 checkpoint and logging intervals must be positive")
     validate_wandb_arguments(args)
+    with open(args.decode_report, encoding="utf-8") as handle:
+        decode_report = json.load(handle)
+    expected_decode = {
+        "status": "passed",
+        "contract": "multisource_v53_distributed_decode_frontier_v1",
+        "decoder_contract": VIDEO_DECODER_CONTRACT,
+        "data_index": args.data_index,
+        "world_size": world_size,
+        "batch_size": args.batch,
+        "workers_per_rank": args.workers,
+        "prefetch_factor": args.prefetch_factor,
+        "sampler_epoch": args.seed,
+    }
+    differences = {
+        name: (decode_report.get(name), value)
+        for name, value in expected_decode.items()
+        if decode_report.get(name) != value
+    }
+    if differences:
+        raise ValueError(f"v53 decode frontier differs: {differences}")
 
 
 def read_gate(args) -> dict:
@@ -196,6 +220,7 @@ def main() -> None:
         "data_index",
         "out",
         "gate_report",
+        "decode_report",
         "dino_checkpoint",
         "init_from",
         "resume",

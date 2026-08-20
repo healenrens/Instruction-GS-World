@@ -13,6 +13,7 @@ SPEC="${MULTISOURCE_SPEC:-${ROOT}/configs/multisource_real_robot_video_v53.json}
 INDEX_ROOT="${MULTISOURCE_INDEX_ROOT:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53}"
 DATA_INDEX="${DATA_INDEX:-${INDEX_ROOT}/index.json}"
 DATA_REPORT="${DATA_REPORT:-${INDEX_ROOT}/verification.json}"
+DECODE_REPORT="${DECODE_REPORT:-${INDEX_ROOT}/decode_frontier.json}"
 SOURCE_REVISION="${SOURCE_REVISION:-}"
 RUN_NAME="${RUN_NAME:-semantic_object_world_model_v53_${STAGE}_seed17_${SOURCE_REVISION:0:7}}"
 OUT="${OUT:-${RUNTIME_ROOT}/outputs/${RUN_NAME}}"
@@ -22,7 +23,7 @@ DINO_CHECKPOINT="${DINO_CHECKPOINT:-${RUNTIME_ROOT}/models/dinov2_vitl14/model.s
 PID_FILE="${LOG_ROOT}/launcher.pid"
 LAUNCH_LOG="${LOG_ROOT}/launcher.log"
 
-export ROOT RUNTIME_ROOT VENV_ROOT STAGE DATA_INDEX SOURCE_REVISION RUN_NAME OUT LOG_ROOT
+export ROOT RUNTIME_ROOT VENV_ROOT STAGE DATA_INDEX DECODE_REPORT SOURCE_REVISION RUN_NAME OUT LOG_ROOT
 export GATE_REPORT DINO_CHECKPOINT
 export MULTISOURCE_SPEC="${SPEC}" MULTISOURCE_INDEX_ROOT="${INDEX_ROOT}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
@@ -36,7 +37,32 @@ build_index() {
 
 verify_data() {
   "${PY}" "${ROOT}/code/scripts/verify_multisource_video_index_v53.py" \
-    --data_index "${DATA_INDEX}" --output "${DATA_REPORT}"
+    --data_index "${DATA_INDEX}" --output "${DATA_REPORT}" || return $?
+  local nproc="${NPROC_PER_NODE:-auto}"
+  if [ "${nproc}" = auto ]; then
+    nproc="$("${PY}" -c 'import torch; print(torch.cuda.device_count())')"
+  fi
+  local batch="${BATCH_PER_GPU:-auto}"
+  if [ "${batch}" = auto ]; then
+    local memory
+    memory="$("${PY}" -c 'import torch; print(min(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count())) // 2**20)')"
+    if [ "${memory}" -ge 76000 ]; then batch=32
+    elif [ "${memory}" -ge 45000 ]; then batch=16
+    elif [ "${memory}" -ge 22000 ]; then batch=8
+    else batch=2
+    fi
+  fi
+  local workers="${WORKERS_PER_RANK:-auto}"
+  if [ "${workers}" = auto ]; then
+    workers="$("${PY}" -c "import os; print(max(2, min(8, (os.cpu_count() or 8) // (2 * ${nproc}))))")"
+  fi
+  "${PY}" "${ROOT}/code/scripts/verify_multisource_decode_frontier_v53.py" \
+    --data_index "${DATA_INDEX}" --output "${DECODE_REPORT}" \
+    --world_size "${nproc}" --batch_size "${batch}" \
+    --workers_per_rank "${workers}" --prefetch_factor "${PREFETCH_FACTOR:-2}" \
+    --chunk_lengths "${CHUNK_LENGTHS:-3,4,6,8}" \
+    --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400}" \
+    --seed "${SEED:-17}"
 }
 
 verify_model() {
@@ -83,6 +109,7 @@ status() {
     echo "[semantic-object-v53-manager] state=stopped"
   fi
   echo "[semantic-object-v53-manager] stage=${STAGE} out=${OUT} gate=${GATE_REPORT}"
+  echo "[semantic-object-v53-manager] decode_report=${DECODE_REPORT}"
   if [ -f "${LAUNCH_LOG}" ]; then tail -n "${STATUS_LINES:-80}" "${LAUNCH_LOG}"; fi
   if [ -f "${OUT}/train.jsonl" ]; then tail -n "${STATUS_LINES:-80}" "${OUT}/train.jsonl"; fi
 }
