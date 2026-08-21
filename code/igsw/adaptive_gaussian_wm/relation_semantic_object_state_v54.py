@@ -72,6 +72,15 @@ class RelationSemanticObjectStateModel(nn.Module):
             assignment.reshape(batch, frames, *assignment.shape[1:]),
         )
 
+    def objective_terms(self, prediction, semantic_identity, teacher, evidence):
+        return relation_semantic_object_state_terms(
+            prediction,
+            semantic_identity,
+            teacher,
+            evidence,
+            self.config,
+        )
+
     def _track_predictions(self, state, encoder_assignment, decoder_assignment, teacher):
         objects = encoder_assignment[..., : self.config.object_slots]
         object_probability = objects.sum(dim=-1, keepdim=True).clamp_min(1e-6)
@@ -147,12 +156,8 @@ class RelationSemanticObjectStateModel(nn.Module):
         prediction, semantic_identity = self._track_predictions(
             teacher_state, sampled_encoder, sampled_decoder, teacher
         )
-        terms = relation_semantic_object_state_terms(
-            prediction,
-            semantic_identity,
-            teacher,
-            point_tracks,
-            self.config,
+        terms = self.objective_terms(
+            prediction, semantic_identity, teacher, point_tracks
         )
         loss = terms["target_total"] + self.config.reconstruction_weight * reconstruction_loss
         object_pair = (
