@@ -12,6 +12,28 @@ from .object_state_target_v52 import (
 from .relation_semantic_objective_v54 import semantic_alignment_terms
 
 
+def _pair_assignment_similarity(track_assignment: torch.Tensor) -> torch.Tensor:
+    """Keep graph probabilities in FP32 even inside a BF16 autocast region."""
+
+    assignment = track_assignment.float()
+    return (
+        assignment[:, :, None, :] * assignment[:, None, :, :]
+    ).sum(dim=-1, dtype=torch.float32)
+
+
+def _graph_binary_cross_entropy(
+    similarity: torch.Tensor,
+    target: torch.Tensor,
+) -> torch.Tensor:
+    epsilon = 1e-6
+    probability = similarity.float().clamp(epsilon, 1.0 - epsilon)
+    target = target.float().clamp(0.0, 1.0)
+    return -(
+        target * probability.log()
+        + (1.0 - target) * torch.log1p(-probability)
+    )
+
+
 def relation_graph_component_terms(assignment, teacher, config):
     """Factor an external soft relation graph without a fixed component count."""
 
@@ -23,8 +45,7 @@ def relation_graph_component_terms(assignment, teacher, config):
         dim=-1, keepdim=True
     ).clamp_min(1e-6)
 
-    similarity = torch.einsum("bpk,bqk->bpq", track_assignment, track_assignment)
-    similarity = similarity.clamp(1e-6, 1.0 - 1e-6)
+    similarity = _pair_assignment_similarity(track_assignment)
     same = teacher.same_confidence.float()
     different = teacher.different_confidence.float()
     relation_evidence = same + different
@@ -34,16 +55,16 @@ def relation_graph_component_terms(assignment, teacher, config):
         * teacher.object_confidence[:, None]
     )
     graph_weight = relation_evidence * object_pair
-    graph_bce = -(
-        target * similarity.log() + (1.0 - target) * (1.0 - similarity).log()
-    )
+    graph_bce = _graph_binary_cross_entropy(similarity, target)
     utilization = weighted_mean(graph_bce, graph_weight)
     same_partition = weighted_mean(1.0 - similarity, same * object_pair)
     different_partition = weighted_mean(similarity, different * object_pair)
 
     relation_degree = relation_evidence.amax(dim=-1)
     track_weight = teacher.object_confidence * relation_degree
-    root_mass = torch.einsum("bpk,bp->bk", track_assignment, track_weight)
+    root_mass = (
+        track_assignment.float() * track_weight[..., None].float()
+    ).sum(dim=1, dtype=torch.float32)
     root_share = root_mass / root_mass.sum(dim=-1, keepdim=True).clamp_min(1e-6)
     root_entropy = -(root_share * root_share.clamp_min(1e-6).log()).sum(dim=-1)
     effective_components = root_entropy.exp().mean()
@@ -96,6 +117,12 @@ def relation_component_object_state_terms(
         "target_total_without_semantic": target_without_semantic,
         "target_total": target_total,
     }
-    if not all(bool(torch.isfinite(value)) for value in terms.values()):
-        raise RuntimeError("v55 relation-component objective contains non-finite terms")
+    nonfinite = [
+        name for name, value in terms.items() if not bool(torch.isfinite(value))
+    ]
+    if nonfinite:
+        raise RuntimeError(
+            "v55 relation-component objective contains non-finite terms: "
+            + ", ".join(nonfinite)
+        )
     return terms

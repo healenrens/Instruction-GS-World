@@ -26,7 +26,19 @@ def main() -> None:
     report = run_v55_independent_gates(config, torch.device("cpu"))
     if report["status"] != "passed":
         raise RuntimeError(f"v55 independent gates failed: {report}")
-    print(json.dumps(report, sort_keys=True))
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        bf16_report = run_v55_independent_gates(config, torch.device("cpu"))
+    if bf16_report["status"] != "passed":
+        raise RuntimeError(f"v55 BF16 objective gate failed: {bf16_report}")
+    print(
+        json.dumps(
+            {
+                **report,
+                "bf16_autocast_objective": bf16_report["status"],
+            },
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":
