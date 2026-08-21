@@ -61,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tracker_checkpoint", required=True)
     parser.add_argument("--dino_frame_batch", type=int, default=16)
     parser.add_argument("--amp", choices=("bf16", "fp32"), default="bf16")
+    parser.add_argument("--chunk_lengths", default="3,4,6,8")
+    parser.add_argument("--temporal_step_ms", default="100,200,400")
     parser.add_argument("--chunk_length", type=int, default=6)
     parser.add_argument("--seed", type=int, default=17)
     return parser.parse_args()
@@ -227,7 +229,12 @@ def main() -> None:
     semantic = semantic_falsification(config, device)
 
     dataset = MultiSourceRobotVideoDataset(
-        args.data_index, "train", max_items=0, seed=args.seed
+        args.data_index,
+        "train",
+        chunk_lengths=args.chunk_lengths,
+        temporal_step_ms=args.temporal_step_ms,
+        max_items=0,
+        seed=args.seed,
     )
     sample = dataset[(0, args.chunk_length)]
     forbidden = {

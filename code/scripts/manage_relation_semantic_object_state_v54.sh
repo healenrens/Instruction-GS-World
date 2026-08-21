@@ -39,6 +39,8 @@ verify_run() {
       --dino_checkpoint "${DINO_CHECKPOINT}" \
       --tracker_checkpoint "${TRACKER_CHECKPOINT}" \
       --dino_frame_batch "${VERIFY_DINO_FRAME_BATCH:-16}" \
+      --chunk_lengths "${CHUNK_LENGTHS:-3,4,6,8}" \
+      --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400}" \
       --chunk_length "${VERIFY_CHUNK_LENGTH:-6}" --amp "${AMP:-bf16}"
 }
 

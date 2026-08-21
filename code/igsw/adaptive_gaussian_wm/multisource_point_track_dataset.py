@@ -73,7 +73,7 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         self.dynamic_history_lengths = parse_int_choices(chunk_lengths, "chunk lengths")
         self.temporal_step_ms = _parse_milliseconds(temporal_step_ms)
         if self.dynamic_history_lengths[0] < 3 or self.dynamic_history_lengths[-1] > 32:
-            raise ValueError("v52 chunk lengths must stay within [3,32]")
+            raise ValueError("multisource chunk lengths must stay within [3,32]")
         self.start_step_seconds = float(payload.get("start_step_seconds", 0.5))
         self.samples_per_task = int(payload.get("samples_per_task", 4096))
         if self.start_step_seconds <= 0.0 or self.samples_per_task < 1:
@@ -387,7 +387,7 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             index if isinstance(index, tuple) else (index, self.dynamic_history_lengths[-1])
         )
         if chunk_length not in self.dynamic_history_lengths:
-            raise ValueError(f"unsupported v52 chunk length: {chunk_length}")
+            raise ValueError(f"unsupported configured chunk length: {chunk_length}")
         record_index, original, ordinal = self._locate(int(base_index))
         last_error = None
         for replacement_index in self._replacement_records(
