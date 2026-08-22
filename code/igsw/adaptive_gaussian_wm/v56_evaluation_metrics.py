@@ -72,6 +72,10 @@ def conditional_object_assignment(assignment, object_slots):
     return objects / probability.clamp_min(1e-6), probability[..., 0]
 
 
+def visible_mask(teacher):
+    return teacher.visibility.float() >= 0.5
+
+
 def _relation_metrics(conditional, teacher):
     track = visible_track_mean(conditional, teacher.visibility)
     track = track / track.sum(dim=-1, keepdim=True).clamp_min(1e-6)
@@ -102,9 +106,10 @@ def _relation_metrics(conditional, teacher):
 
 
 def _track_correspondence(conditional, teacher):
+    visible = visible_mask(teacher)
     weight = (
-        teacher.visibility[:, 1:]
-        & teacher.visibility[:, :-1]
+        visible[:, 1:]
+        & visible[:, :-1]
     ).float() * teacher.object_confidence[:, None]
     correct = _weighted(_cosine(conditional[:, :-1], conditional[:, 1:]), weight)
     shuffled = _weighted(
@@ -115,7 +120,7 @@ def _track_correspondence(conditional, teacher):
 
 
 def _reappearance(values, teacher):
-    visibility = teacher.visibility.bool()
+    visibility = visible_mask(teacher)
     batch, frames, points = visibility.shape
     last = torch.zeros(batch, points, values.shape[-1], device=values.device)
     seen = torch.zeros(batch, points, device=values.device, dtype=torch.bool)
@@ -175,6 +180,7 @@ def teacher_deletion_locality(model, features, output, amp_context):
         prediction.assignment, model.config.object_slots
     )
     canonical = visible_track_mean(conditional, teacher.visibility)
+    visible = visible_mask(teacher)
     relation_degree = (
         teacher.same_confidence + teacher.different_confidence
     ).amax(dim=-1)
@@ -184,14 +190,14 @@ def teacher_deletion_locality(model, features, output, amp_context):
         track = int(score[batch_index].argmax())
         if float(score[batch_index, track]) == 0.0:
             continue
-        visible_frames = torch.where(teacher.visibility[batch_index, :, track])[0]
+        visible_frames = torch.where(visible[batch_index, :, track])[0]
         if len(visible_frames) == 0:
             continue
         frame = int(visible_frames[len(visible_frames) // 2])
         slot = int(canonical[batch_index, track].argmax())
         component = teacher.same_confidence[batch_index, track] > 0.0
         component[track] = True
-        component &= teacher.visibility[batch_index, frame]
+        component &= visible[batch_index, frame]
         track_positions = output["teacher_evidence"].coordinates[
             batch_index, frame, component
         ]

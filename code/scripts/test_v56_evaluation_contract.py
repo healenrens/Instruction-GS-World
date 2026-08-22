@@ -29,6 +29,9 @@ def main() -> None:
     metrics = parse(
         "code/igsw/adaptive_gaussian_wm/v56_evaluation_metrics.py"
     )
+    tensor_contract = parse(
+        "code/scripts/test_v56_evaluation_tensor_contract.py"
+    )
     launcher = read(
         "code/scripts/evaluate_verified_relation_object_state_v56_suite.sh"
     )
@@ -39,6 +42,7 @@ def main() -> None:
         "visibility_probe_relative_gain",
         "decode_replacement_fraction",
         "causal_prefix_max_difference",
+        "visible_mask(teacher)",
     )
     missing = [name for name in required_teacher if name not in teacher + metrics]
     if missing:
@@ -60,6 +64,10 @@ def main() -> None:
         raise RuntimeError(
             f"v56 evaluation launcher is incomplete: {missing_launcher}"
         )
+    if "test_v56_evaluation_tensor_contract.py" not in launcher:
+        raise RuntimeError("v56 launcher does not execute its tensor contract")
+    if "visibility_input_dtype" not in tensor_contract:
+        raise RuntimeError("v56 tensor contract does not cover float visibility")
     print(
         {
             "status": "passed",
