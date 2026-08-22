@@ -3,6 +3,7 @@
 > 更新日期：2026-08-23  
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
 > 当前开发分支：`codex/query-conditioned-object-dynamics-v57`  
+> 第一阶段实现提交：`bb70757`
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
 > 远端运行与产物根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/`  
 > W&B：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`
@@ -313,7 +314,7 @@ $$
 
 | 顺序 | 工作 | 当前状态 | 晋级条件 |
 |---:|---|---|---|
-| 1 | single-query teacher、student interface、objective falsification | **实现中** | CPU contract 全通过；真实六源 teacher coverage 报告完整。 |
+| 1 | single-query teacher、student interface、objective falsification | **代码与静态检查完成；PyTorch/server gate 待执行** | tensor contract 全通过；真实六源 teacher coverage 报告完整。 |
 | 2 | 六源 query coverage audit + W&B evaluator | 待办 | 所有 source/H 有足够 positive、negative、held-out tracks。 |
 | 3 | single-query binding 训练入口、checkpoint、resume、W&B | 待办 | held teacher gate 通过。 |
 | 4 | RoboTwin independent truth evaluator | 待办 | independent binding gate 通过。 |
