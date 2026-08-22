@@ -7,7 +7,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .causal_student_tracklets import CausalStudentTrackletEncoder
-from .object_state_target_v52 import ObjectStatePredictions, visible_track_mean, weighted_mean
+from .object_state_target_v52 import (
+    ObjectStatePredictions,
+    visible_track_mean,
+    weighted_mean,
+)
 from .point_track_compositional_decoder import PointTrackCompositionalDecoder
 from .point_track_object_state import PointTrackObjectStateEncoder
 from .point_track_teacher import sample_patch_field
@@ -16,10 +20,7 @@ from .trajectory_relation_teacher_v54 import build_trajectory_relation_teacher_v
 
 
 def select_state_batch(state: dict[str, torch.Tensor], indices: torch.Tensor) -> dict:
-    return {
-        name: value.index_select(0, indices)
-        for name, value in state.items()
-    }
+    return {name: value.index_select(0, indices) for name, value in state.items()}
 
 
 class RelationSemanticObjectStateModel(nn.Module):
@@ -60,8 +61,15 @@ class RelationSemanticObjectStateModel(nn.Module):
         flat = {
             name: state[name].flatten(0, 1)
             for name in (
-                "identity", "dynamic", "center", "log_scale", "support_shape",
-                "presence", "visibility", "scene", "transient",
+                "identity",
+                "dynamic",
+                "center",
+                "log_scale",
+                "support_shape",
+                "presence",
+                "visibility",
+                "scene",
+                "transient",
             )
         }
         reconstruction, assignment = self.decoder(
@@ -81,7 +89,14 @@ class RelationSemanticObjectStateModel(nn.Module):
             self.config,
         )
 
-    def _track_predictions(self, state, encoder_assignment, decoder_assignment, teacher):
+    def build_teacher(self, point_tracks, frame_times):
+        return build_trajectory_relation_teacher_v54(
+            point_tracks, self.config, frame_times
+        )
+
+    def _track_predictions(
+        self, state, encoder_assignment, decoder_assignment, teacher
+    ):
         objects = encoder_assignment[..., : self.config.object_slots]
         object_probability = objects.sum(dim=-1, keepdim=True).clamp_min(1e-6)
         normalized = (objects / object_probability).detach()
@@ -100,9 +115,7 @@ class RelationSemanticObjectStateModel(nn.Module):
         visibility = torch.einsum(
             "bpk,btk->btp", reference, state["visibility"].float()
         )
-        presence = torch.einsum(
-            "bpk,btk->btp", reference, state["presence"].float()
-        )
+        presence = torch.einsum("bpk,btk->btp", reference, state["presence"].float())
         prediction = ObjectStatePredictions(
             assignment=encoder_assignment,
             identity=identity,
@@ -126,7 +139,9 @@ class RelationSemanticObjectStateModel(nn.Module):
     ):
         if point_tracks is None:
             raise ValueError("v54 training requires external point-track evidence")
-        if teacher_indices.ndim != 1 or len(teacher_indices) != len(point_tracks.coordinates):
+        if teacher_indices.ndim != 1 or len(teacher_indices) != len(
+            point_tracks.coordinates
+        ):
             raise ValueError("v54 teacher indices differ from point-track batch")
         if int(teacher_indices.min()) < 0 or int(teacher_indices.max()) >= len(patches):
             raise ValueError("v54 teacher index is outside the student batch")
@@ -142,9 +157,7 @@ class RelationSemanticObjectStateModel(nn.Module):
 
         teacher_state = select_state_batch(state, teacher_indices)
         teacher_frame_times = frame_times.index_select(0, teacher_indices)
-        teacher = build_trajectory_relation_teacher_v54(
-            point_tracks, self.config, teacher_frame_times
-        )
+        teacher = self.build_teacher(point_tracks, teacher_frame_times)
         sampled_encoder = sample_patch_field(
             teacher_state["assignment"].float(), point_tracks.coordinates, grid_hw
         ).clamp_min(0.0)
@@ -159,10 +172,12 @@ class RelationSemanticObjectStateModel(nn.Module):
         terms = self.objective_terms(
             prediction, semantic_identity, teacher, point_tracks
         )
-        loss = terms["target_total"] + self.config.reconstruction_weight * reconstruction_loss
+        loss = (
+            terms["target_total"]
+            + self.config.reconstruction_weight * reconstruction_loss
+        )
         object_pair = (
-            teacher.object_confidence[:, :, None]
-            * teacher.object_confidence[:, None]
+            teacher.object_confidence[:, :, None] * teacher.object_confidence[:, None]
         )
         parts = {
             "loss": loss,
@@ -186,7 +201,9 @@ class RelationSemanticObjectStateModel(nn.Module):
             "teacher_lifecycle_known_fraction": teacher.lifecycle_known.float().mean(),
             "teacher_occluded_fraction": (
                 (teacher.lifecycle_state == 1) & teacher.lifecycle_known
-            ).float().mean(),
+            )
+            .float()
+            .mean(),
         }
         parts.update({f"target_{name}": value for name, value in terms.items()})
         if not bool(torch.isfinite(loss)):
