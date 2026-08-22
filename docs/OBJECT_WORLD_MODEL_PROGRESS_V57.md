@@ -282,6 +282,17 @@ $$
 
 这一项只证明“目标函数与接口没有立即奖励 all-scene、whole-frame、other-entity 或 seed-only shortcut”。它还不是实际视频上的成功结果。
 
+2026-08-23 已在远端 `/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/` 使用提交 `4a349b3138ad099980a2d59e2fa0159d6bdcebaf` 完成 tensor gate：
+
+- `status=passed`，architecture 与 checkpoint contract 分别为 `query_conditioned_object_state_v1`、`57`；
+- student 不读取 point tracker，交换 teacher relation 不改变 student 输出，`student_teacher_swap_max_difference=0.0`；
+- teacher 确实读取 future tracks，交换 relation 后 target 变化，`teacher_swap_max_difference=1.0`；
+- prompt 与 held-out tracks 无重叠，`prompt_heldout_overlap=0.0`；
+- 33 组 student parameter tensors 获得有限梯度；
+- reasonable solution 的 objective 为 `0.03096`，低于 whole-frame `5.07872`、seed-only `14.17658`、all-scene `14.31552` 和 other-entity `19.34216`。
+
+该结果验证了 synthetic interface、因果边界、梯度路径和已列 shortcut 的排序。它没有覆盖六源真实视频的 teacher coverage、真实 object binding、独立标注评测或 Dynamics，因此不能据此声称 object state 已学成。
+
 ## 10. v57 Gate 与实验设计
 
 ### Gate A：Single-query teacher coverage
@@ -314,7 +325,7 @@ $$
 
 | 顺序 | 工作 | 当前状态 | 晋级条件 |
 |---:|---|---|---|
-| 1 | single-query teacher、student interface、objective falsification | **代码与静态检查完成；PyTorch/server gate 待执行** | tensor contract 全通过；真实六源 teacher coverage 报告完整。 |
+| 1 | single-query teacher、student interface、objective falsification | **远端 tensor contract 已通过；真实六源 coverage 待执行** | tensor contract 全通过；真实六源 teacher coverage 报告完整。 |
 | 2 | 六源 query coverage audit + W&B evaluator | 待办 | 所有 source/H 有足够 positive、negative、held-out tracks。 |
 | 3 | single-query binding 训练入口、checkpoint、resume、W&B | 待办 | held teacher gate 通过。 |
 | 4 | RoboTwin independent truth evaluator | 待办 | independent binding gate 通过。 |

@@ -136,7 +136,7 @@ def objective_falsification(config, features, evidence, teacher, grid_hw, point_
                 teacher,
                 grid_hw,
                 config,
-            )["total"]
+            )["total"].detach()
         )
 
     scores = {
@@ -205,9 +205,11 @@ def main():
         frame_times,
         teacher.query_coordinate,
     )
-    causal_difference = float((primary.identity - repeated.identity).abs().max())
+    causal_difference = float(
+        (primary.identity - repeated.identity).abs().max().detach()
+    )
     teacher_difference = float(
-        (teacher.same_target - swapped_teacher.same_target).abs().max()
+        (teacher.same_target - swapped_teacher.same_target).abs().max().detach()
     )
     if causal_difference != 0.0 or teacher_difference <= 0.0:
         raise RuntimeError("v57 student/teacher causal boundary failed")
