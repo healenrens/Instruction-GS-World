@@ -237,15 +237,18 @@ def teacher_isolation_contract(model, features, batch, evidence, output, amp_con
 
 def real_data_audit(dataset, dino, tracker, config, device, audit_lengths):
     require(
-        len(dataset.source_probe_indices) == len(dataset.source_names),
-        "v56 dataset cannot expose one probe per source",
+        len(dataset.source_audit_indices) == len(dataset.source_names),
+        "v56 dataset cannot expose audit probes per source",
     )
     rows, probes = [], []
     model_probe = None
     for chunk_length in audit_lengths:
-        samples = [
-            dataset[(index, chunk_length)] for index in dataset.source_probe_indices
+        audit_indices = [
+            index
+            for source_indices in dataset.source_audit_indices
+            for index in source_indices
         ]
+        samples = [dataset[(index, chunk_length)] for index in audit_indices]
         batch = move_batch(default_collate(samples), device)
         source_names = [
             dataset.source_names[int(index)] for index in batch["source_index"].tolist()

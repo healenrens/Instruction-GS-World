@@ -97,7 +97,9 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         selected = [episode for episode in episodes if episode.split == split]
         if not selected:
             raise ValueError(f"multisource index has no {split} episodes")
-        selected.sort(key=lambda item: (item.source_index, item.group, item.episode_index))
+        selected.sort(
+            key=lambda item: (item.source_index, item.group, item.episode_index)
+        )
         group_keys = sorted({(item.source_index, item.group) for item in selected})
         group_ids = {key: index for index, key in enumerate(group_keys)}
         self._group_source_indices = tuple(source for source, _ in group_keys)
@@ -105,8 +107,12 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         records = []
         required_frames = self.dynamic_history_lengths[-1]
         for sequence_index, episode in enumerate(selected):
-            minimum_stride = max(1, round(self.temporal_step_ms[0] * episode.fps / 1000.0))
-            last_start = episode.frame_count - 1 - (required_frames - 1) * minimum_stride
+            minimum_stride = max(
+                1, round(self.temporal_step_ms[0] * episode.fps / 1000.0)
+            )
+            last_start = (
+                episode.frame_count - 1 - (required_frames - 1) * minimum_stride
+            )
             if last_start < 0:
                 continue
             start_stride = max(1, round(self.start_step_seconds * episode.fps))
@@ -134,12 +140,19 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         self._prefix = []
         source_probe_full_indices = {}
         source_offset_probe_full_indices = {}
+        source_audit_full_indices = {index: [] for index in range(len(self.sources))}
+        source_audit_groups = {index: set() for index in range(len(self.sources))}
         total = 0
         group_bounds = []
         active_group = records[0].group_index
         group_start = 0
         for record in records:
             source_probe_full_indices.setdefault(record.source_index, total)
+            audit_indices = source_audit_full_indices[record.source_index]
+            audit_groups = source_audit_groups[record.source_index]
+            if len(audit_indices) < 4 and record.group_index not in audit_groups:
+                audit_indices.append(total)
+                audit_groups.add(record.group_index)
             if record.frame_offset > 0:
                 source_offset_probe_full_indices.setdefault(record.source_index, total)
             if record.group_index != active_group:
@@ -151,15 +164,29 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         self._full_length = total
         self._length = min(int(max_items), total) if max_items > 0 else total
         self.source_probe_indices = (
-            tuple(source_probe_full_indices[index] for index in range(len(self.sources)))
-            if self._length == self._full_length else ()
+            tuple(
+                source_probe_full_indices[index] for index in range(len(self.sources))
+            )
+            if self._length == self._full_length
+            else ()
+        )
+        self.source_audit_indices = (
+            tuple(
+                tuple(source_audit_full_indices[index])
+                for index in range(len(self.sources))
+            )
+            if self._length == self._full_length
+            else ()
         )
         self.source_offset_probe_indices = (
             tuple(
-                source_offset_probe_full_indices.get(index, source_probe_full_indices[index])
+                source_offset_probe_full_indices.get(
+                    index, source_probe_full_indices[index]
+                )
                 for index in range(len(self.sources))
             )
-            if self._length == self._full_length else ()
+            if self._length == self._full_length
+            else ()
         )
         projected = self._project_group_spans(group_bounds)
         self.sampling_group_spans = tuple((left, right) for left, right, _ in projected)
@@ -171,8 +198,7 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         )
         self.source_task_counts = tuple(
             sum(
-                self._group_source_indices[group] == source
-                for _, _, group in projected
+                self._group_source_indices[group] == source for _, _, group in projected
             )
             for source in range(len(self.sources))
         )
@@ -286,9 +312,13 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             start = _stable_integer(
                 "decode-replacement-start", self.seed, sample_index, scope_index
             ) % len(pool)
-            step = _stable_integer(
-                "decode-replacement-step", self.seed, sample_index, scope_index
-            ) % len(pool) or 1
+            step = (
+                _stable_integer(
+                    "decode-replacement-step", self.seed, sample_index, scope_index
+                )
+                % len(pool)
+                or 1
+            )
             while math.gcd(step, len(pool)) != 1:
                 step = step % len(pool) + 1
             accepted = 0
@@ -353,14 +383,21 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             }
         )
         valid_strides = [
-            stride for stride in strides if (chunk_length - 1) * stride < record.frame_count
+            stride
+            for stride in strides
+            if (chunk_length - 1) * stride < record.frame_count
         ]
         if not valid_strides:
             raise ValueError("episode cannot supply the requested multisource clip")
         stride = valid_strides[
             _stable_integer(
-                self.seed, record.source_index, record.episode_index, ordinal, chunk_length
-            ) % len(valid_strides)
+                self.seed,
+                record.source_index,
+                record.episode_index,
+                ordinal,
+                chunk_length,
+            )
+            % len(valid_strides)
         ]
         span = (chunk_length - 1) * stride
         maximum_start = record.frame_count - 1 - span
@@ -384,7 +421,9 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
 
     def __getitem__(self, index) -> dict[str, torch.Tensor]:
         base_index, chunk_length = (
-            index if isinstance(index, tuple) else (index, self.dynamic_history_lengths[-1])
+            index
+            if isinstance(index, tuple)
+            else (index, self.dynamic_history_lengths[-1])
         )
         if chunk_length not in self.dynamic_history_lengths:
             raise ValueError(f"unsupported configured chunk length: {chunk_length}")

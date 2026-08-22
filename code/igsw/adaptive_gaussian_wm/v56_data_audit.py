@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from .verified_relation_objective_v56 import balanced_relation_weights
+
 
 def _batch_weighted_mean(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     dimensions = tuple(range(1, value.ndim))
@@ -16,24 +18,27 @@ def _batch_weighted_mean(value: torch.Tensor, weight: torch.Tensor) -> torch.Ten
 
 def _graph_loss(assignment: torch.Tensor, teacher) -> torch.Tensor:
     similarity = torch.einsum("bpk,bqk->bpq", assignment.float(), assignment.float())
-    same = teacher.same_confidence.float()
-    different = teacher.different_confidence.float()
-    evidence = same + different
-    target = same / evidence.clamp_min(1e-6)
-    support = teacher.object_confidence.float()
-    weight = evidence * support[:, :, None] * support[:, None]
+    same_weight, different_weight = balanced_relation_weights(teacher)
+    weight = same_weight + different_weight
+    target = same_weight / weight.clamp_min(1e-6)
     probability = similarity.clamp(1e-6, 1.0 - 1e-6)
     bce = -(target * probability.log() + (1.0 - target) * torch.log1p(-probability))
     return _batch_weighted_mean(bce, weight)
 
 
-def _effective_roots(assignment: torch.Tensor, teacher) -> torch.Tensor:
+def _root_statistics(assignment: torch.Tensor, teacher):
     degree = (teacher.same_confidence + teacher.different_confidence).amax(dim=-1)
     weight = teacher.object_confidence * degree
     root_mass = (assignment * weight[..., None]).sum(dim=1)
     share = root_mass / root_mass.sum(dim=-1, keepdim=True).clamp_min(1e-6)
     entropy = -(share * share.clamp_min(1e-6).log()).sum(dim=-1)
-    return entropy.exp().mean()
+    effective = entropy.exp()
+    negative_supported = teacher.different_confidence.amax(dim=(-2, -1)) > 0.0
+    usable = negative_supported.float()
+    conditional_effective = (effective * usable).sum() / usable.sum().clamp_min(1.0)
+    maximum_share = share.amax(dim=-1)
+    conditional_maximum = (maximum_share * usable).sum() / usable.sum().clamp_min(1.0)
+    return effective.mean(), conditional_effective, conditional_maximum, usable.mean()
 
 
 def factorization_probe(teacher, object_slots: int, steps: int = 80) -> dict:
@@ -67,13 +72,19 @@ def factorization_probe(teacher, object_slots: int, steps: int = 80) -> dict:
     collapsed = torch.zeros_like(assignment)
     collapsed[..., 0] = 1.0
     collapse_loss = _graph_loss(collapsed, teacher)
+    effective, conditional, maximum, negative_fraction = _root_statistics(
+        assignment, teacher
+    )
     return {
         "factorization_initial_loss": float(initial),
         "factorization_optimized_loss": float(optimized),
         "factorization_collapse_loss": float(collapse_loss),
         "factorization_optimization_gain": float(initial - optimized),
         "factorization_collapse_margin": float(collapse_loss - optimized),
-        "factorization_effective_roots": float(_effective_roots(assignment, teacher)),
+        "factorization_effective_roots": float(effective),
+        "factorization_negative_supported_effective_roots": float(conditional),
+        "factorization_negative_supported_maximum_root_share": float(maximum),
+        "factorization_negative_supported_sample_fraction": float(negative_fraction),
     }
 
 
@@ -139,12 +150,12 @@ def summarize_real_target_audit(rows: list[dict], probes: list[dict], config):
         name: sum(probe[name] for probe in probes) / len(probes) for name in probes[0]
     }
     checks = {
-        "every_source_has_relation_evidence": all(
-            value["known_relation_fraction"]
-            >= min(
-                config.minimum_same_edge_fraction,
-                config.minimum_different_edge_fraction,
-            )
+        "every_source_has_same_relation_evidence": all(
+            value["same_edge_fraction"] >= config.minimum_same_edge_fraction
+            for value in per_source.values()
+        ),
+        "every_source_has_different_relation_evidence": all(
+            value["different_edge_fraction"] >= config.minimum_different_edge_fraction
             for value in per_source.values()
         ),
         "same_relation_evidence_is_dense_enough": (
@@ -181,8 +192,13 @@ def summarize_real_target_audit(rows: list[dict], probes: list[dict], config):
             min(probe["factorization_collapse_margin"] for probe in probes)
             >= config.minimum_real_target_collapse_margin
         ),
-        "real_target_supports_multiple_roots": (
-            probe_mean["factorization_effective_roots"] > 1.25
+        "real_target_supports_multiple_roots_when_negatives_exist": (
+            probe_mean["factorization_negative_supported_effective_roots"]
+            >= config.minimum_factorized_effective_roots
+        ),
+        "real_target_avoids_dominant_root_when_negatives_exist": (
+            probe_mean["factorization_negative_supported_maximum_root_share"]
+            <= config.maximum_factorized_root_share
         ),
     }
     return {

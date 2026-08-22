@@ -29,7 +29,7 @@ class VerifiedRelationObjectStateConfig(RelationSemanticObjectStateConfig):
     relation_partition_weight: float = 1.0
     contrastive_cycle_weight: float = 1.0
     object_support_weight: float = 0.5
-    relation_confidence_floor: float = 0.03
+    relation_confidence_floor: float = 0.10
     cycle_margin: float = 0.20
     cycle_temperature: float = 0.10
 
@@ -39,6 +39,8 @@ class VerifiedRelationObjectStateConfig(RelationSemanticObjectStateConfig):
     minimum_negative_track_fraction: float = 0.10
     minimum_object_support_fraction: float = 0.05
     minimum_real_target_collapse_margin: float = 0.02
+    minimum_factorized_effective_roots: float = 1.25
+    maximum_factorized_root_share: float = 0.85
 
     def validate(self) -> None:
         super().validate()
@@ -60,6 +62,7 @@ class VerifiedRelationObjectStateConfig(RelationSemanticObjectStateConfig):
             self.cycle_temperature,
             self.minimum_teacher_batch_fraction,
             self.minimum_real_target_collapse_margin,
+            self.minimum_factorized_effective_roots,
         )
         if min(positive) <= 0.0:
             raise ValueError("v56 relation objective values must be positive")
@@ -70,6 +73,7 @@ class VerifiedRelationObjectStateConfig(RelationSemanticObjectStateConfig):
             self.minimum_different_edge_fraction,
             self.minimum_negative_track_fraction,
             self.minimum_object_support_fraction,
+            self.maximum_factorized_root_share,
         )
         if min(probabilities) < 0.0 or max(probabilities) > 1.0:
             raise ValueError("v56 evidence thresholds must stay within [0,1]")

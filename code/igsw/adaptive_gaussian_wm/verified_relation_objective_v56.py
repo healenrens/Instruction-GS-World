@@ -36,6 +36,24 @@ def _conditional_object_assignment(assignment, object_slots):
     return conditional, object_probability.squeeze(-1)
 
 
+def balanced_relation_weights(teacher):
+    support = teacher.object_confidence.float()
+    support_pair = support[:, :, None] * support[:, None]
+    same = teacher.same_confidence.float() * support_pair
+    different = teacher.different_confidence.float() * support_pair
+    dimensions = tuple(range(1, same.ndim))
+    same_mass = same.sum(dim=dimensions, keepdim=True)
+    different_mass = different.sum(dim=dimensions, keepdim=True)
+    same_present = same_mass > 0.0
+    different_present = different_mass > 0.0
+    both = same_present & different_present
+    same_scale = torch.where(both, 0.5, 1.0)
+    different_scale = torch.where(both, 0.5, 1.0)
+    same_weight = same / same_mass.clamp_min(1e-6) * same_scale
+    different_weight = different / different_mass.clamp_min(1e-6) * different_scale
+    return same_weight, different_weight
+
+
 def _relation_partition_terms(conditional, teacher):
     track_assignment = visible_track_mean(conditional, teacher.visibility)
     track_assignment = track_assignment / track_assignment.sum(
@@ -44,17 +62,12 @@ def _relation_partition_terms(conditional, teacher):
     similarity = torch.einsum(
         "bpk,bqk->bpq", track_assignment.float(), track_assignment.float()
     )
-    same = teacher.same_confidence.float()
-    different = teacher.different_confidence.float()
-    evidence = same + different
-    target = same / evidence.clamp_min(1e-6)
-    support_pair = (
-        teacher.object_confidence[:, :, None] * teacher.object_confidence[:, None]
-    )
-    weight = evidence * support_pair
+    same_weight, different_weight = balanced_relation_weights(teacher)
+    weight = same_weight + different_weight
+    target = same_weight / weight.clamp_min(1e-6)
     partition = _batch_weighted_mean(_graph_bce(similarity, target), weight)
-    same_loss = _batch_weighted_mean(1.0 - similarity, same * support_pair)
-    different_loss = _batch_weighted_mean(similarity, different * support_pair)
+    same_loss = _batch_weighted_mean(1.0 - similarity, same_weight)
+    different_loss = _batch_weighted_mean(similarity, different_weight)
     collapsed = _batch_weighted_mean(
         _graph_bce(torch.ones_like(similarity), target), weight
     )

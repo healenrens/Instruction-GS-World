@@ -91,12 +91,15 @@ def _signed_relations(evidence, config):
         .sqrt()
         .sqrt()
     )
+    active_pair = torch.maximum(activity[:, :, None], activity[:, None])
+    same_score = same_score * (0.25 + 0.75 * active_pair)
     same_score = same_score * covisibility * persistent_pair
 
-    active_pair = torch.maximum(activity[:, :, None], activity[:, None])
     separation = torch.maximum(1.0 - rigidity, 1.0 - motion_coherence)
-    different_score = separation * (0.25 + 0.75 * active_pair)
-    different_score = different_score * (0.5 + 0.5 * (1.0 - appearance))
+    kinematic_separation = separation * (0.25 + 0.75 * active_pair)
+    kinematic_separation = kinematic_separation * (0.5 + 0.5 * (1.0 - appearance))
+    semantic_spatial_separation = (1.0 - appearance) * (1.0 - locality)
+    different_score = torch.maximum(kinematic_separation, semantic_spatial_separation)
     different_score = different_score * covisibility * persistent_pair
 
     signed = same_score - different_score
