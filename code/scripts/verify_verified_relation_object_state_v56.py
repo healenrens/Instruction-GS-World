@@ -58,6 +58,7 @@ def maximum_difference(left: torch.Tensor, right: torch.Tensor) -> float:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_index", required=True)
+    parser.add_argument("--decode_report", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--source_revision", required=True)
     parser.add_argument("--dino_checkpoint", required=True)
@@ -279,6 +280,15 @@ def real_data_audit(dataset, dino, tracker, config, device, audit_lengths):
 
 def main() -> None:
     args = parse_args()
+    for name in (
+        "data_index",
+        "decode_report",
+        "dino_checkpoint",
+        "tracker_checkpoint",
+    ):
+        value = os.path.abspath(getattr(args, name))
+        require(os.path.isfile(value), f"v56 {name} is missing: {value}")
+        setattr(args, name, value)
     if not torch.cuda.is_available():
         raise RuntimeError("v56 verifier requires a visible CUDA device")
     torch.manual_seed(args.seed)
@@ -349,7 +359,14 @@ def main() -> None:
         "checkpoint_version": CHECKPOINT_VERSION,
         "architecture": ARCHITECTURE,
         "git_commit": args.source_revision,
-        "data_index": os.path.abspath(args.data_index),
+        "data_index": args.data_index,
+        "decode_report": args.decode_report,
+        "dino_checkpoint": args.dino_checkpoint,
+        "tracker_checkpoint": args.tracker_checkpoint,
+        "chunk_lengths": args.chunk_lengths,
+        "temporal_step_ms": args.temporal_step_ms,
+        "audit_chunk_lengths": args.audit_chunk_lengths,
+        "amp": args.amp,
         "historical_checkpoint_used": False,
         "dynamics_present": False,
         "latent_effect_present": False,

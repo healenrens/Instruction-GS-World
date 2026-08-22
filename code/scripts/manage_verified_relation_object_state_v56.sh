@@ -35,6 +35,7 @@ verify_run() {
   CUDA_VISIBLE_DEVICES="${VERIFY_CUDA_VISIBLE_DEVICES:-2}" \
     "${PY}" "${ROOT}/code/scripts/verify_verified_relation_object_state_v56.py" \
       --data_index "${DATA_INDEX}" --output "${GATE_REPORT}" \
+      --decode_report "${DECODE_REPORT}" \
       --source_revision "${SOURCE_REVISION}" \
       --dino_checkpoint "${DINO_CHECKPOINT}" \
       --tracker_checkpoint "${TRACKER_CHECKPOINT}" \
