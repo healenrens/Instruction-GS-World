@@ -18,6 +18,13 @@ from igsw.adaptive_gaussian_wm.v56_evaluation_metrics import (  # noqa: E402
     _track_correspondence,
     visible_mask,
 )
+from igsw.adaptive_gaussian_wm.object_state_target_v52 import (  # noqa: E402
+    component_motion_targets,
+)
+from igsw.adaptive_gaussian_wm.v56_state_probe_metrics import (  # noqa: E402
+    held_group_binary_metrics,
+    held_group_vector_metrics,
+)
 
 
 def main() -> None:
@@ -39,6 +46,48 @@ def main() -> None:
     reappearance, wrong_reappearance, events = _reappearance(assignment, teacher)
     if events < 1.0 or reappearance[0] <= wrong_reappearance[0]:
         raise RuntimeError("v56 reappearance contract lost track identity")
+
+    relation = torch.tensor(
+        [[[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]]
+    )
+    motion = torch.tensor(
+        [[[[[1.0, 0.0]], [[3.0, 0.0]], [[9.0, 0.0]]]]]
+    )
+    component_teacher = SimpleNamespace(
+        same_confidence=relation,
+        motion=motion,
+        motion_valid=torch.ones(1, 1, 3, 1, dtype=torch.bool),
+        object_confidence=torch.ones(1, 3),
+    )
+    component_motion_target, component_motion_weight, _ = component_motion_targets(
+        component_teacher
+    )
+    expected = torch.tensor([2.0, 2.0, 0.0])
+    if not torch.allclose(component_motion_target[0, 0, :, 0, 0], expected):
+        raise RuntimeError("v56 component motion target differs from relation pooling")
+    if not torch.equal(
+        component_motion_weight[0, 0, :, 0] > 0.0,
+        torch.tensor([True, True, False]),
+    ):
+        raise RuntimeError("v56 component motion support differs from training")
+
+    groups = torch.arange(4).repeat_interleave(8)
+    vector_target = torch.stack(
+        (torch.linspace(-1.0, 1.0, 32), torch.linspace(1.0, -1.0, 32)),
+        dim=-1,
+    )
+    vector_metrics = held_group_vector_metrics(
+        vector_target, vector_target, torch.ones(32), groups
+    )
+    if vector_metrics["zero_relative_gain"] < 0.999:
+        raise RuntimeError("v56 aligned motion readout metric rejected exact prediction")
+
+    binary_target = (torch.arange(32) % 2).float()
+    binary_metrics = held_group_binary_metrics(
+        binary_target, binary_target, torch.ones(32), groups
+    )
+    if binary_metrics["balanced_accuracy"] != 1.0:
+        raise RuntimeError("v56 explicit visibility metric rejected exact prediction")
     print(
         {
             "status": "passed",
@@ -46,6 +95,11 @@ def main() -> None:
             "visibility_mask_dtype": str(mask.dtype),
             "correspondence_margin": correct[0] - shuffled[0],
             "reappearance_events": events,
+            "component_motion_target": component_motion_target[0, 0, :, 0, 0].tolist(),
+            "component_motion_readout_gain": vector_metrics["zero_relative_gain"],
+            "explicit_visibility_balanced_accuracy": binary_metrics[
+                "balanced_accuracy"
+            ],
         }
     )
 

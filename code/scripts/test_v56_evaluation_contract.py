@@ -29,6 +29,12 @@ def main() -> None:
     metrics = parse(
         "code/igsw/adaptive_gaussian_wm/v56_evaluation_metrics.py"
     )
+    state_probes = parse(
+        "code/igsw/adaptive_gaussian_wm/v56_state_probe_metrics.py"
+    )
+    targets = parse(
+        "code/igsw/adaptive_gaussian_wm/object_state_target_v52.py"
+    )
     tensor_contract = parse(
         "code/scripts/test_v56_evaluation_tensor_contract.py"
     )
@@ -38,15 +44,21 @@ def main() -> None:
     required_teacher = (
         "track_shuffle_objective_delta",
         "teacher_deletion_locality",
-        "motion_probe_relative_gain",
-        "visibility_probe_relative_gain",
+        "component_motion_targets",
+        "component_motion_active_probe_relative_gain",
+        "component_motion_active_readout_zero_relative_gain",
+        "explicit_visibility_balanced_accuracy",
+        "explicit_visibility_brier_relative_gain",
+        "presence_supervision_identifiable",
+        "aligned_component_object_state_v2",
         "decode_replacement_fraction",
         "causal_prefix_max_difference",
         "visible_mask(teacher)",
         "runtime_preflight",
         "with amp_context():",
     )
-    missing = [name for name in required_teacher if name not in teacher + metrics]
+    teacher_contract = teacher + metrics + state_probes + targets
+    missing = [name for name in required_teacher if name not in teacher_contract]
     if missing:
         raise RuntimeError(f"v56 teacher evaluation is missing metrics: {missing}")
     forbidden_independent = (
@@ -70,6 +82,8 @@ def main() -> None:
         raise RuntimeError("v56 launcher does not execute its tensor contract")
     if "visibility_input_dtype" not in tensor_contract:
         raise RuntimeError("v56 tensor contract does not cover float visibility")
+    if "component_motion_target" not in tensor_contract:
+        raise RuntimeError("v56 tensor contract does not cover component motion")
     print(
         {
             "status": "passed",

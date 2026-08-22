@@ -52,6 +52,7 @@ teacher_evaluation() {
     --workers "${EVAL_WORKERS:-4}" \
     --dino_frame_batch "${EVAL_DINO_FRAME_BATCH:-64}" \
     --causal_items "${EVAL_CAUSAL_ITEMS:-8}" \
+    --motion_active_threshold "${EVAL_MOTION_ACTIVE_THRESHOLD:-0.01}" \
     --amp "${AMP:-bf16}" \
     --seed "${SEED:-17}" \
     --wandb_mode "${WANDB_MODE:-online}" \

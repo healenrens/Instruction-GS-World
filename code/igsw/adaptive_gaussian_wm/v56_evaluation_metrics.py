@@ -12,6 +12,10 @@ from .object_state_target_v52 import visible_track_mean
 from .verified_relation_objective_v56 import (
     verified_relation_object_state_terms,
 )
+from .v56_state_probe_metrics import (
+    aligned_state_probe_tensors,
+    finalize_aligned_state_probes,
+)
 
 
 @dataclass(frozen=True)
@@ -237,7 +241,15 @@ def teacher_deletion_locality(model, features, output, amp_context):
     return inside_sum, outside_sum, events
 
 
-def collect_v56_diagnostics(model, features, evidence, output, amp_context, groups):
+def collect_v56_diagnostics(
+    model,
+    features,
+    evidence,
+    output,
+    amp_context,
+    groups,
+    motion_active_threshold,
+):
     output = dict(output)
     output["teacher_evidence"] = evidence
     teacher = output["teacher"]
@@ -276,23 +288,40 @@ def collect_v56_diagnostics(model, features, evidence, output, amp_context, grou
     group = groups[:, None, None].expand_as(teacher.visibility)
     horizons = len(model.config.dynamic_horizons)
     probes = {
-        "motion_feature": mapped_dynamic[:, :, :, None]
+        "raw_track_motion_feature": mapped_dynamic[:, :, :, None]
         .expand(-1, -1, -1, horizons, -1)
         .reshape(-1, mapped_dynamic.shape[-1])
         .detach()
         .cpu(),
-        "motion_target": teacher.motion.reshape(-1, 2).detach().cpu(),
-        "motion_weight": (
+        "raw_track_motion_target": teacher.motion.reshape(-1, 2).detach().cpu(),
+        "raw_track_motion_weight": (
             teacher.motion_valid.float() * teacher.object_confidence[:, None, :, None]
         ).reshape(-1).detach().cpu(),
-        "motion_group": group[..., None].expand(-1, -1, -1, horizons).reshape(-1).detach().cpu(),
-        "visibility_feature": mapped_dynamic.reshape(-1, mapped_dynamic.shape[-1]).detach().cpu(),
-        "visibility_target": teacher.visibility.reshape(-1, 1).float().detach().cpu(),
-        "visibility_weight": (
+        "raw_track_motion_group": group[..., None]
+        .expand(-1, -1, -1, horizons)
+        .reshape(-1)
+        .detach()
+        .cpu(),
+        "dynamic_visibility_feature": mapped_dynamic.reshape(
+            -1, mapped_dynamic.shape[-1]
+        ).detach().cpu(),
+        "dynamic_visibility_target": teacher.visibility.reshape(-1, 1)
+        .float()
+        .detach()
+        .cpu(),
+        "dynamic_visibility_weight": (
             teacher.lifecycle_known.float() * teacher.object_confidence[:, None]
         ).reshape(-1).detach().cpu(),
-        "visibility_group": group.reshape(-1).detach().cpu(),
+        "dynamic_visibility_group": group.reshape(-1).detach().cpu(),
     }
+    probes.update(
+        aligned_state_probe_tensors(
+            conditional,
+            output,
+            groups,
+            motion_active_threshold,
+        )
+    )
     totals = {
         "assignment_reappearance_events": assignment_reappearance[2],
         "identity_reappearance_events": identity_reappearance[2],
@@ -338,14 +367,15 @@ def finalize_v56_metrics(aggregate, ridge_relative_gain):
         metrics["deletion_outside_change"], 1e-8
     )
     probes = {name: torch.cat(values) for name, values in aggregate.probes.items()}
-    metrics["motion_probe_relative_gain"] = ridge_relative_gain(
-        probes["motion_feature"], probes["motion_target"],
-        probes["motion_weight"], probes["motion_group"]
+    metrics["raw_track_motion_probe_relative_gain"] = ridge_relative_gain(
+        probes["raw_track_motion_feature"], probes["raw_track_motion_target"],
+        probes["raw_track_motion_weight"], probes["raw_track_motion_group"]
     )
-    metrics["visibility_probe_relative_gain"] = ridge_relative_gain(
-        probes["visibility_feature"], probes["visibility_target"],
-        probes["visibility_weight"], probes["visibility_group"]
+    metrics["dynamic_visibility_probe_relative_gain"] = ridge_relative_gain(
+        probes["dynamic_visibility_feature"], probes["dynamic_visibility_target"],
+        probes["dynamic_visibility_weight"], probes["dynamic_visibility_group"]
     )
+    metrics.update(finalize_aligned_state_probes(probes, ridge_relative_gain))
     if not all(math.isfinite(value) for value in metrics.values()):
         raise RuntimeError("v56 evaluation produced non-finite metrics")
     return metrics

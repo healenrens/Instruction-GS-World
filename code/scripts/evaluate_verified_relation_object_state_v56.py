@@ -74,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--dino_frame_batch", type=int, default=64)
     parser.add_argument("--causal_items", type=int, default=8)
+    parser.add_argument("--motion_active_threshold", type=float, default=0.01)
     parser.add_argument("--amp", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--wandb_mode", choices=("disabled", "online", "offline"), default="online")
@@ -140,6 +141,7 @@ def evaluate_condition(args, model, loader, dino, tracker, device, amp_context):
                 output,
                 amp_context,
                 batch["requested_sequence_index"],
+                args.motion_active_threshold,
             )
             aggregate.add_batch(diagnostics)
             aggregate.add_mean(
@@ -187,6 +189,7 @@ def runtime_preflight(args, model, dataset, dino, tracker, device, amp_context):
             output,
             amp_context,
             batch["requested_sequence_index"],
+            args.motion_active_threshold,
         )
         with amp_context():
             causal = causal_prefix_difference(
@@ -210,6 +213,19 @@ def condition_checks(metrics):
         "no_dominant_root_collapse": metrics["maximum_root_share"] <= 0.80,
         "track_correspondence": metrics["track_correspondence_margin"] >= 0.03,
         "track_shuffle_hurts_objective": metrics["track_shuffle_objective_delta"] >= 0.02,
+        "component_motion_supported": (
+            metrics["component_motion_active_readout_vector_count"] >= 32
+        ),
+        "component_motion_decodable": (
+            metrics["component_motion_active_probe_relative_gain"] >= 0.05
+        ),
+        "component_motion_readout_beats_zero": (
+            metrics["component_motion_active_readout_zero_relative_gain"] >= 0.05
+        ),
+        "explicit_visibility_state_predictive": (
+            metrics["explicit_visibility_balanced_accuracy"] >= 0.55
+            and metrics["explicit_visibility_brier_relative_gain"] >= 0.02
+        ),
         "decode_replacement_bounded": metrics["decode_replacement_fraction"] <= 0.05,
     }
 
@@ -245,8 +261,34 @@ def aggregate_checks(conditions):
         "minimum_effective_roots": min(value["effective_roots"] for value in metrics),
         "maximum_root_share": max(value["maximum_root_share"] for value in metrics),
         "minimum_relation_root_margin": min(value["relation_root_margin"] for value in metrics),
-        "minimum_motion_probe_gain": min(value["motion_probe_relative_gain"] for value in metrics),
-        "minimum_visibility_probe_gain": min(value["visibility_probe_relative_gain"] for value in metrics),
+        "minimum_component_motion_active_vectors": min(
+            value["component_motion_active_readout_vector_count"] for value in metrics
+        ),
+        "minimum_component_motion_probe_gain": min(
+            value["component_motion_active_probe_relative_gain"] for value in metrics
+        ),
+        "minimum_component_motion_readout_zero_gain": min(
+            value["component_motion_active_readout_zero_relative_gain"]
+            for value in metrics
+        ),
+        "minimum_explicit_visibility_balanced_accuracy": min(
+            value["explicit_visibility_balanced_accuracy"] for value in metrics
+        ),
+        "minimum_explicit_visibility_brier_gain": min(
+            value["explicit_visibility_brier_relative_gain"] for value in metrics
+        ),
+        "presence_known_positive_count": sum(
+            value["presence_known_positive_count"] for value in metrics
+        ),
+        "presence_known_negative_count": sum(
+            value["presence_known_negative_count"] for value in metrics
+        ),
+        "minimum_raw_track_motion_probe_gain": min(
+            value["raw_track_motion_probe_relative_gain"] for value in metrics
+        ),
+        "minimum_dynamic_visibility_probe_gain": min(
+            value["dynamic_visibility_probe_relative_gain"] for value in metrics
+        ),
         "maximum_decode_replacement_fraction": max(
             value["decode_replacement_fraction"] for value in metrics
         ),
@@ -263,8 +305,22 @@ def aggregate_checks(conditions):
         "assignment_reappearance_supported": reappearance_events >= 32 and assignment_margin >= 0.02,
         "identity_reappearance_supported": identity_events >= 32 and identity_margin >= 0.02,
         "teacher_track_deletion_local": deletion_events >= 32 and deletion_ratio >= 1.25,
-        "motion_decodable": aggregate["minimum_motion_probe_gain"] >= 0.05,
-        "visibility_decodable": aggregate["minimum_visibility_probe_gain"] >= 0.05,
+        "component_motion_evidence_supported": all(
+            value["component_motion_supported"] for value in checks
+        ),
+        "component_motion_decodable": all(
+            value["component_motion_decodable"] for value in checks
+        ),
+        "component_motion_readout_beats_zero": all(
+            value["component_motion_readout_beats_zero"] for value in checks
+        ),
+        "explicit_visibility_state_predictive": all(
+            value["explicit_visibility_state_predictive"] for value in checks
+        ),
+        "presence_supervision_identifiable": (
+            aggregate["presence_known_positive_count"] >= 32
+            and aggregate["presence_known_negative_count"] >= 32
+        ),
         "decode_replacement_bounded": all(value["decode_replacement_bounded"] for value in checks),
     }
     return aggregate, gates
@@ -353,6 +409,10 @@ def main() -> None:
         "deployment_promotion_ready": False,
         "promotion_blocker": "independent external object truth evaluation is required",
         "evaluation_scope": "source_balanced_training_teacher_diagnostics_not_independent_object_truth",
+        "evaluation_contract": "aligned_component_object_state_v2",
+        "motion_target": "training_identical_relation_component_motion",
+        "visibility_target": "explicit_state_visible_vs_occluded",
+        "presence_target": "identifiability_audit_requires_positive_and_negative_evidence",
         "checkpoint_version": CHECKPOINT_VERSION,
         "architecture": ARCHITECTURE,
         "training_git_commit": checkpoint["git_commit"],

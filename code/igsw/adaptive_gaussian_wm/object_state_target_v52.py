@@ -122,6 +122,29 @@ def _identity_term(prediction, teacher, config):
     return temporal + same + negative, temporal, same, negative
 
 
+def component_motion_targets(teacher):
+    """Build the relation-component motion target used by training and evaluation."""
+    relation = teacher.same_confidence.float()
+    relation_strength = relation.sum(dim=-1)
+    diagonal = torch.eye(
+        relation.shape[-1], device=relation.device, dtype=relation.dtype
+    )[None]
+    pooling = relation + diagonal * relation_strength[..., None]
+
+    motion_valid = teacher.motion_valid.float()
+    motion_pooling = pooling[:, None, :, :, None] * motion_valid[:, :, None]
+    motion_normalizer = motion_pooling.sum(dim=3).clamp_min(1e-6)
+    target_motion = torch.einsum(
+        "btpqh,btqhd->btphd", motion_pooling, teacher.motion.float()
+    )
+    target_motion = target_motion / motion_normalizer[..., None]
+    relation_known = (relation_strength > 0.0).float()
+    motion_weight = (motion_normalizer > 1e-6).float()
+    motion_weight = motion_weight * teacher.object_confidence[:, None, :, None]
+    motion_weight = motion_weight * relation_known[:, None, :, None]
+    return target_motion, motion_weight, relation_known
+
+
 def _motion_geometry_terms(prediction, teacher, evidence):
     relation = teacher.same_confidence.float()
     relation_strength = relation.sum(dim=-1)
@@ -138,20 +161,10 @@ def _motion_geometry_terms(prediction, teacher, evidence):
     )
     target_center = target_center / coordinate_normalizer[..., None]
 
-    motion_valid = teacher.motion_valid.float()
-    motion_pooling = pooling[:, None, :, :, None] * motion_valid[:, :, None]
-    motion_normalizer = motion_pooling.sum(dim=3).clamp_min(1e-6)
-    target_motion = torch.einsum(
-        "btpqh,btqhd->btphd", motion_pooling, teacher.motion.float()
-    )
-    target_motion = target_motion / motion_normalizer[..., None]
+    target_motion, motion_weight, relation_known = component_motion_targets(teacher)
     motion_error = F.smooth_l1_loss(
         prediction.motion.float(), target_motion, reduction="none"
     ).mean(dim=-1)
-    relation_known = (relation_strength > 0.0).float()
-    motion_weight = (motion_normalizer > 1e-6).float()
-    motion_weight = motion_weight * teacher.object_confidence[:, None, :, None]
-    motion_weight = motion_weight * relation_known[:, None, :, None]
     motion = weighted_mean(motion_error, motion_weight)
     center_error = F.smooth_l1_loss(
         prediction.center.float(), target_center, reduction="none"
