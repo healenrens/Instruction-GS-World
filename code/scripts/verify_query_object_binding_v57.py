@@ -195,6 +195,46 @@ def state_max_difference(first, second) -> float:
     return float(torch.stack(tensors).max().detach())
 
 
+def verify_history_gradients(
+    model,
+    features,
+    evidence,
+    relation,
+    batch,
+    config,
+    histories,
+    grid_hw,
+    amp_context,
+):
+    trainable = [
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+    gradient_norms = {}
+    for history in histories:
+        teacher = build_query_object_teacher_v57(
+            evidence, relation, config, observed_frames=history
+        )
+        with amp_context():
+            output = model(
+                features.patches[:, :history],
+                features.coordinates[:, :history],
+                features.valid[:, :history],
+                batch["frame_times"][:, :history],
+                teacher,
+                observed_evidence_prefix(evidence, history),
+                grid_hw,
+            )
+        output["loss"].backward()
+        missing = [name for name, parameter in trainable if parameter.grad is None]
+        require(not missing, f"v57 H={history} has unused parameters: {missing}")
+        grad_norm = clip_finite_grad_norm_(trainable, 5.0)
+        gradient_norms[str(history)] = float(grad_norm)
+        model.zero_grad(set_to_none=True)
+    return trainable, gradient_norms
+
+
 def main():
     args = parse_args()
     for name in (
@@ -269,17 +309,23 @@ def main():
             observed,
             features.grid_hw,
         )
-    output["loss"].backward()
-    trainable = [
-        (name, parameter)
-        for name, parameter in model.named_parameters()
-        if parameter.requires_grad
-    ]
-    missing = [name for name, parameter in trainable if parameter.grad is None]
-    require(not missing, f"v57 verifier found unused trainable parameters: {missing}")
-    grad_norm = clip_finite_grad_norm_(trainable, 5.0)
-    require(float(grad_norm) > 0.0, "v57 verifier produced zero gradient norm")
-    model.zero_grad(set_to_none=True)
+    trainable, history_gradient_norms = verify_history_gradients(
+        model,
+        features,
+        evidence,
+        build_trajectory_relation_teacher_v56(
+            evidence, config, batch["frame_times"]
+        ),
+        batch,
+        config,
+        histories,
+        features.grid_hw,
+        amp_context,
+    )
+    require(
+        history_gradient_norms[str(history)] > 0.0,
+        "v57 verifier produced zero gradient norm for its trainable probe",
+    )
     model.eval()
     future_swapped_batch = dict(batch)
     future_swapped_rgb = batch["video_rgb"].clone()
@@ -335,7 +381,8 @@ def main():
         "student_future_rgb_swap_max_difference": student_difference,
         "teacher_future_swap_difference": teacher_difference,
         "binding_loss": float(output["loss"].detach()),
-        "binding_gradient_norm": float(grad_norm),
+        "binding_gradient_norm": history_gradient_norms[str(history)],
+        "history_gradient_norms": history_gradient_norms,
         "trainable_parameter_tensors": len(trainable),
         "dynamic_head_trainable": False,
         "historical_checkpoint_used": False,

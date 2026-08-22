@@ -192,6 +192,34 @@ def main():
         raise RuntimeError("v57 prompt tracks leaked into held-out targets")
 
     model = QueryObjectBindingModel(config)
+    trainable = [
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+    for history in range(1, observed_frames + 1):
+        history_teacher = build_query_object_teacher_v57(
+            evidence, relation, config, observed_frames=history
+        )
+        output = model(
+            features.patches[:, :history],
+            features.coordinates[:, :history],
+            features.valid[:, :history],
+            frame_times[:, :history],
+            history_teacher,
+            observed_evidence_prefix(evidence, history),
+            grid_hw,
+        )
+        output["loss"].backward()
+        missing = [name for name, parameter in trainable if parameter.grad is None]
+        if missing:
+            raise RuntimeError(
+                f"v57 H={history} has unused trainable parameters: {missing}"
+            )
+        gradients = [parameter.grad for _, parameter in trainable]
+        if not all(bool(torch.isfinite(value).all()) for value in gradients):
+            raise RuntimeError(f"v57 H={history} has non-finite gradients")
+        model.zero_grad(set_to_none=True)
     output = model(
         observed_features.patches,
         observed_features.coordinates,
@@ -201,13 +229,6 @@ def main():
         observed_evidence,
         grid_hw,
     )
-    output["loss"].backward()
-    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    gradients = [parameter.grad for parameter in trainable]
-    if any(value is None for value in gradients):
-        raise RuntimeError("v57 student has unused trainable parameters")
-    if not gradients or not all(bool(torch.isfinite(value).all()) for value in gradients):
-        raise RuntimeError("v57 student gradients are missing or non-finite")
     primary = output["primary"]
 
     swapped_relation = TrajectoryRelationTeacher(
@@ -257,7 +278,7 @@ def main():
         "heldout_negative_fraction": float(contract["heldout_negative_fraction"]),
         "student_teacher_swap_max_difference": causal_difference,
         "teacher_swap_max_difference": teacher_difference,
-        "gradient_tensor_count": len(gradients),
+        "gradient_tensor_count": len(trainable),
         "dynamic_head_trainable": any(
             parameter.requires_grad for parameter in model.encoder.dynamic.parameters()
         ),

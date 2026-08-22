@@ -128,8 +128,9 @@ class QueryConditionedObjectStateEncoder(nn.Module):
         dynamic = self.dynamic(
             torch.cat((pooled_state, delta, geometry), dim=-1)
         )
+        identity_state = pooled_state.mean(dim=1).float() + query.float()
         identity = F.normalize(
-            self.identity(pooled_state.mean(dim=1).float()), dim=-1, eps=1e-6
+            self.identity(identity_state), dim=-1, eps=1e-6
         )
         visibility = torch.sigmoid(self.visibility(pooled_state).squeeze(-1).float())
         pooled_semantic = torch.einsum(
