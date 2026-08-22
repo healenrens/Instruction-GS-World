@@ -22,12 +22,18 @@ from igsw.adaptive_gaussian_wm.experiment_tracking import (  # noqa: E402
     init_wandb_tracker,
     validate_wandb_arguments,
 )
-from igsw.adaptive_gaussian_wm.frozen_video_encoder import FrozenDinoVideoRuntime  # noqa: E402
-from igsw.adaptive_gaussian_wm.group_balanced_sampler import build_training_sampler  # noqa: E402
+from igsw.adaptive_gaussian_wm.frozen_video_encoder import (  # noqa: E402
+    FrozenDinoVideoRuntime,
+)
+from igsw.adaptive_gaussian_wm.group_balanced_sampler import (  # noqa: E402
+    build_training_sampler,
+)
 from igsw.adaptive_gaussian_wm.multisource_point_track_dataset import (  # noqa: E402
     MultiSourceRobotVideoDataset,
 )
-from igsw.adaptive_gaussian_wm.point_track_teacher import FrozenPointTrackerRuntime  # noqa: E402
+from igsw.adaptive_gaussian_wm.point_track_teacher import (  # noqa: E402
+    FrozenPointTrackerRuntime,
+)
 from igsw.adaptive_gaussian_wm.train_runtime import cosine_schedule  # noqa: E402
 from igsw.adaptive_gaussian_wm.v56_checkpointing import (  # noqa: E402
     restore_rng_state,
@@ -38,6 +44,9 @@ from igsw.adaptive_gaussian_wm.v56_config import (  # noqa: E402
     CHECKPOINT_VERSION,
     STAGE,
     VerifiedRelationObjectStateConfig,
+)
+from igsw.adaptive_gaussian_wm.v56_data_contract import (  # noqa: E402
+    audit_decode_frontier,
 )
 from igsw.adaptive_gaussian_wm.v56_training_loop import train_v56  # noqa: E402
 from igsw.adaptive_gaussian_wm.verified_relation_object_state_v56 import (  # noqa: E402
@@ -58,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", default="")
     parser.add_argument("--chunk_lengths", default="3,4,6,8")
     parser.add_argument("--temporal_step_ms", default="100,200,400")
+    parser.add_argument("--audit_chunk_lengths", default="4,8")
     parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--grad_accum", type=int, required=True)
     parser.add_argument("--target_global_batch", type=int, default=512)
@@ -140,6 +150,7 @@ def read_gate(args) -> dict:
         "tracker_checkpoint": args.tracker_checkpoint,
         "chunk_lengths": args.chunk_lengths,
         "temporal_step_ms": args.temporal_step_ms,
+        "audit_chunk_lengths": args.audit_chunk_lengths,
         "amp": args.amp,
         "historical_checkpoint_used": False,
         "dynamics_present": False,
@@ -163,6 +174,8 @@ def read_gate(args) -> dict:
         raise ValueError("v56 independent objective gates did not pass")
     if report.get("real_multisource_target_audit", {}).get("status") != "passed":
         raise ValueError("v56 real multisource target audit did not pass")
+    if report.get("decode_frontier_audit", {}).get("status") != "passed":
+        raise ValueError("v56 decode frontier audit did not pass")
     return report
 
 
@@ -207,6 +220,14 @@ def main() -> None:
         args.max_train_items,
         args.seed,
     )
+    decode_audit = audit_decode_frontier(
+        args.decode_report,
+        args.data_index,
+        args.seed,
+        dataset.source_names,
+    )
+    if decode_audit["status"] != "passed":
+        raise ValueError(f"v56 decode frontier differs: {decode_audit}")
     assert_same_paths(dataset.paths, context, dataset.contract_label)
     model = VerifiedRelationObjectStateModel(config).to(device)
     if checkpoint is not None:
@@ -298,6 +319,7 @@ def main() -> None:
             "config": config.to_dict(),
             "args": vars(args),
             "startup_gate": gate,
+            "decode_frontier_audit": decode_audit,
             **source_summary,
         }
         with open(contract_path, "w", encoding="utf-8") as handle:

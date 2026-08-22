@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
 import json
 import os
 import sys
+from contextlib import nullcontext
 
 import torch
 from torch.utils.data import default_collate
@@ -15,8 +15,12 @@ from torch.utils.data import default_collate
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
-from igsw.adaptive_gaussian_wm.frozen_video_encoder import FrozenDinoVideoRuntime  # noqa: E402
-from igsw.adaptive_gaussian_wm.gradient_health import clip_finite_grad_norm_  # noqa: E402
+from igsw.adaptive_gaussian_wm.frozen_video_encoder import (  # noqa: E402
+    FrozenDinoVideoRuntime,
+)
+from igsw.adaptive_gaussian_wm.gradient_health import (  # noqa: E402
+    clip_finite_grad_norm_,
+)
 from igsw.adaptive_gaussian_wm.multisource_point_track_dataset import (  # noqa: E402
     MultiSourceRobotVideoDataset,
 )
@@ -24,7 +28,9 @@ from igsw.adaptive_gaussian_wm.point_track_teacher import (  # noqa: E402
     FrozenPointTrackerRuntime,
     PointTrackEvidence,
 )
-from igsw.adaptive_gaussian_wm.temporal_object_dataset import parse_int_choices  # noqa: E402
+from igsw.adaptive_gaussian_wm.temporal_object_dataset import (  # noqa: E402
+    parse_int_choices,
+)
 from igsw.adaptive_gaussian_wm.trajectory_relation_teacher_v56 import (  # noqa: E402
     build_trajectory_relation_teacher_v56,
 )
@@ -37,6 +43,9 @@ from igsw.adaptive_gaussian_wm.v56_data_audit import (  # noqa: E402
     factorization_probe,
     summarize_real_target_audit,
     teacher_batch_metrics,
+)
+from igsw.adaptive_gaussian_wm.v56_data_contract import (  # noqa: E402
+    audit_decode_frontier,
 )
 from igsw.adaptive_gaussian_wm.v56_independent_gates import (  # noqa: E402
     run_v56_independent_gates,
@@ -309,6 +318,15 @@ def main() -> None:
         max_items=0,
         seed=args.seed,
     )
+    decode_audit = audit_decode_frontier(
+        args.decode_report,
+        args.data_index,
+        args.seed,
+        dataset.source_names,
+    )
+    require(
+        decode_audit["status"] == "passed", f"v56 decode audit failed: {decode_audit}"
+    )
     dino = FrozenDinoVideoRuntime(
         config,
         device,
@@ -381,6 +399,7 @@ def main() -> None:
         "transient_pseudo_labels_used": False,
         "relation_conditioned_cycle_used": True,
         "positive_only_object_support_used": True,
+        "decode_frontier_audit": decode_audit,
         "real_multisource_target_audit": data_audit,
         "independent_objective_gates": independent,
         **structure,

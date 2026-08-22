@@ -58,6 +58,7 @@ def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
         "data_index",
         "chunk_lengths",
         "temporal_step_ms",
+        "audit_chunk_lengths",
         "batch",
         "grad_accum",
         "target_global_batch",

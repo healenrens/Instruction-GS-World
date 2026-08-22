@@ -103,6 +103,7 @@ ARGS=(
   --tracker_checkpoint "${TRACKER_CHECKPOINT}"
   --chunk_lengths "${CHUNK_LENGTHS:-3,4,6,8}"
   --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400}"
+  --audit_chunk_lengths "${AUDIT_CHUNK_LENGTHS:-4,8}"
   --batch "${BATCH_PER_GPU}" --grad_accum "${GRAD_ACCUM}"
   --target_global_batch "${TARGET_GLOBAL_BATCH}"
   --tracker_batch_per_rank "${TRACKER_BATCH_PER_RANK}"
