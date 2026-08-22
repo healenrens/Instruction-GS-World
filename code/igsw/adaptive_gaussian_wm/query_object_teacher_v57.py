@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
+from .point_track_teacher import PointTrackEvidence
 from .trajectory_relation_teacher import TrajectoryRelationTeacher
 
 
@@ -42,6 +43,7 @@ def build_query_object_teacher_v57(
     relation: TrajectoryRelationTeacher,
     config,
     current_index: int = -1,
+    observed_frames: int | None = None,
 ) -> QueryObjectTeacher:
     """Select one current-frame query and reserve related tracks for supervision.
 
@@ -53,7 +55,12 @@ def build_query_object_teacher_v57(
     coordinates = evidence.coordinates.float()
     visibility = evidence.visibility.bool()
     batch, frames, points = visibility.shape
-    current = current_index % frames
+    if observed_frames is not None:
+        if not 1 <= observed_frames < frames:
+            raise ValueError("v57 observed prefix must leave teacher-only future frames")
+        current = observed_frames - 1
+    else:
+        current = current_index % frames
     current_visible = visibility[:, current]
     relation_degree = relation.same_confidence.amax(dim=-1)
     query_score = relation.object_confidence.float() * relation_degree
@@ -111,20 +118,52 @@ def build_query_object_teacher_v57(
         heldout_track_mask=heldout.detach(),
         same_target=query_same.detach(),
         different_target=query_different.detach(),
-        track_visibility=visibility.detach(),
+        track_visibility=visibility[:, : current + 1].detach(),
     )
 
 
 def query_teacher_contract_metrics(teacher: QueryObjectTeacher) -> dict[str, torch.Tensor]:
     heldout_positive = teacher.heldout_track_mask & (teacher.same_target > 0.0)
     heldout_negative = teacher.heldout_track_mask & (teacher.different_target > 0.0)
+    positive_valid = heldout_positive.any(dim=-1)
+    negative_valid = heldout_negative.any(dim=-1)
+    trainable = (
+        teacher.query_valid
+        & teacher.alternate_valid
+        & teacher.negative_valid
+        & positive_valid
+        & negative_valid
+    )
     return {
         "query_valid_fraction": teacher.query_valid.float().mean(),
         "alternate_valid_fraction": teacher.alternate_valid.float().mean(),
         "negative_valid_fraction": teacher.negative_valid.float().mean(),
         "heldout_positive_fraction": heldout_positive.float().mean(),
         "heldout_negative_fraction": heldout_negative.float().mean(),
+        "heldout_positive_sample_fraction": positive_valid.float().mean(),
+        "heldout_negative_sample_fraction": negative_valid.float().mean(),
+        "trainable_sample_fraction": trainable.float().mean(),
+        "heldout_positive_count_mean": heldout_positive.float().sum(dim=-1).mean(),
+        "heldout_negative_count_mean": heldout_negative.float().sum(dim=-1).mean(),
+        "same_confidence_mean": teacher.same_target.float().mean(),
+        "different_confidence_mean": teacher.different_target.float().mean(),
         "prompt_heldout_overlap": (
             teacher.prompt_track_mask & teacher.heldout_track_mask
         ).float().sum(),
     }
+
+
+def observed_evidence_prefix(
+    evidence: PointTrackEvidence, observed_frames: int
+) -> PointTrackEvidence:
+    if not 1 <= observed_frames <= evidence.visibility.shape[1]:
+        raise ValueError("v57 observed evidence prefix is outside the clip")
+    pair_frames = max(observed_frames - 1, 0)
+    return PointTrackEvidence(
+        coordinates=evidence.coordinates[:, :observed_frames],
+        visibility=evidence.visibility[:, :observed_frames],
+        residual_flow=evidence.residual_flow[:, :pair_frames],
+        motion_salience=evidence.motion_salience[:, :pair_frames],
+        query_times=evidence.query_times,
+        sampled_features=evidence.sampled_features[:, :observed_frames],
+    )

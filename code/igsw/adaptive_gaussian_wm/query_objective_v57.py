@@ -50,6 +50,7 @@ def query_object_binding_terms(
         primary_tracks, teacher
     )
     alternate_weight = teacher.alternate_valid.float()
+    query_weight = teacher.query_valid.float()
     identity_agreement = 1.0 - (primary.identity * alternate.identity).sum(dim=-1)
     identity_agreement = _weighted_mean(identity_agreement, alternate_weight)
     support_agreement = 1.0 - _support_overlap(
@@ -69,11 +70,14 @@ def query_object_binding_terms(
 
     semantic_delta = primary.pooled_semantic[:, 1:] - primary.pooled_semantic[:, :-1]
     visible_pair = primary.visibility[:, 1:] * primary.visibility[:, :-1]
+    visible_pair = visible_pair * query_weight[:, None]
     semantic_consistency = _weighted_mean(
         semantic_delta.square().mean(dim=-1), visible_pair
     )
     trace = primary.covariance.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
-    compactness = _weighted_mean(trace, primary.visibility)
+    compactness = _weighted_mean(
+        trace, primary.visibility * query_weight[:, None]
+    )
     total = (
         config.heldout_track_weight * relation
         + config.seed_identity_weight * identity_agreement

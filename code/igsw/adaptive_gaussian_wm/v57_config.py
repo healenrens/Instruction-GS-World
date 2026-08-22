@@ -12,7 +12,13 @@ STAGE = "single_query_binding"
 
 @dataclass(frozen=True)
 class QueryConditionedObjectStateConfig:
+    dino_model_name: str = "vit_large_patch14_dinov2.lvd142m"
+    dino_image_size: int = 224
     patch_dim: int = 1024
+    tracker_image_size: int = 224
+    tracker_grid_side: int = 8
+    tracker_anchor_fractions: tuple[float, ...] = (0.0, 0.5)
+    dynamic_horizons: tuple[int, ...] = (1, 2, 4)
     model_dim: int = 256
     identity_dim: int = 128
     dynamic_dim: int = 128
@@ -27,6 +33,16 @@ class QueryConditionedObjectStateConfig:
     spatial_sigma: float = 0.35
     identity_negative_margin: float = 0.20
     support_overlap_margin: float = 0.20
+    group_distance_sigma: float = 0.12
+    group_locality_sigma: float = 0.40
+    relation_motion_sigma: float = 0.08
+    relation_confidence_floor: float = 0.10
+    object_motion_floor: float = 0.12
+
+    teacher_future_frames: int = 4
+    minimum_condition_query_fraction: float = 0.25
+    minimum_condition_trainable_fraction: float = 0.10
+    minimum_aggregate_trainable_fraction: float = 0.25
 
     heldout_track_weight: float = 1.0
     seed_identity_weight: float = 0.5
@@ -42,6 +58,11 @@ class QueryConditionedObjectStateConfig:
             self.identity_dim,
             self.dynamic_dim,
             self.heads,
+            self.dino_image_size,
+            self.tracker_image_size,
+            self.tracker_grid_side,
+            self.teacher_future_frames,
+            *self.dynamic_horizons,
         )
         if min(dimensions) < 1:
             raise ValueError("v57 dimensions must be positive")
@@ -54,11 +75,32 @@ class QueryConditionedObjectStateConfig:
             self.minimum_query_relation_confidence,
             self.identity_negative_margin,
             self.support_overlap_margin,
+            self.relation_confidence_floor,
+            self.object_motion_floor,
+            self.minimum_condition_query_fraction,
+            self.minimum_condition_trainable_fraction,
+            self.minimum_aggregate_trainable_fraction,
         )
         if min(probabilities) < 0.0 or max(probabilities) > 1.0:
             raise ValueError("v57 probability-like values must stay within [0,1]")
-        if min(self.support_temperature, self.spatial_sigma) <= 0.0:
+        scales = (
+            self.support_temperature,
+            self.spatial_sigma,
+            self.group_distance_sigma,
+            self.group_locality_sigma,
+            self.relation_motion_sigma,
+        )
+        if min(scales) <= 0.0:
             raise ValueError("v57 temperatures and scales must be positive")
+        if not self.tracker_anchor_fractions:
+            raise ValueError("v57 requires tracker anchor fractions")
+        if (
+            min(self.tracker_anchor_fractions) < 0.0
+            or max(self.tracker_anchor_fractions) > 1.0
+        ):
+            raise ValueError("v57 tracker anchor fractions must stay within [0,1]")
+        if tuple(sorted(set(self.dynamic_horizons))) != self.dynamic_horizons:
+            raise ValueError("v57 dynamic horizons must be unique and increasing")
         weights = (
             self.heldout_track_weight,
             self.seed_identity_weight,
@@ -72,3 +114,7 @@ class QueryConditionedObjectStateConfig:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @property
+    def tracker_queries(self) -> int:
+        return self.tracker_grid_side**2 * len(self.tracker_anchor_fractions)

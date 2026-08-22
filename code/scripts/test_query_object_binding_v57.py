@@ -13,12 +13,15 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
 from igsw.adaptive_gaussian_wm.point_track_teacher import PointTrackEvidence  # noqa: E402
+from igsw.adaptive_gaussian_wm.query_object_binding_v57 import (  # noqa: E402
+    QueryObjectBindingModel,
+)
 from igsw.adaptive_gaussian_wm.query_object_state_v57 import (  # noqa: E402
-    QueryConditionedObjectStateEncoder,
     QueryObjectState,
 )
 from igsw.adaptive_gaussian_wm.query_object_teacher_v57 import (  # noqa: E402
     build_query_object_teacher_v57,
+    observed_evidence_prefix,
     query_teacher_contract_metrics,
 )
 from igsw.adaptive_gaussian_wm.query_objective_v57 import (  # noqa: E402
@@ -166,7 +169,20 @@ def main():
     )
     config.validate()
     features, frame_times, evidence, relation, grid_hw, point_indices = synthetic_inputs(config)
-    teacher = build_query_object_teacher_v57(evidence, relation, config)
+    observed_frames = 2
+    teacher = build_query_object_teacher_v57(
+        evidence, relation, config, observed_frames=observed_frames
+    )
+    observed_evidence = observed_evidence_prefix(evidence, observed_frames)
+    observed_features = type(
+        "Features",
+        (),
+        {
+            "patches": features.patches[:, :observed_frames],
+            "coordinates": features.coordinates[:, :observed_frames],
+            "valid": features.valid[:, :observed_frames],
+        },
+    )()
     contract = query_teacher_contract_metrics(teacher)
     if not bool(teacher.query_valid.all()):
         raise RuntimeError("v57 synthetic query selection failed")
@@ -175,20 +191,24 @@ def main():
     if float(contract["prompt_heldout_overlap"]) != 0.0:
         raise RuntimeError("v57 prompt tracks leaked into held-out targets")
 
-    model = QueryConditionedObjectStateEncoder(config)
-    primary = model(
-        features.patches,
-        features.coordinates,
-        features.valid,
-        frame_times,
-        teacher.query_coordinate,
+    model = QueryObjectBindingModel(config)
+    output = model(
+        observed_features.patches,
+        observed_features.coordinates,
+        observed_features.valid,
+        frame_times[:, :observed_frames],
+        teacher,
+        observed_evidence,
+        grid_hw,
     )
-    loss = primary.identity.square().mean() + primary.dynamic.square().mean()
-    loss = loss + primary.support.mean() + primary.visibility.mean()
-    loss.backward()
-    gradients = [parameter.grad for parameter in model.parameters() if parameter.grad is not None]
+    output["loss"].backward()
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    gradients = [parameter.grad for parameter in trainable]
+    if any(value is None for value in gradients):
+        raise RuntimeError("v57 student has unused trainable parameters")
     if not gradients or not all(bool(torch.isfinite(value).all()) for value in gradients):
         raise RuntimeError("v57 student gradients are missing or non-finite")
+    primary = output["primary"]
 
     swapped_relation = TrajectoryRelationTeacher(
         **{
@@ -197,12 +217,14 @@ def main():
             "different_confidence": relation.same_confidence,
         }
     )
-    swapped_teacher = build_query_object_teacher_v57(evidence, swapped_relation, config)
-    repeated = model(
-        features.patches,
-        features.coordinates,
-        features.valid,
-        frame_times,
+    swapped_teacher = build_query_object_teacher_v57(
+        evidence, swapped_relation, config, observed_frames=observed_frames
+    )
+    repeated = model.encode(
+        observed_features.patches,
+        observed_features.coordinates,
+        observed_features.valid,
+        frame_times[:, :observed_frames],
         teacher.query_coordinate,
     )
     causal_difference = float(
@@ -215,7 +237,12 @@ def main():
         raise RuntimeError("v57 student/teacher causal boundary failed")
 
     falsification = objective_falsification(
-        config, features, evidence, teacher, grid_hw, point_indices
+        config,
+        observed_features,
+        observed_evidence,
+        teacher,
+        grid_hw,
+        point_indices,
     )
     report = {
         "status": "passed",
@@ -223,12 +250,17 @@ def main():
         "checkpoint_version": CHECKPOINT_VERSION,
         "student_reads_point_tracker": False,
         "teacher_uses_future_tracks": True,
+        "student_observed_frames": observed_frames,
+        "teacher_total_frames": evidence.visibility.shape[1],
         "prompt_heldout_overlap": float(contract["prompt_heldout_overlap"]),
         "heldout_positive_fraction": float(contract["heldout_positive_fraction"]),
         "heldout_negative_fraction": float(contract["heldout_negative_fraction"]),
         "student_teacher_swap_max_difference": causal_difference,
         "teacher_swap_max_difference": teacher_difference,
         "gradient_tensor_count": len(gradients),
+        "dynamic_head_trainable": any(
+            parameter.requires_grad for parameter in model.encoder.dynamic.parameters()
+        ),
         "objective_falsification": falsification,
     }
     print(json.dumps(report, sort_keys=True))
