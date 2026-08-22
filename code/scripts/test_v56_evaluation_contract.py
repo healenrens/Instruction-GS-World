@@ -43,6 +43,8 @@ def main() -> None:
         "decode_replacement_fraction",
         "causal_prefix_max_difference",
         "visible_mask(teacher)",
+        "runtime_preflight",
+        "with amp_context():",
     )
     missing = [name for name in required_teacher if name not in teacher + metrics]
     if missing:

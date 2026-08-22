@@ -148,11 +148,58 @@ def evaluate_condition(args, model, loader, dino, tracker, device, amp_context):
                 batch_items,
             )
             if aggregate.items <= args.causal_items:
-                difference = causal_prefix_difference(
-                    model, features, batch["frame_times"], output["state"]
-                )
+                with amp_context():
+                    difference = causal_prefix_difference(
+                        model, features, batch["frame_times"], output["state"]
+                    )
                 aggregate.causal_max = max(aggregate.causal_max, difference)
     return finalize_v56_metrics(aggregate, ridge_relative_gain)
+
+
+def runtime_preflight(args, model, dataset, dino, tracker, device, amp_context):
+    length = int(args.chunk_lengths.split(",")[0])
+    indices = dataset.balanced_source_evaluation_indices(0, 2)
+    loader = DataLoader(
+        FixedEvaluationDataset(dataset, indices, length),
+        batch_size=2,
+        shuffle=False,
+        num_workers=0,
+    )
+    with torch.no_grad():
+        batch = move_to_device(next(iter(loader)), device)
+        features = dino(batch)
+        evidence = tracker(batch, features.patches, features.grid_hw)
+        teacher_indices = torch.arange(len(features.patches), device=device)
+        with amp_context():
+            output = model(
+                features.patches,
+                features.coordinates,
+                features.valid,
+                batch["frame_times"],
+                evidence,
+                teacher_indices,
+                features.grid_hw,
+            )
+        collect_v56_diagnostics(
+            model,
+            features,
+            evidence,
+            output,
+            amp_context,
+            batch["requested_sequence_index"],
+        )
+        with amp_context():
+            causal = causal_prefix_difference(
+                model, features, batch["frame_times"], output["state"]
+            )
+    report = {
+        "status": "passed",
+        "items": len(features.patches),
+        "history_length": length,
+        "causal_prefix_max_difference": causal,
+    }
+    print(json.dumps({"runtime_preflight": report}, sort_keys=True), flush=True)
+    return report
 
 
 def condition_checks(metrics):
@@ -260,6 +307,9 @@ def main() -> None:
         args.temporal_step_ms,
         0,
         args.seed,
+    )
+    runtime_preflight(
+        args, model, dataset, dino, tracker, device, amp_context
     )
     run = init_wandb(args, checkpoint)
     conditions = {}
