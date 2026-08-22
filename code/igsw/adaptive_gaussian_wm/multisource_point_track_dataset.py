@@ -280,6 +280,28 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
     def __len__(self) -> int:
         return self._length
 
+    def balanced_source_evaluation_indices(
+        self, source_index: int, count: int
+    ) -> tuple[int, ...]:
+        if not 0 <= source_index < len(self.sources) or count < 1:
+            raise ValueError("source evaluation request is invalid")
+        spans = [
+            span
+            for span, group_source in zip(
+                self.sampling_group_spans, self._group_source_indices
+            )
+            if group_source == source_index
+        ]
+        if not spans:
+            raise ValueError(f"source {source_index} has no evaluation group")
+        rounds = (count + len(spans) - 1) // len(spans)
+        indices = []
+        for position in range(count):
+            left, right = spans[position % len(spans)]
+            fraction = (position // len(spans) + 0.5) / rounds
+            indices.append(min(right - 1, left + int((right - left) * fraction)))
+        return tuple(indices)
+
     def _full_index(self, index: int) -> int:
         if not 0 <= index < self._length:
             raise IndexError(index)
