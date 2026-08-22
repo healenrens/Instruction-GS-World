@@ -288,11 +288,6 @@ def collect_v56_diagnostics(
     group = groups[:, None, None].expand_as(teacher.visibility)
     horizons = len(model.config.dynamic_horizons)
     probes = {
-        "raw_track_motion_feature": mapped_dynamic[:, :, :, None]
-        .expand(-1, -1, -1, horizons, -1)
-        .reshape(-1, mapped_dynamic.shape[-1])
-        .detach()
-        .cpu(),
         "raw_track_motion_target": teacher.motion.reshape(-1, 2).detach().cpu(),
         "raw_track_motion_weight": (
             teacher.motion_valid.float() * teacher.object_confidence[:, None, :, None]
@@ -316,7 +311,7 @@ def collect_v56_diagnostics(
     }
     probes.update(
         aligned_state_probe_tensors(
-            conditional,
+            mapped_dynamic,
             output,
             groups,
             motion_active_threshold,
@@ -368,7 +363,7 @@ def finalize_v56_metrics(aggregate, ridge_relative_gain):
     )
     probes = {name: torch.cat(values) for name, values in aggregate.probes.items()}
     metrics["raw_track_motion_probe_relative_gain"] = ridge_relative_gain(
-        probes["raw_track_motion_feature"], probes["raw_track_motion_target"],
+        probes["component_motion_feature"], probes["raw_track_motion_target"],
         probes["raw_track_motion_weight"], probes["raw_track_motion_group"]
     )
     metrics["dynamic_visibility_probe_relative_gain"] = ridge_relative_gain(

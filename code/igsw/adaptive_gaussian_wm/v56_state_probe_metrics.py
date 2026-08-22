@@ -8,18 +8,14 @@ from .object_state_target_v52 import component_motion_targets
 
 
 def aligned_state_probe_tensors(
-    conditional: torch.Tensor,
+    mapped_dynamic: torch.Tensor,
     output: dict,
     groups: torch.Tensor,
     motion_active_threshold: float,
 ) -> dict[str, torch.Tensor]:
     teacher = output["teacher"]
     prediction = output["prediction"]
-    state = output["state"]
     target_motion, motion_weight, _ = component_motion_targets(teacher)
-    mapped_dynamic = torch.einsum(
-        "btpk,btkd->btpd", conditional.float(), state["dynamic"].float()
-    )
     horizons = target_motion.shape[-2]
     motion_group = groups[:, None, None, None].expand_as(motion_weight)
     active = target_motion.norm(dim=-1) >= motion_active_threshold
