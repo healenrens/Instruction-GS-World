@@ -30,6 +30,7 @@ def audit_decode_frontier(
     source_counts = {name: 0 for name in source_names}
     rank_samples_consistent = True
     rank_batches_consistent = True
+    rank_source_totals_consistent = True
     report_sources_exact = True
     for report in rank_reports:
         batches = int(report["batches"])
@@ -37,6 +38,9 @@ def audit_decode_frontier(
         counts = report["source_counts"]
         rank_batches_consistent &= batches == batches_per_rank
         rank_samples_consistent &= samples == batches * batch_size
+        rank_source_totals_consistent &= (
+            sum(int(value) for value in counts.values()) == samples
+        )
         report_sources_exact &= set(counts) == set(source_names)
         for source in source_names:
             source_counts[source] += int(counts.get(source, 0))
@@ -62,6 +66,7 @@ def audit_decode_frontier(
         "rank_set_is_complete": observed_ranks == expected_ranks,
         "rank_batches_are_complete": rank_batches_consistent,
         "rank_sample_counts_are_consistent": rank_samples_consistent,
+        "rank_source_totals_are_consistent": rank_source_totals_consistent,
         "rank_source_tables_match_index": report_sources_exact,
         "decoded_sample_total_is_consistent": (
             decoded_samples == sum(int(report["samples"]) for report in rank_reports)
