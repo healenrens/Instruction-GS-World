@@ -140,10 +140,21 @@ def _root_metrics(track_assignment, teacher):
     root_mass = (track_assignment * track_weight[..., None]).sum(dim=1)
     share = root_mass / root_mass.sum(dim=-1, keepdim=True).clamp_min(1e-6)
     entropy = -(share * share.clamp_min(1e-6).log()).sum(dim=-1)
+    effective = entropy.exp()
+    maximum = share.amax(dim=-1)
+    negative_supported = teacher.different_confidence.amax(dim=(-2, -1)) > 0.0
+    usable = negative_supported.float()
     return {
-        "verified_effective_roots": entropy.exp().mean(),
-        "verified_maximum_root_share": share.amax(dim=-1).mean(),
+        "verified_effective_roots": effective.mean(),
+        "verified_maximum_root_share": maximum.mean(),
         "verified_supported_roots": (root_mass > 0.05).float().sum(dim=-1).mean(),
+        "verified_negative_supported_effective_roots": (
+            (effective * usable).sum() / usable.sum().clamp_min(1.0)
+        ),
+        "verified_negative_supported_maximum_root_share": (
+            (maximum * usable).sum() / usable.sum().clamp_min(1.0)
+        ),
+        "verified_negative_supported_sample_fraction": usable.mean(),
     }
 
 

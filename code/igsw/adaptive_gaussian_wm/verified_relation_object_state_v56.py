@@ -38,11 +38,20 @@ class VerifiedRelationObjectStateModel(RelationSemanticObjectStateModel):
         same_known = (teacher.same_confidence > 0.0) & off_diagonal
         different_known = (teacher.different_confidence > 0.0) & off_diagonal
         relation_known = same_known | different_known
+        sample_same = same_known.any(dim=(-2, -1))
+        sample_different = different_known.any(dim=(-2, -1))
         output["parts"].update(
             {
                 "teacher_same_edge_fraction": same_known.float().mean(),
                 "teacher_different_edge_fraction": different_known.float().mean(),
                 "teacher_known_relation_fraction": relation_known.float().mean(),
+                "teacher_sample_same_relation_fraction": sample_same.float().mean(),
+                "teacher_sample_different_relation_fraction": (
+                    sample_different.float().mean()
+                ),
+                "teacher_sample_signed_relation_fraction": (
+                    (sample_same & sample_different).float().mean()
+                ),
                 "teacher_negative_track_fraction": (
                     teacher.different_confidence.amax(dim=-1) > 0.0
                 )

@@ -138,7 +138,7 @@ def run_v56_independent_gates(config, device: torch.device) -> dict:
         "counterfactual_attribution": attributed,
         "reasonable_state_finite": bool(torch.isfinite(reference["target_total"])),
         "reasonable_uses_multiple_roots": (
-            float(reference["verified_effective_roots"]) > 1.5
+            float(reference["verified_negative_supported_effective_roots"]) > 1.5
         ),
         "collapse_baseline_is_worse": (
             float(reference["relation_collapse_margin"])
@@ -154,5 +154,11 @@ def run_v56_independent_gates(config, device: torch.device) -> dict:
         "attribution": attribution,
         "expected_attribution": expected,
         "reasonable_effective_roots": float(reference["verified_effective_roots"]),
+        "reasonable_negative_supported_effective_roots": float(
+            reference["verified_negative_supported_effective_roots"]
+        ),
+        "reasonable_negative_supported_maximum_root_share": float(
+            reference["verified_negative_supported_maximum_root_share"]
+        ),
         "reasonable_collapse_margin": float(reference["relation_collapse_margin"]),
     }

@@ -154,6 +154,8 @@ def structural_contract(model, features, evidence, output):
         "target_object_support",
         "target_relation_collapse_margin",
         "target_verified_effective_roots",
+        "target_verified_negative_supported_effective_roots",
+        "target_verified_negative_supported_maximum_root_share",
     }
     missing = required.difference(output["parts"])
     require(not missing, f"v56 metrics are missing: {missing}")
