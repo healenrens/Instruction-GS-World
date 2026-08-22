@@ -35,6 +35,7 @@ run_on_selected_gpu() {
 }
 
 teacher_evaluation() {
+  "${PY}" "${ROOT}/code/scripts/test_v56_evaluation_contract.py" || return $?
   "${PY}" "${ROOT}/code/scripts/test_v56_evaluation_tensor_contract.py" || return $?
   run_on_selected_gpu "${PY}" \
     "${ROOT}/code/scripts/evaluate_verified_relation_object_state_v56.py" \
