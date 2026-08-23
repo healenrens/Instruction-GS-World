@@ -36,8 +36,8 @@ audit_coverage() {
       --output "${COVERAGE_REPORT}" --source_revision "${SOURCE_REVISION}" \
       --history_lengths "${HISTORY_LENGTHS:-1,2,3,4}" \
       --teacher_future_frames "${TEACHER_FUTURE_FRAMES:-4}" \
-      --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400}" \
-      --samples_per_condition "${COVERAGE_SAMPLES_PER_CONDITION:-8}" \
+      --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400,800}" \
+      --samples_per_condition "${COVERAGE_SAMPLES_PER_CONDITION:-16}" \
       --audit_batch "${COVERAGE_AUDIT_BATCH:-4}" \
       --dino_frame_batch "${VERIFY_DINO_FRAME_BATCH:-64}" --amp "${AMP:-bf16}" \
       --wandb_mode "${WANDB_MODE:-online}" \
@@ -58,7 +58,7 @@ verify_run() {
       --source_revision "${SOURCE_REVISION}" \
       --history_lengths "${HISTORY_LENGTHS:-1,2,3,4}" \
       --teacher_future_frames "${TEACHER_FUTURE_FRAMES:-4}" \
-      --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400}" \
+      --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400,800}" \
       --dino_frame_batch "${VERIFY_DINO_FRAME_BATCH:-32}" --amp "${AMP:-bf16}"
 }
 

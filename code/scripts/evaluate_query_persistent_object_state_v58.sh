@@ -28,7 +28,7 @@ exec "${PY}" "${ROOT}/code/scripts/evaluate_query_persistent_object_state_v58.py
   --tracker_checkpoint "${TRACKER_CHECKPOINT}" --output "${EVAL_REPORT}" \
   --history_lengths "${HISTORY_LENGTHS:-1,2,3,4}" \
   --teacher_future_frames "${TEACHER_FUTURE_FRAMES:-4}" \
-  --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400}" \
+  --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400,800}" \
   --samples_per_condition "${EVAL_SAMPLES_PER_CONDITION:-64}" \
   --batch "${EVAL_BATCH:-8}" --dino_frame_batch "${EVAL_DINO_FRAME_BATCH:-96}" \
   --amp "${AMP:-bf16}" --seed "${EVAL_SEED:-117}" \

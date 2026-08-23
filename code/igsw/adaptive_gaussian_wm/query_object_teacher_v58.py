@@ -41,6 +41,18 @@ def _gather_track(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     return values[batch, :, indices]
 
 
+def _enclosed_occlusion(visibility: torch.Tensor) -> torch.Tensor:
+    visible = visibility.bool()
+    empty = torch.zeros_like(visible[:, :1])
+    seen_before = torch.cat(
+        (empty, visible[:, :-1].cumsum(dim=1) > 0), dim=1
+    )
+    seen_after = torch.cat(
+        (visible[:, 1:].flip(1).cumsum(dim=1).flip(1) > 0, empty), dim=1
+    )
+    return (~visible) & seen_before & seen_after
+
+
 def build_query_persistent_teacher_v58(
     evidence: PointTrackEvidence,
     relation: TrajectoryRelationTeacher,
@@ -48,18 +60,22 @@ def build_query_persistent_teacher_v58(
     frame_times: torch.Tensor,
     observed_frames: int,
 ) -> QueryPersistentTeacher:
-    binding = build_query_object_teacher_v57(
-        evidence, relation, config, observed_frames=observed_frames
-    )
     observed = observed_evidence_prefix(evidence, observed_frames)
+    observed_visibility = observed.visibility.bool()
+    enclosed_occlusion = _enclosed_occlusion(observed_visibility)
+    preferred_query = enclosed_occlusion.any(dim=1)
+    binding = build_query_object_teacher_v57(
+        evidence,
+        relation,
+        config,
+        observed_frames=observed_frames,
+        preferred_query=preferred_query,
+    )
     visibility = _gather_track(observed.visibility, binding.query_index).bool()
     coordinates = _gather_track(observed.coordinates, binding.query_index).float()
     query_times = evidence.query_times.to(binding.query_index.device)
     query_time = query_times[binding.query_index]
-    frame = torch.arange(observed_frames, device=visibility.device)[None]
-    after_query = frame >= query_time[:, None]
-    seen_after = visibility.flip(1).cumsum(dim=1).flip(1) > 0
-    occluded = (~visibility) & after_query & seen_after & binding.query_valid[:, None]
+    occluded = _enclosed_occlusion(visibility) & binding.query_valid[:, None]
     known = (visibility | occluded) & binding.query_valid[:, None]
     unknown = binding.query_valid[:, None] & ~known
 

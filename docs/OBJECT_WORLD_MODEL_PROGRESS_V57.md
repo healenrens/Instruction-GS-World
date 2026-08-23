@@ -646,3 +646,13 @@ $$
 `all_visibility_zero` 和 `all_visibility_one` 均为 `5.8163`。这只验证 objective 与梯度契约，
 尚未验证六源 coverage、真实 GPU startup、长训收敛或 held G2 指标，因此当前状态仍是
 “静态与 synthetic tensor gate 已通过，等待真实数据 Gate”，不是“v58 已通过 G2”。
+
+### 2026-08-23：v58 Real Coverage 失败与 Tracker 时序契约修正
+
+- **失败证据**：W&B run `01ueptqv`，名称 `query_object_coverage_v58_837ab37`，状态 `finished`，但 gate status 为 `failed`。对应服务器报告为 `/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/v58_gates/837ab37e4245ba0bd7143034d9545028582d6178_coverage.json`。
+- **已通过部分**：六数据源乘以 H=1,2,3,4 的 24 个 condition 全部存在；每个 condition 都有 query coverage 和 trainable example；prompt/heldout disjoint、aggregate trainable coverage、future-track teacher sensitivity 均通过。aggregate trainable fraction 为 `0.9895833`，query valid fraction 为 `1.0`。
+- **唯一失败项**：`aggregate_contains_occlusion_candidates=false`；所有 condition 的 `lifecycle_occluded_candidate_fraction` 都为 `0`，aggregate visible fraction 为 `1.0`，unknown fraction 为 `0`。后续 verifier 因 coverage report 的 `status=failed` 拒绝启动，这是正确的阻断行为。
+- **根因**：旧 tracker 只做 forward tracking，且 query anchor 由完整 clip 的固定比例产生，没有保证在 observed current frame 发出 query。v58 却要求从当前 query 向历史维护 persistent state，因此原数据路径无法可靠观测“历史可见、中间不可见、当前重新可见”的 enclosed occlusion。这是 tracker temporal contract 与 state objective 不一致，不是 coverage 阈值过严。
+- **修复**：CoTracker 显式启用 bidirectional tracking；额外在 observed current frame 建立 tracker query；occlusion 只定义为前后都有可见证据的中间不可见帧，边界处缺少证据的 invisibility 保持 unknown；若当前可见 query 中存在 observed reappearance track，teacher 优先选择该 track；默认 temporal steps 扩展为 `100,200,400,800` ms，real coverage 每个 condition 的样本数从 8 提高到 16。
+- **防回归契约**：synthetic test 必须选中 reappearing query，并验证 enclosed occlusion 不被标成 unknown；coverage report 和 startup verifier 必须同时记录并要求 `tracker_bidirectional=true` 与 `tracker_include_observed_current_anchor=true`。旧 coverage JSON 不满足新契约，不能用于训练启动。
+- **当前状态**：代码已实现并通过本地静态检查；新的六源 real coverage、GPU startup verifier、训练和 held evaluation 均尚未执行。只有新的 coverage report 中 `aggregate_contains_occlusion_candidates=true` 后，才允许重新启动 v58 fresh training。

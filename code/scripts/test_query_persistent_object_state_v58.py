@@ -118,6 +118,10 @@ def main():
         teacher_future_frames=2,
     )
     config.validate()
+    if not config.tracker_bidirectional:
+        raise RuntimeError("v58 requires bidirectional point tracking")
+    if not config.tracker_include_observed_current_anchor:
+        raise RuntimeError("v58 requires a tracker query at the observed current frame")
     patches, coordinates, valid, times, evidence, relation, grid_hw = synthetic_inputs(config)
     model = QueryPersistentObjectStateModel(config)
     trainable = [(name, value) for name, value in model.named_parameters() if value.requires_grad]
@@ -152,6 +156,10 @@ def main():
 
     if not bool(teacher.occluded_candidate[:, 1].all()):
         raise RuntimeError("v58 synthetic lifecycle did not expose occlusion")
+    if not bool((teacher.query_index == 0).all()):
+        raise RuntimeError("v58 query selection did not prefer reappearing tracks")
+    if bool(teacher.unknown[:, 1].any()):
+        raise RuntimeError("v58 enclosed occlusion was incorrectly marked unknown")
     features = type("Features", (), {"patches": patches, "valid": valid})()
     observed = observed_evidence_prefix(evidence, 4)
     primary = output["primary"]
@@ -219,6 +227,11 @@ def main():
         "dynamics_present": False,
         "latent_effect_present": False,
         "historical_checkpoint_used": False,
+        "tracker_bidirectional": config.tracker_bidirectional,
+        "tracker_include_observed_current_anchor": (
+            config.tracker_include_observed_current_anchor
+        ),
+        "reappearing_query_selected": True,
     }
     print(json.dumps(report, sort_keys=True))
 

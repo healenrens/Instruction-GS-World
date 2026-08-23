@@ -55,8 +55,8 @@ def parse_args():
     parser.add_argument("--source_revision", required=True)
     parser.add_argument("--history_lengths", default="1,2,3,4")
     parser.add_argument("--teacher_future_frames", type=int, default=4)
-    parser.add_argument("--temporal_step_ms", default="100,200,400")
-    parser.add_argument("--samples_per_condition", type=int, default=8)
+    parser.add_argument("--temporal_step_ms", default="100,200,400,800")
+    parser.add_argument("--samples_per_condition", type=int, default=16)
     parser.add_argument("--audit_batch", type=int, default=4)
     parser.add_argument("--dino_frame_batch", type=int, default=64)
     parser.add_argument("--amp", choices=("bf16", "fp32"), default="bf16")
@@ -204,6 +204,10 @@ def main():
         "decode_report": args.decode_report,
         "dino_checkpoint": args.dino_checkpoint,
         "tracker_checkpoint": args.tracker_checkpoint,
+        "tracker_bidirectional": config.tracker_bidirectional,
+        "tracker_include_observed_current_anchor": (
+            config.tracker_include_observed_current_anchor
+        ),
         "history_lengths": args.history_lengths,
         "teacher_future_frames": args.teacher_future_frames,
         "temporal_step_ms": args.temporal_step_ms,

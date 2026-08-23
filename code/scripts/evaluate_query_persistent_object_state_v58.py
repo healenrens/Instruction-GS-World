@@ -48,7 +48,7 @@ def parse_args():
     parser.add_argument("--output", required=True)
     parser.add_argument("--history_lengths", default="1,2,3,4")
     parser.add_argument("--teacher_future_frames", type=int, default=4)
-    parser.add_argument("--temporal_step_ms", default="100,200,400")
+    parser.add_argument("--temporal_step_ms", default="100,200,400,800")
     parser.add_argument("--samples_per_condition", type=int, default=64)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--dino_frame_batch", type=int, default=96)

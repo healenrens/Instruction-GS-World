@@ -102,7 +102,7 @@ ARGS=(
   --history_lengths "${HISTORY_LENGTHS:-1,2,3,4}"
   --teacher_future_frames "${TEACHER_FUTURE_FRAMES:-4}"
   --chunk_lengths "${CHUNK_LENGTHS:-5,6,7,8}"
-  --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400}"
+  --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400,800}"
   --batch "${BATCH_PER_GPU}" --grad_accum "${GRAD_ACCUM}"
   --target_global_batch "${TARGET_GLOBAL_BATCH}"
   --workers "${WORKERS_PER_RANK}" --prefetch_factor "${PREFETCH_FACTOR:-2}"

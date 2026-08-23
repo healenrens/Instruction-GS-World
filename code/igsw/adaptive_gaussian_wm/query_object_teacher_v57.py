@@ -44,6 +44,7 @@ def build_query_object_teacher_v57(
     config,
     current_index: int = -1,
     observed_frames: int | None = None,
+    preferred_query: torch.Tensor | None = None,
 ) -> QueryObjectTeacher:
     """Select one current-frame query and reserve related tracks for supervision.
 
@@ -67,6 +68,14 @@ def build_query_object_teacher_v57(
     query_candidate = current_visible & (
         relation.object_confidence >= config.minimum_query_object_confidence
     ) & (relation_degree >= config.minimum_query_relation_confidence)
+    if preferred_query is not None:
+        if preferred_query.shape != query_candidate.shape:
+            raise ValueError("preferred query mask differs from point-track layout")
+        preferred_candidate = query_candidate & preferred_query.bool()
+        use_preferred = preferred_candidate.any(dim=-1, keepdim=True)
+        query_candidate = torch.where(
+            use_preferred, preferred_candidate, query_candidate
+        )
     query_index, query_valid = _masked_argmax(query_score, query_candidate)
 
     query_same = _batch_gather(relation.same_confidence.float(), query_index)

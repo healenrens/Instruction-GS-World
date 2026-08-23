@@ -89,8 +89,17 @@ class FrozenPointTrackerRuntime:
         ) * (size / side)
         y, x = torch.meshgrid(axis, axis, indexing="ij")
         xy = torch.stack((x, y), dim=-1).reshape(-1, 2)
+        anchor_frames = [
+            round(fraction * (frames - 1))
+            for fraction in self.config.tracker_anchor_fractions
+        ]
+        if getattr(self.config, "tracker_include_observed_current_anchor", False):
+            observed_current = frames - int(self.config.teacher_future_frames) - 1
+            if observed_current < 0:
+                raise ValueError("tracker future suffix exceeds the video clip")
+            anchor_frames.append(observed_current)
         times = torch.tensor(
-            [round(fraction * (frames - 1)) for fraction in self.config.tracker_anchor_fractions],
+            sorted(set(anchor_frames)),
             device=self.device,
             dtype=torch.float32,
         )
@@ -127,7 +136,11 @@ class FrozenPointTrackerRuntime:
         tracks, visibility = [], []
         for start in range(0, batch_size, self.sequence_batch):
             stop = min(start + self.sequence_batch, batch_size)
-            predicted, visible = self.model(resized[start:stop], queries=queries[start:stop])
+            predicted, visible = self.model(
+                resized[start:stop],
+                queries=queries[start:stop],
+                backward_tracking=getattr(self.config, "tracker_bidirectional", False),
+            )
             tracks.append(predicted.float())
             visibility.append(visible.bool())
         tracks = torch.cat(tracks)

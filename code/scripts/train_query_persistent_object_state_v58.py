@@ -69,7 +69,7 @@ def parse_args():
     parser.add_argument("--history_lengths", default="1,2,3,4")
     parser.add_argument("--teacher_future_frames", type=int, default=4)
     parser.add_argument("--chunk_lengths", default="5,6,7,8")
-    parser.add_argument("--temporal_step_ms", default="100,200,400")
+    parser.add_argument("--temporal_step_ms", default="100,200,400,800")
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--grad_accum", type=int, required=True)
     parser.add_argument("--target_global_batch", type=int, default=256)

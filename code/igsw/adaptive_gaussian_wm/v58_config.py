@@ -18,6 +18,8 @@ class QueryPersistentObjectStateConfig:
     tracker_image_size: int = 224
     tracker_grid_side: int = 8
     tracker_anchor_fractions: tuple[float, ...] = (0.0, 0.5)
+    tracker_bidirectional: bool = True
+    tracker_include_observed_current_anchor: bool = True
     dynamic_horizons: tuple[int, ...] = (1, 2, 4)
     model_dim: int = 256
     identity_dim: int = 128
