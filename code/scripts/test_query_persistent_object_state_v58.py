@@ -199,7 +199,7 @@ def main():
         model, output, all_zero, features, observed, teacher, grid_hw
     )
     for name in ("semantic_consistency", "compactness", "identity_persistence"):
-        if float((reference[name] - collapsed[name]).abs()) != 0.0:
+        if float((reference[name] - collapsed[name]).abs().detach()) != 0.0:
             raise RuntimeError(f"v58 student visibility gates {name}")
     report = {
         "status": "passed",
