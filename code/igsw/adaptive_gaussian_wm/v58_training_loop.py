@@ -1,0 +1,246 @@
+"""DDP loop for causal persistent state of one queried object."""
+
+from __future__ import annotations
+
+from contextlib import nullcontext
+import json
+import os
+import time
+
+import torch
+
+from .gradient_health import clip_finite_grad_norm_, optimizer_group_grad_norms
+from .query_object_teacher_v58 import (
+    build_query_persistent_teacher_v58,
+    observed_evidence_prefix,
+    persistent_teacher_contract_metrics,
+)
+from .train_runtime import cuda_memory_metrics, move_to_device, reduce_metrics
+from .trajectory_relation_teacher_v56 import build_trajectory_relation_teacher_v56
+from .v58_checkpointing import collect_rng_states, save_checkpoint
+
+
+def checkpoint_due(step: int, args, launch_stop_step: int):
+    if step in {args.steps, launch_stop_step} or step % args.save_every == 0:
+        return os.path.join(args.out, f"v58_state_{step:07d}.pt"), "milestone"
+    if step == 1 or step % args.recovery_every == 0:
+        return os.path.join(args.out, "v58_state_recovery.pt"), "recovery"
+    return None
+
+
+def _source_fractions(reference, counts, source_names):
+    total = sum(counts.values())
+    if not total:
+        return {}
+    return {
+        f"source_{name}_sample_fraction": reference.new_tensor(
+            counts.get(index, 0) / total
+        )
+        for index, name in enumerate(source_names)
+    }
+
+
+def summarize_window(parts, count, source_counts, source_names, world_size):
+    if count < 1:
+        raise ValueError("v58 metric window is empty")
+    averaged = {name: value / count for name, value in parts.items()}
+    result = reduce_metrics(averaged, world_size)
+    reference = next(iter(averaged.values()))
+    result.update(
+        reduce_metrics(
+            _source_fractions(reference, source_counts, source_names), world_size
+        )
+    )
+    return result
+
+
+def train_v58(
+    model,
+    wrapped,
+    dino,
+    point_tracker,
+    loader,
+    sampler,
+    optimizer,
+    scheduler,
+    context,
+    args,
+    start_step,
+    wandb_tracker,
+):
+    if start_step >= args.steps:
+        return start_step
+    launch_stop_step = args.steps
+    if args.run_steps:
+        launch_stop_step = min(args.steps, start_step + args.run_steps)
+    device = torch.device(context.device)
+    amp_context = (
+        (lambda: torch.autocast("cuda", dtype=torch.bfloat16))
+        if args.amp == "bf16"
+        else nullcontext
+    )
+    usable_batches = len(loader) // args.grad_accum * args.grad_accum
+    updates_per_epoch = usable_batches // args.grad_accum
+    if updates_per_epoch < 1:
+        raise ValueError("v58 loader cannot supply one optimizer update")
+    epoch, update_offset = divmod(start_step, updates_per_epoch)
+    resume_batch_offset = update_offset * args.grad_accum
+    direct_seek = bool(getattr(sampler, "supports_start_index", False))
+    log_path = os.path.join(args.out, "train.jsonl")
+    started, step = time.time(), int(start_step)
+    trainable = [
+        (name, value) for name, value in model.named_parameters() if value.requires_grad
+    ]
+    optimizer.zero_grad(set_to_none=True)
+    metric_parts, metric_count, source_counts = {}, 0, {}
+    source_names = tuple(loader.dataset.source_names)
+    while step < launch_stop_step:
+        sampler.set_epoch(args.seed + epoch)
+        direct_batch_offset = 0
+        if direct_seek:
+            sampler.set_start_index(resume_batch_offset * args.batch)
+            direct_batch_offset = resume_batch_offset
+        micro_count = 0
+        for batch_index, cpu_batch in enumerate(loader):
+            if not direct_seek and batch_index < resume_batch_offset:
+                continue
+            absolute_batch = batch_index + direct_batch_offset
+            if absolute_batch >= usable_batches:
+                break
+            batch = move_to_device(cpu_batch, device)
+            chunk_lengths = batch["chunk_length"].unique()
+            if len(chunk_lengths) != 1:
+                raise RuntimeError("v58 local microbatch mixes temporal contracts")
+            observed_frames = int(chunk_lengths.item()) - args.teacher_future_frames
+            if observed_frames not in args.parsed_history_lengths:
+                raise RuntimeError("v58 observed history differs from configured lengths")
+            features = dino(batch)
+            evidence = point_tracker(batch, features.patches, features.grid_hw)
+            relation = build_trajectory_relation_teacher_v56(
+                evidence, model.config, batch["frame_times"]
+            )
+            teacher = build_query_persistent_teacher_v58(
+                evidence,
+                relation,
+                model.config,
+                batch["frame_times"],
+                observed_frames=observed_frames,
+            )
+            observed_evidence = observed_evidence_prefix(evidence, observed_frames)
+            micro_count += 1
+            synchronize = micro_count == args.grad_accum
+            sync_context = (
+                wrapped.no_sync()
+                if context.distributed and not synchronize
+                else nullcontext()
+            )
+            with sync_context, amp_context():
+                output = wrapped(
+                    features.patches[:, :observed_frames],
+                    features.coordinates[:, :observed_frames],
+                    features.valid[:, :observed_frames],
+                    batch["frame_times"][:, :observed_frames],
+                    teacher,
+                    observed_evidence,
+                    features.grid_hw,
+                )
+                loss = output["loss"] / args.grad_accum
+            loss.backward()
+            teacher_metrics = persistent_teacher_contract_metrics(teacher)
+            values = {
+                **output["parts"],
+                **teacher_metrics,
+                "history_frames": loss.new_tensor(observed_frames),
+                "teacher_future_frames": loss.new_tensor(args.teacher_future_frames),
+                "temporal_step_seconds": batch["temporal_step_seconds"].float().mean(),
+                "decode_replacement_fraction": batch["decode_replaced"].float().mean(),
+                "support_probability_mean": output["primary"].support.float().mean(),
+                "visibility_mean": output["primary"].visibility.float().mean(),
+            }
+            for source_index in batch["source_index"].tolist():
+                source = int(source_index)
+                source_counts[source] = source_counts.get(source, 0) + 1
+            for name, value in values.items():
+                tensor = value if torch.is_tensor(value) else loss.new_tensor(value)
+                metric_parts[name] = (
+                    metric_parts.get(name, tensor.detach() * 0.0) + tensor.detach()
+                )
+            metric_count += 1
+            if not synchronize:
+                continue
+            next_step = step + 1
+            collect = next_step % args.log_every == 0 or next_step == launch_stop_step
+            norms = optimizer_group_grad_norms(optimizer) if collect else {}
+            grad_norm = clip_finite_grad_norm_(trainable, args.max_grad_norm)
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+            step, micro_count = next_step, 0
+            metrics = None
+            if collect:
+                metrics = summarize_window(
+                    metric_parts,
+                    metric_count,
+                    source_counts,
+                    source_names,
+                    context.world_size,
+                )
+                metric_parts, metric_count, source_counts = {}, 0, {}
+            reduced_norms = reduce_metrics(norms, context.world_size) if norms else {}
+            if context.is_main and collect:
+                effective_batch = args.batch * context.world_size * args.grad_accum
+                elapsed = max(time.time() - started, 1e-6)
+                completed = max(step - start_step, 1)
+                record = {
+                    "phase": "query_persistent_state",
+                    "global_step": step,
+                    "sampler_epoch": epoch,
+                    "data_epoch": step / updates_per_epoch,
+                    "samples_seen": step * effective_batch,
+                    "lr": scheduler.get_last_lr()[0],
+                    "grad_norm": float(grad_norm),
+                    "steps_per_second": completed / elapsed,
+                    "samples_per_second": effective_batch * completed / elapsed,
+                    "wall_time_seconds": elapsed,
+                    "micro_batch": args.batch,
+                    "grad_accum": args.grad_accum,
+                    "world_size": context.world_size,
+                    "effective_batch": effective_batch,
+                    "updates_per_epoch": updates_per_epoch,
+                    **metrics,
+                    **reduced_norms,
+                    **cuda_memory_metrics(device),
+                }
+                with open(log_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, sort_keys=True) + "\n")
+                print(json.dumps(record, sort_keys=True), flush=True)
+                if wandb_tracker is not None:
+                    wandb_tracker.log(record)
+            target = checkpoint_due(step, args, launch_stop_step)
+            if target is not None:
+                path, kind = target
+                rng_states = collect_rng_states(context)
+                manifest = None
+                if context.is_main:
+                    manifest = save_checkpoint(
+                        path,
+                        model,
+                        optimizer,
+                        scheduler,
+                        args,
+                        step,
+                        rng_states,
+                        kind,
+                    )
+                if context.distributed:
+                    torch.distributed.barrier()
+                if context.is_main:
+                    event = {"event": "checkpoint_saved", **manifest}
+                    print(json.dumps(event, sort_keys=True), flush=True)
+                    if wandb_tracker is not None:
+                        wandb_tracker.record_checkpoint(manifest)
+            if step >= launch_stop_step:
+                break
+        epoch += 1
+        resume_batch_offset = 0
+    return step
