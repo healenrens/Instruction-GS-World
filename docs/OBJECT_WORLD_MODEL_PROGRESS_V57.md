@@ -1,16 +1,51 @@
-# Instruct-GS-World Object-Level World Model 完整进度与 v57 路线
+# Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
 > 更新日期：2026-08-23  
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
 > 当前开发分支：`codex/query-conditioned-object-dynamics-v57`  
-> 第一阶段实现提交：`bb70757`
+> 当前代码提交：`0c7cf6f204c2a57bb099d724fb655b9723d38159`
+> 当前实验：W&B `q02tvfqq`，终态 `killed`，最后 history step 6,760，恢复 checkpoint step 6,750
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
 > 远端运行与产物根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/`  
 > W&B：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`
 
+## 0. 唯一主线
+
+从本文档此次更新开始，版本号只表示实现迭代，不再表示研究方向重启。项目只保留以下一条主线：
+
+> 从纯视频学习可部署的、query-conditioned、persistent object state；在该 state 通过独立 object validity 验证后，再学习 latent effect conditioned object dynamics，最终由 goal、language 或 policy 选择 object query 与 latent effect。
+
+固定的数据流是：
+
+```text
+Observed RGB history + current point/region query
+  -> frozen perception patches
+  -> query-conditioned object binding
+  -> persistent object state
+  -> latent effect posterior (training only)
+  -> object-level Dynamics
+  -> future object state
+```
+
+训练期 point tracker 可以使用完整视频构造 correspondence、relation、visibility evidence；部署 student 只能读取已经观察到的 RGB history 与 query。future RGB、future tracks、teacher state、instance annotation、机器人显式 action 都不得进入 student history path。
+
+这条主线按以下 promotion chain 单向推进：
+
+| Gate | 必须回答的问题 | 通过前禁止做的事情 |
+|---|---|---|
+| G0 Objective validity | 正确解是否比 all-scene、seed-only、merge、split、visibility collapse 等捷径更优？ | 禁止真实长训。 |
+| G1 Query binding | 给定 query，student 是否找到了与其相关、并排除了无关 track 的区域？ | 禁止声称学到完整 object state。 |
+| G2 Persistent state | identity、dynamic、geometry、visibility/unknown 是否各自学到正确含义？ | 禁止训练 Dynamics。 |
+| G3 Independent object validity | 不使用训练 tracker 的 evaluator 是否确认 object coverage、leakage、reappearance 与 deletion locality？ | 禁止把 teacher agreement 写成 object semantics。 |
+| G4 Latent effect | 从真实前后 object state 提取的连续 effect 是否必要、稳定且不含显式 action/center delta？ | 禁止训练 History-only Prior。 |
+| G5 Object Dynamics | 正确 effect 是否显著优于 zero/shuffled，且 rollout 保持 object identity 与 lifecycle？ | 禁止进入任务级 claim。 |
+| G6 Selector / task A | goal、language 或 policy 是否能选择 query/effect，并在 RoboTwin task A 上产生可用预测？ | 禁止与 XR-2 混淆。 |
+
+任何实验只能推动当前最早未通过的 Gate。后面的 Gate 即使某个指标变好，也不能覆盖前面 Gate 的失败。
+
 ## 1. 文档用途与证据规则
 
-本文档不是按版本罗列代码功能，而是记录每一轮实验回答了什么问题、怎样执行、观察到什么、为什么导向下一轮。后续开发按第 11 节的 gate 顺序推进；前一项未通过，不启动后一项长训。
+本文档是本项目唯一的研究决策账本。它记录每一轮实验回答了什么问题、怎样执行、观察到什么、为什么导向下一轮。后续开发按第 0 节的 promotion chain 和第 11 节的当前 TODO 推进；前一项未通过，不启动后一项长训。
 
 证据分为四级：
 
@@ -20,6 +55,33 @@
 4. **independent evaluation**：使用 simulator ground truth 或人工标注，且不使用训练 tracker，才可证明 object state 具有外部语义。
 
 因此，loss 下降、readout 变好、固定 slot index 稳定或 tracker agreement 都不能单独写成“学到了 object”。
+
+### 1.1 强制更新协议
+
+从现在起，每次发生以下任一事件，都必须在同一提交或紧随其后的文档提交中更新本文档：
+
+- 修改 object 定义、teacher/student 边界、loss、数据采样或 evaluator；
+- 启动、停止或恢复一次具有新假设的训练；
+- 从 W&B、checkpoint 或独立 evaluator 得到足以改变决策的新证据；
+- 决定保留、否决、后置或重新开放一个模块。
+
+每次记录必须包含：
+
+```text
+日期 / 版本 / branch / commit / W&B run / checkpoint
+当前 Gate
+假设：本实验只检验什么
+单一主要改动：相对上一 accepted baseline 改了什么
+冻结项：哪些结构、数据和指标保持不变
+执行：数据、history、GPU、batch、steps、resume/init_from
+结果：完整曲线、分 source/H 指标、运行终态
+证伪：哪些 shortcut 或反事实测试通过/失败
+判决：promote / iterate / reject / infrastructure-only
+继承：保留什么，明确不继承什么
+下一步：仍然只解决哪个最早失败 Gate
+```
+
+状态词固定为：`已完成`、`已验证`、`尝试中`、`待办`、`风险`、`不能确认`。`running`、单次 loss 下降、结构 gate 或复制成功不允许写成 `已验证`。
 
 ## 2. 最终研究目标
 
@@ -237,6 +299,32 @@ v56 删除 legacy owner、track-cycle、root-count loss，只保留 signed relat
 7. **更多数据不会自动修复 objective**：v53-v56 已扩到六源和约 4,073 万 samples，结构问题仍然出现。
 8. **DINO 不是当前首要瓶颈**：DINO token 可被较高容量 basis 重建；真正问题是 object grouping 与 dynamics target。v57 第一阶段继续冻结 DINO。
 
+### 8.1 历史路线判决矩阵
+
+这张表是防止后续迭代“倒回去”的依据。`保留` 表示已经形成可复用能力；`否决` 表示不能再次作为主线成功标准；`后置` 表示只有前置 Gate 通过后才能恢复。
+
+| 历史路线 | 已经证明的能力 | 已经证明的失败 | 永久判决 |
+|---|---|---|---|
+| 显式 3DGS motion / RGB rendering | geometry target 足够好时可预测局部 motion；反事实可迫使模型使用 language | 依赖 geometry、mask 或 rendering，不等于纯视频 object abstraction | **退出主线**；只保留 geometry 与 counterfactual 经验。 |
+| Gaussian readout / carrier v28-v36 | compact latent 可以被训练；oracle basis 有较高 dense capacity | predicted transport/readout 多次丢掉 latent Dynamics 改进 | **否决其作为主 state 或主评估**；dense readout 仅作 probe。 |
+| Action-free short prediction v39/v43 | 能拟合 +1 秒视频平滑性；验证 causal temporal sampler | persistence/self-consistency 足以让指标很好，不能证明 object 或多可能 dynamics | **永久取消为 object-state 成功标准**。 |
+| 固定 16-slot / root v40-v48 | recurrent set、relative geometry、数值稳定和长训工程可用 | identity 由固定 index 自证；background locking、fragmentation、capacity saturation 持续存在 | **否决固定 slot index 作为 identity truth**；不回到“调 slot 数/均衡权重”路线。 |
+| Point-track + fixed roots v49-v56 | external correspondence、relation partition、reappearance 和 deletion locality 可测 | teacher/evaluator 闭环；dominant-root collapse；visibility 与 motion state 不稳定 | **保留 tracker teacher 与独立评测思想，否决 fixed-root student**。 |
+| 六源 semantic tokenizer / Dynamics v53 | 六源数据、decode audit、balanced sampler 和大 batch 基础设施已建立 | object state 未通过时 joint tokenizer/Dynamics 无法解释失败来源 | **基础设施保留，tokenizer/Dynamics 后置到 G4/G5**。 |
+| Query-conditioned binding v57 | held-out positive/negative track binding 明确可学，且不依赖固定 slot index | visibility collapse；完整 support、lifecycle、independent object semantics 与 Dynamics 均未成立 | **当前唯一结构主线**；只迭代其最早失败 Gate，不推倒重建。 |
+
+### 8.2 不再改变的研究边界
+
+后续版本不得重新引入以下替代目标：
+
+- 以 whole-frame reconstruction、Gaussian rendering 或 dense DINO error 作为主要成功标准；
+- 以固定数量 slots 的均匀使用率作为 object 定义；
+- 以 action-free short prediction 优于 persistence 作为 object state 证据；
+- 在 object state 尚未通过 G3 时同时训练 latent tokenizer、Dynamics、Prior 或 language；
+- 因某个辅助 loss 失败而把主线切换回旧 readout、旧 roots 或显式 instance segmentation。
+
+允许的迭代只包括：修正当前 Gate 的目标定义、teacher evidence、student state factorization、独立 evaluator 和必要的容量；每次必须相对最近 accepted baseline 做可归因对照。
+
 ## 9. v57 Query-Conditioned Object Dynamics
 
 ### 9.1 为什么改成 query-conditioned
@@ -321,17 +409,74 @@ $$
 
 最后才增加多 query 去重、persistent queried memory，以及 goal/language/policy selector。Language 的作用是选择 query/effect，不进入底层 object binding 定义。
 
-## 11. 后续执行清单
+### 10.1 Step 6750 训练诊断与正式判决
 
-| 顺序 | 工作 | 当前状态 | 晋级条件 |
-|---:|---|---|---|
-| 1 | single-query teacher、student interface、objective falsification | **远端 tensor contract 已通过；真实六源 coverage 待执行** | tensor contract 全通过；真实六源 teacher coverage 报告完整。 |
-| 2 | 六源 query coverage audit + W&B evaluator | 待办 | 所有 source/H 有足够 positive、negative、held-out tracks。 |
-| 3 | single-query binding 训练入口、checkpoint、resume、W&B | 待办 | held teacher gate 通过。 |
-| 4 | RoboTwin independent truth evaluator | 待办 | independent binding gate 通过。 |
-| 5 | single-entity latent effect posterior + Dynamics | 禁止提前 | correct effect 相对 zero/shuffled 改善至少 10%。 |
-| 6 | multi-query dedup 与 persistent memory | 禁止提前 | 单 query object state 已独立验证。 |
-| 7 | goal/language selector 与任务 A | 禁止提前 | object state 与 effect 均通过。 |
+V57 真实六源 coverage、startup gate 和 4-GPU strict-resume E2E 已通过。长训 run `q02tvfqq` 使用提交 `0c7cf6f204c2a57bb099d724fb655b9723d38159`，8 卡、每卡 batch 16、effective batch 256，原目标 30,000 steps。W&B 最终状态为 `killed`，最后 history step 为 6,760；恢复 checkpoint 为 `/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/query_object_binding_v57_seed17_0c7cf6f_long_foreground/v57_binding_recovery.pt`，记录 step 6,750。最后一条 summary 为：
+
+- `heldout_support_positive=0.9771`，`heldout_support_negative=0.0149`，说明给定 query 后，student 能在训练 teacher 定义的 relation 上区分 related 与 different tracks；
+- `heldout_relation=0.0898`，相比训练初期显著下降；
+- `visibility_mean=4.82e-6`，已经完全塌缩；
+- `support_probability_mean=0.3890`，说明未被明确 relation 标注的 patches 仍缺乏完整约束；
+- `semantic_consistency=1.36e-11`、`compactness=4.24e-5`，不能解释为 temporal semantics 或 compact object support 已学成；
+- `runtime/grad_norm=0.0941`，训练数值稳定，但这只证明错误目标仍可继续优化。
+
+visibility collapse 来自当前 objective 的直接捷径：
+
+$$
+L_{semantic}=\frac{\sum \Delta s^2 v_t v_{t-1}}
+{\max(\sum v_t v_{t-1},1)},\qquad
+L_{compact}=\frac{\sum \operatorname{tr}(\Sigma_t)v_t}
+{\max(\sum v_t,1)}.
+$$
+
+当前没有独立的 visibility target。令 $v_t\rightarrow 0$ 会同时把两个 loss 压到零。因此本轮证明的是 **G1 query-conditioned track binding 可优化**，不是 G2 persistent object state 已成立。继续训练到 30,000 steps 不会自行修复该目标漏洞。
+
+正式判决为 `iterate at G2`：
+
+- **保留**：single-query student、training-only tracker teacher、prompt/held-out track split、positive/negative relation binding、六源数据与运行基础设施；
+- **否决**：v57 visibility、由 student visibility 加权的 semantic consistency/compactness，以及把这两个接近零解释为成功；
+- **不重启旧路线**：不回到固定 roots、Gaussian readout、action-free prediction 或 joint tokenizer/Dynamics；
+- **下一实验唯一问题**：在不削弱 v57 binding 的前提下，让 observability、unknown 和 object support 获得不可被 student 自己关闭的外部监督。
+
+## 11. 当前 TODO 与单向推进规则
+
+### 11.1 当前 Gate 状态
+
+| Gate | 状态 | 证据 | 下一动作 |
+|---|---|---|---|
+| G0 Objective validity | **部分通过** | v57 已证伪 all-scene、whole-frame、seed-only、other-entity；未证伪 all-visibility-zero | 为 visibility/unknown 增加 external target，并加入 visibility corruption attribution。 |
+| G1 Query binding | **held-teacher 已验证** | `q02tvfqq` positive 0.9771、negative 0.0149；六源 coverage 与 E2E 通过 | 新版本必须回归保持，不重新设计 binding。 |
+| G2 Persistent state | **失败** | visibility 4.82e-6；dynamic head 冻结；compactness/semantic 可被关闭 | 当前唯一实现任务。 |
+| G3 Independent object validity | **待办** | 当前没有与训练 tracker 独立的完整结果 | G2 通过后执行 RoboTwin truth/人工小集 evaluator。 |
+| G4 Latent effect | **禁止提前** | v53 joint tokenizer 不能证明 effect 建立在有效 object state 上 | 等待 G3。 |
+| G5 Object Dynamics | **禁止提前** | 历史 action-free/compact dynamics 结果不能替代 effect-conditioned object dynamics | 等待 G4。 |
+| G6 Selector / task A | **禁止提前** | 尚无可部署 state 与 effect | 等待 G5。 |
+
+### 11.2 下一版本的唯一改动面
+
+下一版本只修复 G0/G2，不修改 v57 relation binding 主体：
+
+1. teacher 从 observed-history tracks 产生 `visible / occluded-candidate / unknown` target；invisible 不得自动成为 absent。
+2. `L_visibility` 直接监督 student observability；class balance 和 calibration 由 teacher mask 决定。
+3. semantic consistency 与 compactness 使用 stop-gradient teacher-valid mask，禁止使用 student visibility 作为 loss 开关。
+4. identity 只在 teacher 确认 same-entity 且可比较的时刻保持；dynamic 和 geometry 必须允许变化。
+5. unknown patches 单独报告，不强迫它们成为 object 或 background。
+6. 增加 `all_visibility_zero`、`all_visibility_one`、identity swap、merge、split、background lock、shuffled track ID 和 occlusion reset falsification。
+7. W&B 必须按六个 source 与 $H=1,2,3,4$ 分开记录 binding、visibility calibration、reappearance、support area 和 unknown activation。
+
+### 11.3 严格晋级标准
+
+下一版本只有同时满足以下条件才能从 G2 晋级 G3：
+
+- heldout support positive 不低于 0.90，negative 不高于 0.10；
+- visibility 不得坍缩到常数，balanced accuracy 与 F1 必须优于同分布常数 baseline；
+- predicted visible rate 与 teacher visible rate 的相对误差不高于 20%；
+- occlusion/reappearance subset 的 identity retrieval 显著优于 shuffled track ID；
+- query perturbation 后 support 随 query 移动，不形成固定 foreground template；
+- identity 稳定时，dynamic 与 geometry 在 motion-active clips 上保持非零变化；
+- 上述标准在六源和各个 $H$ 上分别报告，不能只报混合均值。
+
+G2 通过后才运行 independent evaluator。G3 使用不导入训练 CoTracker 的 RoboTwin object ID/mask 或人工标注小集；只有它通过，才允许实现 latent effect 与 Dynamics。
 
 ## 12. W&B 运行索引
 
@@ -381,6 +526,9 @@ $$
 | v56 eval | `o6bdk6g3` | complete eval attempt 2 | failed |
 | v56 eval | `pu5rvd7o` | corrected eval | finished |
 | v56 eval | `bmtxgsqt` | aligned final eval | finished |
+| v57 gate | `pcafelg1` | six-source query coverage | finished |
+| v57 E2E | `gscprsrp` | query binding 4-GPU E2E | finished |
+| v57 | `q02tvfqq` | query binding long foreground | killed at history step 6,760; recovery step 6,750 |
 
 ## 13. 当前明确禁止的捷径
 
@@ -391,3 +539,19 @@ $$
 - 不从 tracker invisibility 推导 absence。
 - 不在 Object State gate 通过前训练 latent effect、Prior、language 或控制接口。
 - 不继承 v43-v56 model/optimizer checkpoint；只复用数据、冻结 DINO、冻结 point tracker、W&B 与运行基础设施。
+
+## 14. 决策日志
+
+### 2026-08-23：v57 Query Binding 长训判决
+
+- **版本证据**：branch `codex/query-conditioned-object-dynamics-v57`；commit `0c7cf6f204c2a57bb099d724fb655b9723d38159`；W&B `q02tvfqq`；recovery checkpoint `/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/query_object_binding_v57_seed17_0c7cf6f_long_foreground/v57_binding_recovery.pt`。
+- **当前 Gate**：G1 已通过 held-teacher 标准；G2 失败。
+- **假设**：用 query 与外部 trajectory relation 监督，可以避免固定 slot index，并从 observed RGB history 学到 query-conditioned object support。
+- **主要改动**：从固定 16 roots 改为 single-query object encoder；teacher prompt tracks 与 held-out relation tracks 分离。
+- **冻结项**：DINO 与 point tracker 冻结；dynamic head 冻结；无 language、显式 action、RGB reconstruction、Dynamics 或旧 checkpoint。
+- **执行**：六源数据；8 卡；每卡 batch 16；effective batch 256；从 scratch；计划 30,000 steps，外部中断于 history step 6,760。
+- **结果**：positive 0.9771、negative 0.0149，relation binding 成立；visibility 4.82e-6，persistent state 不成立。
+- **证伪**：all-scene、whole-frame、seed-only 与 other-entity synthetic shortcut 已通过；all-visibility-zero 未被 objective 排除并在真实训练中发生。
+- **判决**：`iterate`。v57 作为 G1 accepted baseline；不继续训练、不回到旧路线；下一版本只修 G0/G2。
+- **继承**：继承 query encoder 接口、relation teacher、六源数据与执行基础设施；不继承当前 visibility/compactness objective，也不从 v57 checkpoint resume 新 objective。
+- **下一步**：完成第 11.2 节的 G2 objective、falsification 和 evaluation；通过前禁止 Dynamics。
