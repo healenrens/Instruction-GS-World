@@ -105,6 +105,15 @@ def select_features(features, index):
     )
 
 
+def prefix_features(features, frames):
+    return FrozenVideoFeatures(
+        patches=features.patches[:, :frames],
+        coordinates=features.coordinates[:, :frames],
+        valid=features.valid[:, :frames],
+        grid_hw=features.grid_hw,
+    )
+
+
 def select_evidence(evidence, index):
     return PointTrackEvidence(
         coordinates=evidence.coordinates[index : index + 1],
@@ -209,6 +218,10 @@ def state_max_difference(first, second) -> float:
 
 def verify_teacher_masking(output, features, observed, teacher, grid_hw, config):
     primary = output["primary"]
+    require(
+        features.valid.shape[:2] == primary.support.shape[:2],
+        "v58 masking probe feature prefix differs from student support",
+    )
     collapsed = replace(
         primary,
         visibility_logits=torch.full_like(primary.visibility_logits, -12.0),
@@ -364,7 +377,7 @@ def main():
         )
     masking = verify_teacher_masking(
         output,
-        select_features(features, 0) if len(features.patches) != 1 else features,
+        prefix_features(features, history),
         observed,
         teacher,
         features.grid_hw,
