@@ -555,3 +555,86 @@ G2 通过后才运行 independent evaluator。G3 使用不导入训练 CoTracker
 - **判决**：`iterate`。v57 作为 G1 accepted baseline；不继续训练、不回到旧路线；下一版本只修 G0/G2。
 - **继承**：继承 query encoder 接口、relation teacher、六源数据与执行基础设施；不继承当前 visibility/compactness objective，也不从 v57 checkpoint resume 新 objective。
 - **下一步**：完成第 11.2 节的 G2 objective、falsification 和 evaluation；通过前禁止 Dynamics。
+
+### 2026-08-23：v58 Persistent Query State 实现决策
+
+- **代码版本**：branch `codex/query-persistent-object-state-v58`；核心实现提交 `2a8519c`。
+- **当前 Gate**：只处理 G0/G2；G1 relation binding 保持不变；G3-G6 继续禁止提前实现。
+- **核心假设**：v57 的失败来自错误 objective，而不是 query binding capacity。只要 observability、identity persistence 和 observed motion 都由不可被 student 关闭的 teacher evidence 监督，query-conditioned encoder 才有机会学习可部署的 persistent state。
+- **不继承资产**：v58 从 scratch 训练，不允许 v57 `init_from`，也不允许用 v57 checkpoint `resume`；只复用六源数据、冻结 DINO、冻结 point tracker、relation teacher 和 DDP/W&B 基础设施。
+- **新增状态**：student 输出逐帧 `identity_sequence`、`dynamic`、relative support geometry、`visibility_logits`，以及序列级 `identity`。student 输入仍只有 observed RGB 的 frozen DINO patches 与 current query coordinate。
+- **teacher lifecycle**：训练期 tracks 为 query surface point 产生 `visible`、`occluded_candidate` 和 `unknown`。tracker invisible 不会被解释为 absent；query anchor 之前或无法确认的帧进入 unknown。
+- **motion target**：只用 observed prefix 内相邻可见 track 的 camera-motion-corrected residual velocity；按 observed frame time 归一化，不读取 future RGB，不使用机器人 action，也不把真实 center delta 拼进 latent state。
+
+v58 objective 为：
+
+$$
+L_{v58}=L_{bind}+L_{visibility}+L_{identity-persistence}
++L_{semantic}+L_{compact}+L_{dynamic-motion}+L_{geometry-motion}.
+$$
+
+其中：
+
+$$
+L_{visibility}=
+\operatorname{BalancedBCEWithLogits}
+\left(\hat v_t,v_t^{teacher};m_t^{known}\right).
+$$
+
+semantic、compactness 与 identity persistence 的 mask 全部来自 detached teacher lifecycle：
+
+$$
+L_{semantic}=
+\frac{\sum_t m_t^{visible}m_{t-1}^{visible}
+\left\|\bar s_t-\bar s_{t-1}\right\|_2^2}
+{\max\left(\sum_t m_t^{visible}m_{t-1}^{visible},1\right)}.
+$$
+
+student 自己预测的 $\hat v_t$ 只进入 $L_{visibility}$，不再充当其他 loss 的开关。因此 $\hat v_t\rightarrow0$ 会增加 visibility loss，不能再把 semantic/compactness 人为压到零。
+
+dynamic state 通过一个小型 readout 对 observed residual velocity 负责：
+
+$$
+\hat r_t=h_{motion}(d_t),\qquad
+L_{dynamic-motion}=\operatorname{SmoothL1}(\hat r_t,r_t^{track}).
+$$
+
+support center 的变化只作为 relative geometry state 的辅助检查：
+
+$$
+L_{geometry-motion}=\operatorname{SmoothL1}
+\left(\frac{c_t-c_{t-1}}{\Delta t},r_t^{track}\right).
+$$
+
+这不是 latent action，也不是要求用绝对坐标表示 action。它只检查 query support 的相对几何是否随 observed object evidence 移动。
+
+**实现文件**：
+
+- `query_object_teacher_v58.py`：observed lifecycle、unknown 和 residual velocity target。
+- `query_persistent_state_v58.py`：逐帧 identity/dynamic/geometry/visibility state。
+- `query_persistent_objective_v58.py`：teacher-masked objective 与 calibration/reappearance/motion diagnostics。
+- `query_object_coverage_v58.py`：六源 × H coverage 与 occlusion evidence gate。
+- `test_query_persistent_object_state_v58.py`：H1-H4 gradient contract 和 constant-visibility falsification。
+- `verify_query_persistent_object_state_v58.py`：真实数据 causal、frozen teacher、query sensitivity、mask independence 和 backward gate。
+- `evaluate_query_persistent_object_state_v58.py`：六源 × H held-teacher G2 promotion evaluator，并同步 W&B。
+- `train_query_persistent_object_state_v58.py`、`v58_training_loop.py`、`v58_checkpointing.py`：fresh/strict-resume DDP 长训。
+
+**必须先通过的执行顺序**：
+
+1. `audit-coverage`：六源 × H=1,2,3,4 的 query/held relation coverage 必须继续通过，aggregate 必须实际包含 occluded candidate。
+2. `verify`：student future swap 差异小于 $10^{-6}$；DINO/point tracker 冻结；H1-H4 所有 trainable parameters 均在反向图；collapsed visibility 必须被直接惩罚，且不得改变 semantic/compactness。
+3. fresh 长训：默认 30,000 steps、effective batch 256、GPU 数量和单卡 batch 自动选择；不继承 v57。
+4. held evaluation：六源 × H 分别检查 binding、visibility calibration、reappearance、query perturbation 与 motion readout。
+
+**v58 晋级判据**：
+
+- held support positive $\ge0.90$，negative $\le0.10$；
+- 有 visible/occluded 两类证据的 condition 上，visibility balanced accuracy 和 F1 均 $\ge0.55$，Brier 优于常数 baseline，visible-rate relative error $\le20\%$；
+- observed reappearance condition 的 identity margin 相对 batch-shuffled identity 至少 $0.02$；
+- query perturbation 的 support mean difference 大于 $10^{-3}$；
+- 有 observed motion evidence 的 condition 中，dynamic motion prediction 必须优于 zero-motion baseline；
+- aggregate 中必须存在真实 occlusion evidence。
+
+上述 evaluator 仍使用训练期 tracker teacher，只能决定 G2 是否成立，不能替代 G3 independent object truth。即使全部通过，下一步也只能进入 RoboTwin mask/object ID 或人工小集的 independent evaluator；不能直接恢复 latent effect 或 Dynamics。
+
+**当前验证状态**：本地完成 Python 静态编译、Ruff、shell syntax 和 `git diff --check`。本地环境没有 PyTorch，未执行 tensor forward；真实 GPU coverage/startup/evaluation 尚未运行，因此当前状态是“代码已实现，等待服务器 Gate”，不是“v58 已验证”。
