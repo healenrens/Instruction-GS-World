@@ -637,4 +637,12 @@ $$
 
 上述 evaluator 仍使用训练期 tracker teacher，只能决定 G2 是否成立，不能替代 G3 independent object truth。即使全部通过，下一步也只能进入 RoboTwin mask/object ID 或人工小集的 independent evaluator；不能直接恢复 latent effect 或 Dynamics。
 
-**当前验证状态**：本地完成 Python 静态编译、Ruff、shell syntax 和 `git diff --check`。本地环境没有 PyTorch，未执行 tensor forward；真实 GPU coverage/startup/evaluation 尚未运行，因此当前状态是“代码已实现，等待服务器 Gate”，不是“v58 已验证”。
+**当前验证状态**：本地完成 Python 静态编译、Ruff、shell syntax 和 `git diff --check`。服务器
+`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source` 已使用
+`/mnt/pfs/public/xuhaoming/instruct_gs_world/.venv/bin/python` 通过独立 tensor gate：
+`gradient_tensor_count=41`，H=1/2/3/4 的 gradient norm 分别为
+`17.1617/19.9988/14.1236/12.6101`，`dynamic_head_trainable=true`，
+`student_visibility_gates_other_losses=false`；合理状态 objective 为 `1.8163`，
+`all_visibility_zero` 和 `all_visibility_one` 均为 `5.8163`。这只验证 objective 与梯度契约，
+尚未验证六源 coverage、真实 GPU startup、长训收敛或 held G2 指标，因此当前状态仍是
+“静态与 synthetic tensor gate 已通过，等待真实数据 Gate”，不是“v58 已通过 G2”。
