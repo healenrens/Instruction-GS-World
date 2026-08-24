@@ -719,4 +719,5 @@ $$
 - **W&B 主指标**：`correct_active_error`、`zero_active_error`、`shuffled_active_error`、`persistence_active_error`，以及基于这些原始聚合误差重新计算的三项 gain。`point_velocity_probe` 不再进入核心 objective。
 - **held 验收**：source-balanced evaluator 必须确认 aggregate correct effect 相对 zero、shuffled 和 persistence 都改善至少 10%；分别报告每个 source、H 和 horizon。该 evaluator 仍依赖训练 tracker 构造 target，所以只能判定 dynamic objective 是否成立，不能替代 G3 independent object validity。
 - **当前结果**：代码、Python 静态编译、Ruff、shell syntax 和 `git diff --check` 已通过；真实 GPU startup verifier、训练曲线和 held evaluation 尚未执行。当前状态是 `implemented, awaiting real GPU falsification`，不是 objective 已通过。
+- **首次真实 verifier 修复**：提交 `4f3495e` 将 persistence lifecycle baseline 从 autocast 不支持的 probability-space `binary_cross_entropy` 改为数学等价的 float32 logit 加 `binary_cross_entropy_with_logits`。该修复不改变 target、权重或 objective 含义；旧 revision 的 startup report 不可复用，必须在新 HEAD 上重新运行 verifier。
 - **下一 Gate**：先运行 v59 startup verifier；随后只进行 10,000-step objective experiment。若 2k/5k/10k 的 correct effect 不能持续优于三种 baseline，不增加数据量或延长训练，直接判定当前 target/objective 失败并分析哪一项 baseline 未被超越。
