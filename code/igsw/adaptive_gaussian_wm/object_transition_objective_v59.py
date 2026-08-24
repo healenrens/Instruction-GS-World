@@ -49,8 +49,11 @@ def _persistence_errors(target, config):
     source_visibility = target.source_visibility[:, None].expand_as(
         target.future_visibility
     )
-    lifecycle = F.binary_cross_entropy(
-        source_visibility.float().clamp(1e-5, 1.0 - 1e-5),
+    source_visibility_logits = torch.logit(
+        source_visibility.float().clamp(1e-5, 1.0 - 1e-5)
+    )
+    lifecycle = F.binary_cross_entropy_with_logits(
+        source_visibility_logits,
         target.future_visibility.float(),
         reduction="none",
     )
