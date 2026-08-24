@@ -2,7 +2,7 @@
 
 > 更新日期：2026-08-23  
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/query-conditioned-object-dynamics-v57`  
+> 当前开发分支：`codex/object-transition-objective-v59`
 > 当前代码提交：`0c7cf6f204c2a57bb099d724fb655b9723d38159`
 > 当前实验：W&B `q02tvfqq`，终态 `killed`，最后 history step 6,760，恢复 checkpoint step 6,750
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
@@ -658,3 +658,65 @@ $$
 - **当前状态**：代码已实现并通过本地静态检查；新的六源 real coverage、GPU startup verifier、训练和 held evaluation 均尚未执行。只有新的 coverage report 中 `aggregate_contains_occlusion_candidates=true` 后，才允许重新启动 v58 fresh training。
 
 **后续执行结果**：提交 `3fa9610` 的六源 real coverage 已返回 `COVERAGE_RC=0`，因此 bidirectional/current-anchor 修复已经通过真实 coverage gate。startup verifier 随后暴露独立实现错误：masking falsification 将 4 帧 student support 与 8 帧完整 teacher clip 的 feature-valid mask 相乘。修复要求 verifier 显式构造 4 帧 observed feature prefix，不在 objective 内静默裁剪。该 verifier 修复仍需服务器复跑；在 `VERIFY_RC=0` 之前不启动训练。
+
+### 2026-08-24：v59 Dynamic Objective 优先诊断决策
+
+- **代码版本**：branch `codex/object-transition-objective-v59`；核心实现提交 `a0304ae`。
+- **用户决策**：当前最高优先级转为解决 dynamic objective。visibility、coverage、reappearance 和 independent object validity 暂不作为本轮主要优化项。该决策允许实现 G4/G5 的目标诊断代码，但不代表 G2/G3 已通过，也不允许将本轮 teacher-dependent 结果写成 object semantics 已成立。
+- **历史问题**：v39 的 action-free short prediction 可以利用 persistence/video smoothness；v43-v53 在 Object State 未成立时联合训练 Dynamics，失败来源不可归因；v58 的 `dynamic` 只通过小 readout 回归单个 tracked point 的二维 residual velocity。三者都没有验证 latent effect 对 future object state 的 predictive sufficiency 和 necessity。
+- **本轮唯一假设**：若一个连续 latent effect 真正表示 object transition，则在冻结同一个 source Object State 后，正确 posterior effect 必须稳定优于 zero effect、其他样本的 shuffled effect 和 persistence，并且这种优势应在 motion-active object 与多个时间跨度上同时出现。
+- **继承资产**：六源视频 index、decode frontier、冻结 DINO、冻结 CoTracker、v58 query encoder checkpoint、group-balanced sampler、DDP、W&B 和 rolling checkpoint 基础设施。
+- **不继承资产**：不恢复 v58 optimizer/scheduler；不使用 v58 `motion_readout`；不把 point velocity、RGB、dense DINO reconstruction、显式 center delta、机器人 action、language 或 History-only Prior 作为 latent effect。
+- **冻结控制**：v58 encoder 全部冻结；DINO 与 CoTracker 全部冻结；只训练 Posterior、source-state adapter 与 effect-conditioned Dynamics。这样失败可以归因到 transition target/objective 或冻结 Object State 的信息不足，而不是 encoder 与 target 同时漂移。
+
+训练期 target 由 query 对应的一组 positive-relation tracks 聚合，而不是一个 surface point：
+
+$$
+Y_t=\left(y_t^{semantic},y_t^{relative\ geometry},y_t^{visibility}\right).
+$$
+
+其中 $y_t^{semantic}$ 是 related tracks 上 frozen DINO feature 的加权聚合；$y_t^{relative\ geometry}$ 包含 object center 相对当前可见 track field center 的二维位置以及 object support 的对称 covariance；visibility 表示该 related-track object support 当前可观测的比例。完整 target 始终 detached，只进入 training-only teacher path。
+
+Posterior 与 Dynamics 为：
+
+$$
+z_{t\rightarrow t+\Delta}=Q_{\phi}(Y_t,Y_{t+\Delta},\Delta),
+$$
+
+$$
+\hat Y_{t+\Delta}=F_{\theta}(S_t,z_{t\rightarrow t+\Delta},\Delta),
+$$
+
+其中 $S_t$ 是冻结 v58 encoder 从 observed RGB/DINO prefix 和 current query 得到的 source state。$z$ 保持连续 `[4,32]`；4 表示 effect factors，不是四个时间点。
+
+核心预测距离同时比较 semantic cosine、归一化 relative geometry 和 lifecycle BCE：
+
+$$
+D(\hat Y,Y)=D_{semantic}+D_{geometry}+0.25D_{lifecycle}.
+$$
+
+zero effect 被额外锚定为 source-state reconstruction，避免模型通过任意恶化 zero branch 伪造 gain：
+
+$$
+L_{zero}=D(F(S_t,0,\Delta),Y_t).
+$$
+
+motion-active 样本上的 intervention objective 要求正确 effect 相对三种 baseline 至少有 10% 相对优势：
+
+$$
+L_{rank}=\sum_{b\in\{zero,shuffle,persistence\}}
+\max\left(0,D_{correct}-0.9\operatorname{stopgrad}(D_b)\right).
+$$
+
+完整 objective 为：
+
+$$
+L_{v59}=L_{prediction}+0.5L_{zero}+L_{rank}+0.05L_{effect\ variance}.
+$$
+
+- **因果边界**：student source encoder 只读取 observed prefix；future object target 只进入 training-only Posterior；zero-effect Dynamics 不得随 future target swap 改变；future target swap 必须改变 posterior effect 和 correct prediction。
+- **执行契约**：默认六源数据、H=1/2/3/4、future horizons 1/2/4 个采样间隔、effective batch 256、10,000 steps。80GB GPU 默认每卡 batch 32；GPU 数量自动读取。每 1,000 steps 保存 milestone，每 100 steps保存 recovery；支持严格 v59 resume。
+- **W&B 主指标**：`correct_active_error`、`zero_active_error`、`shuffled_active_error`、`persistence_active_error`，以及基于这些原始聚合误差重新计算的三项 gain。`point_velocity_probe` 不再进入核心 objective。
+- **held 验收**：source-balanced evaluator 必须确认 aggregate correct effect 相对 zero、shuffled 和 persistence 都改善至少 10%；分别报告每个 source、H 和 horizon。该 evaluator 仍依赖训练 tracker 构造 target，所以只能判定 dynamic objective 是否成立，不能替代 G3 independent object validity。
+- **当前结果**：代码、Python 静态编译、Ruff、shell syntax 和 `git diff --check` 已通过；真实 GPU startup verifier、训练曲线和 held evaluation 尚未执行。当前状态是 `implemented, awaiting real GPU falsification`，不是 objective 已通过。
+- **下一 Gate**：先运行 v59 startup verifier；随后只进行 10,000-step objective experiment。若 2k/5k/10k 的 correct effect 不能持续优于三种 baseline，不增加数据量或延长训练，直接判定当前 target/objective 失败并分析哪一项 baseline 未被超越。
