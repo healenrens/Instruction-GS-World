@@ -721,3 +721,42 @@ $$
 - **当前结果**：代码、Python 静态编译、Ruff、shell syntax 和 `git diff --check` 已通过；真实 GPU startup verifier、训练曲线和 held evaluation 尚未执行。当前状态是 `implemented, awaiting real GPU falsification`，不是 objective 已通过。
 - **首次真实 verifier 修复**：提交 `4f3495e` 将 persistence lifecycle baseline 从 autocast 不支持的 probability-space `binary_cross_entropy` 改为数学等价的 float32 logit 加 `binary_cross_entropy_with_logits`。该修复不改变 target、权重或 objective 含义；旧 revision 的 startup report 不可复用，必须在新 HEAD 上重新运行 verifier。
 - **下一 Gate**：先运行 v59 startup verifier；随后只进行 10,000-step objective experiment。若 2k/5k/10k 的 correct effect 不能持续优于三种 baseline，不增加数据量或延长训练，直接判定当前 target/objective 失败并分析哪一项 baseline 未被超越。
+
+### 2026-08-25：v59 长训完成与 Unseen-Window Evaluation 契约
+
+- **训练证据**：W&B `1ud4ajuy`，run
+  `object_transition_objective_v59_seed17_6193744`，代码提交
+  `61937441b8a62d1db881d83b65b5a7fb6b14ab4d`，已正常完成 10,000 steps。
+  最终 checkpoint 为
+  `/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/object_transition_objective_v59_seed17_6193744/v59_transition_0010000.pt`。
+- **完整历史结果**：最后 500 steps 的 motion-active 原始误差为 correct
+  `0.07978`、zero `0.14127`、shuffled `0.49548`、persistence `0.10001`；
+  correct 分别改善 `43.53%`、`83.90%`、`20.23%`。rolling-500 aggregate 在
+  step 4,400 首次超过 persistence，并在 step 5,700 达到 10% improvement。
+- **时间尺度分解**：最后窗口中，`h1/h2/h4` 相对 persistence 分别为
+  `-21.29%/+3.64%/+33.57%`。因此训练 aggregate 已通过，但变化较小的 short
+  horizon 仍失败；不得把 aggregate 结果写成所有时间尺度的 dynamics 都成立。
+- **收敛判决**：8k-10k correct error 每 1,000 steps 只下降约 `0.00085`，LR 已到
+  `2e-5`，继续同配置训练不能作为修复 short-horizon failure 的主要方案。
+- **旧 evaluator 问题**：旧脚本将 `train` split 上固定抽取的窗口称为 held
+  evaluation，没有排除训练 sampler 已经访问的 base indices；同时按 batch mean
+  聚合 active error，可能因各 batch 的 motion-active 数量不同产生偏差。W&B 只记录
+  aggregate 与 gate，无法检查 source、history、temporal step 和 horizon failure。
+- **新 evaluator 单一改动**：从 v59 checkpoint 的 batch、grad accumulation、seed、
+  world size 和 global step 精确重建 DDP sampler，排除所有训练 base indices，再从相同
+  train split 选择 source-balanced unseen windows。该集合是 `sampler-unseen windows`，
+  不是 held episode、held task 或 independent object truth。
+- **统计契约**：以真实 motion-active count 累积 correct/zero/shuffled/persistence error，
+  同时报告 source-history macro、全样本 micro、六个 source、H=1-4、100/200/400/800ms
+  temporal bins 和 h1/h2/h4。对 24 个 source-history condition 做 2,000 次 bootstrap，
+  输出三项 aggregate gain 的 95% CI。
+- **双层 Gate**：`aggregate_status` 要求 macro 与 micro 均对三种 baseline 改善至少
+  10%、CI 下界为正且训练/评测 index overlap 为零；`temporal_status` 额外要求每个
+  horizon 都达到三项 10% improvement。总 `status` 只有两层同时通过才为 passed。
+- **W&B 契约**：完整写入 `eval/macro/*`、`eval/micro/*`、`eval/source/*`、
+  `eval/history/*`、`eval/temporal/*`、`eval/condition/*`、`eval/bootstrap/*` 和
+  `eval/gate/*`。评测仍使用 frozen DINO、CoTracker 和 relation teacher，只能决定 v59
+  dynamic objective 是否成立，不能证明 independent object semantics 或部署期 Prior。
+- **下一 Gate**：在 10,000-step checkpoint 上运行一次 unseen-window evaluation。
+  先判断 aggregate 是否从训练曲线泛化，再明确 short-horizon failure 是否跨 source、H
+  与 temporal step 普遍存在；结果返回前不修改 Dynamics 或继续训练。

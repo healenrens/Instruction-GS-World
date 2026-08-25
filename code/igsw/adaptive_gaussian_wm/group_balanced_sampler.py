@@ -1,4 +1,5 @@
 """Deterministic task-balanced sampling for distributed episode training."""
+
 from __future__ import annotations
 
 import hashlib
@@ -94,30 +95,33 @@ class DistributedGroupBalancedSampler(Sampler[int]):
         self.num_samples = int(samples_per_rank)
         self.total_size = total_size
 
-    def __iter__(self) -> Iterator[int]:
-        if self.num_samples == 0:
-            return iter(())
+    def sample_indices(self, start: int = 0, stop: int | None = None) -> torch.Tensor:
+        """Return a deterministic slice without materializing the full epoch."""
+        stop = self.num_samples if stop is None else int(stop)
+        start = int(start)
+        if not 0 <= start <= stop <= self.num_samples:
+            raise ValueError("sampler slice is outside the local epoch")
+        if start == stop:
+            return torch.empty(0, dtype=torch.long)
         local_positions = torch.arange(
-            self.start_index,
-            self.num_samples,
+            start,
+            stop,
             dtype=torch.long,
         )
         global_positions = local_positions * self.num_replicas + self.rank
-        order_offset = _stable_integer(
-            "global-offset", self.seed, self.epoch
-        ) % self.total_size
+        order_offset = (
+            _stable_integer("global-offset", self.seed, self.epoch) % self.total_size
+        )
         order_step = _coprime_step(
             self.total_size,
             _stable_integer("global-step", self.seed, self.epoch),
         )
-        virtual = (
-            order_offset + order_step * global_positions
-        ).remainder(self.total_size)
+        virtual = (order_offset + order_step * global_positions).remainder(
+            self.total_size
+        )
 
         target_ends = torch.tensor(self.group_targets).cumsum(0)
-        target_starts = torch.cat(
-            (torch.zeros(1, dtype=torch.long), target_ends[:-1])
-        )
+        target_starts = torch.cat((torch.zeros(1, dtype=torch.long), target_ends[:-1]))
         group_ids = torch.bucketize(virtual, target_ends, right=True)
         ordinals = virtual - target_starts[group_ids]
         source_starts = torch.tensor(
@@ -130,8 +134,7 @@ class DistributedGroupBalancedSampler(Sampler[int]):
         )
         source_offsets = torch.tensor(
             [
-                _stable_integer("source-offset", self.seed, self.epoch, group)
-                % length
+                _stable_integer("source-offset", self.seed, self.epoch, group) % length
                 for group, length in enumerate(source_lengths.tolist())
             ],
             dtype=torch.long,
@@ -147,10 +150,12 @@ class DistributedGroupBalancedSampler(Sampler[int]):
             dtype=torch.long,
         )
         indices = source_starts[group_ids] + (
-            source_offsets[group_ids]
-            + source_steps[group_ids] * ordinals
+            source_offsets[group_ids] + source_steps[group_ids] * ordinals
         ).remainder(source_lengths[group_ids])
-        return iter(indices.tolist())
+        return indices
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self.sample_indices(self.start_index, self.num_samples).tolist())
 
     def __len__(self) -> int:
         return self.num_samples - self.start_index

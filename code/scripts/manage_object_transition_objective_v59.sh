@@ -65,24 +65,12 @@ status() {
 }
 
 evaluate_run() {
-  EVAL_CHECKPOINT="${EVAL_CHECKPOINT:-${OUT}/latest.pt}"
-  EVAL_OUTPUT="${EVAL_OUTPUT:-${OUT}/held_objective_evaluation.json}"
-  CUDA_VISIBLE_DEVICES="${EVAL_CUDA_VISIBLE_DEVICES:-2}" \
-    "${PY}" "${ROOT}/code/scripts/evaluate_object_transition_objective_v59.py" \
-      --data_index "${DATA_INDEX}" --checkpoint "${EVAL_CHECKPOINT}" \
-      --dino_checkpoint "${DINO_CHECKPOINT}" \
-      --tracker_checkpoint "${TRACKER_CHECKPOINT}" --output "${EVAL_OUTPUT}" \
-      --history_lengths "${HISTORY_LENGTHS:-1,2,3,4}" \
-      --teacher_future_frames "${TEACHER_FUTURE_FRAMES:-4}" \
-      --temporal_step_ms "${TEMPORAL_STEP_MS:-100,200,400,800}" \
-      --samples_per_condition "${EVAL_SAMPLES_PER_CONDITION:-64}" \
-      --batch "${EVAL_BATCH:-8}" --dino_frame_batch "${EVAL_DINO_FRAME_BATCH:-96}" \
-      --amp "${AMP:-bf16}" --wandb_mode "${WANDB_MODE:-online}" \
-      --wandb_project "${WANDB_PROJECT:-instruct-gs-world}" \
-      --wandb_entity "${WANDB_ENTITY:-}" \
-      --wandb_name "${EVAL_WANDB_NAME:-${RUN_NAME}_held_eval}" \
-      --wandb_group "${EVAL_WANDB_GROUP:-object-transition-objective-v59-eval}" \
-      --wandb_dir "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}"
+  CHECKPOINT="${EVAL_CHECKPOINT:-${OUT}/latest.pt}" \
+  OUTPUT="${EVAL_OUTPUT:-${OUT}/unseen_objective_evaluation.json}" \
+  EVALUATOR_REVISION="${SOURCE_REVISION}" \
+  WANDB_NAME="${EVAL_WANDB_NAME:-${RUN_NAME}_unseen_eval}" \
+  WANDB_GROUP="${EVAL_WANDB_GROUP:-object-transition-objective-v59-eval}" \
+    bash "${ROOT}/code/scripts/evaluate_object_transition_objective_v59_suite.sh"
 }
 
 case "${COMMAND}" in

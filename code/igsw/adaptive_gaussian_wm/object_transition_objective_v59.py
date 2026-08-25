@@ -12,7 +12,7 @@ def _weighted_mean(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return (value * weight).sum() / weight.sum().clamp_min(1.0)
 
 
-def _prediction_errors(prediction, target, config):
+def transition_prediction_errors_v59(prediction, target, config):
     semantic = 1.0 - F.cosine_similarity(
         prediction.semantic.float(), target.future_semantic.float(), dim=-1
     )
@@ -35,7 +35,7 @@ def _prediction_errors(prediction, target, config):
     return total, semantic, geometry, lifecycle
 
 
-def _persistence_errors(target, config):
+def persistence_transition_errors_v59(target, config):
     semantic = 1.0 - torch.einsum(
         "bd,bkd->bk", target.source_semantic.float(), target.future_semantic.float()
     )
@@ -74,10 +74,10 @@ def _relative_gain(correct, baseline, weight):
 def object_transition_objective_v59(output, target, config):
     valid = target.pair_valid.float()
     active = target.motion_active.float()
-    correct = _prediction_errors(output["correct"], target, config)
-    zero = _prediction_errors(output["zero"], target, config)
-    shuffled = _prediction_errors(output["shuffled"], target, config)
-    persistence = _persistence_errors(target, config)
+    correct = transition_prediction_errors_v59(output["correct"], target, config)
+    zero = transition_prediction_errors_v59(output["zero"], target, config)
+    shuffled = transition_prediction_errors_v59(output["shuffled"], target, config)
+    persistence = persistence_transition_errors_v59(target, config)
 
     prediction = _weighted_mean(correct[0], valid)
     source_target = type(
@@ -96,7 +96,8 @@ def object_transition_objective_v59(output, target, config):
         },
     )()
     zero_anchor = _weighted_mean(
-        _prediction_errors(output["zero"], source_target, config)[0], valid
+        transition_prediction_errors_v59(output["zero"], source_target, config)[0],
+        valid,
     )
     required_fraction = 1.0 - config.intervention_margin
     intervention = sum(
