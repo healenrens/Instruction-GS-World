@@ -802,3 +802,107 @@ $$
   对短时或近 persistence 数据，模型会预测过量变化。当前最高优先级不是继续延长 v59，
   而是修正 transition target 与 Dynamics 的变化尺度/静止分解，并针对 AgiBot、Droid
   的短时窗口建立一般化的 no-change/small-change 表达。
+
+### 2026-08-25：v60 Gated Residual Object Transition 实现决策
+
+- **版本主线**：branch `codex/gated-residual-object-transition-v60`；
+  `checkpoint_version=60`；`architecture=gated_residual_object_transition_v1`。
+- **唯一问题定义**：v59 已证明 continuous posterior effect 携带 future transition
+  信息，但 full-state Dynamics 对所有样本直接回归完整 future state，导致小变化和短时间
+  间隔发生 systematic over-prediction。v60 不修改 object teacher、不增加数据特例，也不
+  调整 source sampling 权重；它只修正 transition parameterization 和 objective。
+- **继承资产**：冻结 v58 Object State encoder；从 v59 step 10,000 checkpoint 严格加载
+  encoder 与 continuous `[4,32]` posterior；继续使用六源视频、冻结 DINO、冻结
+  CoTracker、relation teacher、source-balanced sampler、DDP、W&B 和 checkpoint 基础设施。
+- **明确不继承**：不加载 v59 full-state Dynamics，不恢复 v59 optimizer/scheduler，不把
+  RGB、机器人 action、真实 center delta、language 或 History-only Prior 加入模型。
+
+对每个有效 object transition，先用与 prediction error 相同的 semantic、relative geometry
+和 lifecycle 距离定义 teacher change distance：
+
+$$
+d^*_{t,\Delta}=D_{semantic}(Y_t,Y_{t+\Delta})
++D_{geometry}(Y_t,Y_{t+\Delta})
++0.25D_{lifecycle}(Y_t,Y_{t+\Delta}).
+$$
+
+再去掉 frozen teacher 的小噪声区间，并映射为连续变化强度：
+
+$$
+g^*_{t,\Delta}
+=1-\exp\left(
+-\frac{\max(d^*_{t,\Delta}-\epsilon,0)}{\tau}
+\right),
+\qquad g^*_{t,\Delta}\in[0,1].
+$$
+
+默认 $\epsilon=0.02$、$\tau=0.08$。这不是 motion-active 的二值分类器；它明确区分
+no-change、small change 和 large change，避免把 teacher noise 当成必须预测的动态。
+
+模型先从 RGB-only source state 重建一个与 future 和时间无关的 source base：
+
+$$
+B_t=B_\omega(S_t).
+$$
+
+Posterior 仍解释真实 transition 的内容：
+
+$$
+z_{t,\Delta}=Q_\phi(Y_t,Y_{t+\Delta},\Delta),
+\qquad z_{t,\Delta}\in\mathbb{R}^{4\times32}.
+$$
+
+新增 change gate 只预测变化幅度：
+
+$$
+\hat g_{t,\Delta}=\sigma(G_\eta(z_{t,\Delta})).
+$$
+
+Dynamics 不再生成完整 future state，而只生成相对 source base 的 residual：
+
+$$
+\Delta\hat Y_{t,\Delta}=R_\theta(S_t,z_{t,\Delta},\Delta),
+$$
+
+$$
+\hat Y_{t+\Delta}=B_t+\hat g_{t,\Delta}\Delta\hat Y_{t,\Delta}.
+$$
+
+semantic 分量在 residual 相加后重新归一化；relative geometry 与 visibility logits 直接做
+residual update。zero branch 在代码中直接返回 $B_t$，而不是再运行一个输入 zero effect
+的神经网络。因此 zero/no-change 不能被模型任意恶化来伪造 intervention gain。
+
+v60 objective 为：
+
+$$
+L_{v60}=L_{future}
++0.5L_{base-source}
++0.5L_{gate-calibration}
++0.5L_{no-change}
++L_{magnitude-rank}
++0.05L_{effect-variance}.
+$$
+
+其中 $L_{base-source}$ 直接把 $B_t$ 锚定到 teacher source object state；
+$L_{gate-calibration}$ 使用 soft-target BCE 令 $\hat g$ 拟合 $g^*$；$L_{no-change}$ 按
+$1-g^*$ 加权，要求低变化样本的 correct prediction 保持接近 source；intervention margin
+按 $g^*$ 连续缩放，变化越小越不强迫模型制造相对 persistence 的固定 10% 优势。
+
+- **优化器边界**：posterior 与 change gate 使用 `5e-5`；全新 source base 与 residual
+  Dynamics 使用 `2e-4`；两组共享 5% warmup 和 0.1 cosine floor。默认 10,000 steps、
+  effective batch 256；80GB GPU 默认每卡 batch 32，GPU 数量自动发现。
+- **新增 W&B 指标**：除 v59 comparable active error/gain 外，记录 change-weighted、
+  low-change、high-change error/gain，teacher change strength、predicted gate mean/MAE/
+  correlation、low-change residual magnitude，以及每个 horizon 的 gate calibration。
+- **因果契约**：source encoder 与 source base 在 future swap 下差异必须小于 $10^{-6}$；
+  Posterior、gate 和 correct prediction必须变化；gate=0 的 zero branch必须与 source base
+  完全一致；增大同一 effect 的 gate 必须单调增大 residual magnitude。
+- **正式验收**：沿用 v59 sampler-unseen 24-condition evaluator。macro/micro 继续要求相对
+  zero、shuffled、persistence 均改善至少 10%；h1/h2/h4 必须分别通过；low-change 不得比
+  persistence 更差，high-change 必须保留至少 10% improvement；AgiBot 与 Droid 不得继续
+  出现 aggregate negative persistence gain。
+- **本地验证状态**：Python compile、Ruff、shell syntax、`git diff --check` 和 CPU synthetic
+  contract 已通过。synthetic 中 no-change teacher strength 为 `0.0`，large-change 为
+  `0.99999`；高 gate residual 大于低 gate，change gate 与 residual Dynamics 均有梯度。
+  尚未执行真实 GPU verifier、六源训练或 unseen-window evaluation，因此当前只能记为
+  `implemented, awaiting real GPU falsification`，不能记为 v60 已解决 temporal failure。
