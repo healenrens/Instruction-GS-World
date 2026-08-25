@@ -755,8 +755,10 @@ $$
   horizon 都达到三项 10% improvement。总 `status` 只有两层同时通过才为 passed。
 - **W&B 契约**：完整写入 `eval/macro/*`、`eval/micro/*`、`eval/source/*`、
   `eval/history/*`、`eval/temporal/*`、`eval/condition/*`、`eval/bootstrap/*` 和
-  `eval/gate/*`。评测仍使用 frozen DINO、CoTracker 和 relation teacher，只能决定 v59
-  dynamic objective 是否成立，不能证明 independent object semantics 或部署期 Prior。
+  `eval/gate/*`；每完成一个 source-history condition 即同步一次进度与该 condition
+  指标，最终再写完整 summary。评测仍使用 frozen DINO、CoTracker 和 relation teacher，
+  只能决定 v59 dynamic objective 是否成立，不能证明 independent object semantics 或
+  部署期 Prior。
 - **下一 Gate**：在 10,000-step checkpoint 上运行一次 unseen-window evaluation。
   先判断 aggregate 是否从训练曲线泛化，再明确 short-horizon failure 是否跨 source、H
   与 temporal step 普遍存在；结果返回前不修改 Dynamics 或继续训练。

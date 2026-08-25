@@ -251,6 +251,15 @@ def log_wandb(run, report):
     run.finish()
 
 
+def log_condition_wandb(run, name, metrics, completed, total):
+    if run is None:
+        return
+    payload = metric_payload(f"eval/condition/{name}", metrics)
+    payload["eval/progress/completed_conditions"] = float(completed)
+    payload["eval/progress/total_conditions"] = float(total)
+    run.log(payload, step=completed)
+
+
 def main():
     args = parse_args()
     for name in (
@@ -296,6 +305,7 @@ def main():
     }
     selected = {index for indices in indices_by_source.values() for index in indices}
     exclusion = training_exclusion_contract_v59(checkpoint, excluded, selected)
+    print(json.dumps({"training_exclusion": exclusion}, sort_keys=True), flush=True)
 
     device = torch.device("cuda:0")
     model = QueryObjectTransitionModel(config).to(device).eval()
@@ -322,7 +332,9 @@ def main():
             for milliseconds in parse_ints(args.temporal_step_ms)
         },
     }
+    run = init_wandb(args, config, checkpoint)
     conditions = {}
+    total_conditions = len(dataset.source_names) * len(history_values)
     for source in dataset.source_names:
         for history in history_values:
             name = f"{source}/h{history}"
@@ -341,6 +353,13 @@ def main():
             print(
                 json.dumps({"condition": name, **conditions[name]}, sort_keys=True),
                 flush=True,
+            )
+            log_condition_wandb(
+                run,
+                name,
+                conditions[name],
+                len(conditions),
+                total_conditions,
             )
 
     macro = macro_metrics_v59(list(conditions.values()))
@@ -423,7 +442,6 @@ def main():
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, sort_keys=True)
         handle.write("\n")
-    run = init_wandb(args, config, checkpoint)
     log_wandb(run, report)
     print(json.dumps(report, sort_keys=True), flush=True)
 
