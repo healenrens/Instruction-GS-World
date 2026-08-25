@@ -762,3 +762,43 @@ $$
 - **下一 Gate**：在 10,000-step checkpoint 上运行一次 unseen-window evaluation。
   先判断 aggregate 是否从训练曲线泛化，再明确 short-horizon failure 是否跨 source、H
   与 temporal step 普遍存在；结果返回前不修改 Dynamics 或继续训练。
+
+### 2026-08-25：v59 Unseen-Window Evaluation 正式结果
+
+- **执行证据**：W&B run `nayw8awc`，名称
+  `object_transition_v59_step10000_unseen_eval_25f3951`，状态 `finished`；评测代码
+  revision 为 `25f3951bdeaa069eb92b963c39dcbb0c59f6eb9d`，输入 checkpoint 为 v59
+  step 10,000（训练 revision `61937441b8a62d1db881d83b65b5a7fb6b14ab4d`）。24/24
+  source-history conditions 均完成，总运行时间约 410 秒。
+- **数据隔离成立**：训练 sampler 共访问 `2,071,383` 个唯一 base indices；评测从六个
+  source 各取 64 个、共 384 个 base indices，训练/评测 overlap 为 0。每个 base index
+  分别评测 H=1/2/3/4，共 1,536 clips。该结果仍是 train split 内的 sampler-unseen
+  window 泛化，不是 held episode、held task 或 independent object truth。
+- **Aggregate 通过**：source-history macro correct error 为 `0.08314`，相对 zero、
+  shuffled、persistence 分别改善 `43.46%`、`82.71%`、`19.61%`；micro 对应改善
+  `43.94%`、`83.13%`、`20.84%`。persistence gain 的 95% bootstrap CI 为
+  `[11.51%, 26.05%]`，因此 aggregate improvement 不是少数 condition 的偶然均值。
+- **Horizon Gate 失败**：macro 的 h1/h2/h4 persistence gain 分别为
+  `-29.96%/+5.88%/+38.05%`；micro 分别为 `-20.97%/+8.35%/+37.85%`。h1 明确比
+  current-state copy 差，h2 尚未达到 10% 门槛，只有 h4 稳定通过。该模式与训练末段
+  `-21.29%/+3.64%/+33.57%` 一致，排除了只由训练 rolling window 造成的假象。
+- **Source 分解**：Bridge、HY、RoboMind、RoboTwin 的 aggregate persistence gain 分别为
+  `+32.47%/+16.64%/+30.53%/+28.23%`；AgiBot 与 Droid 分别为
+  `-8.66%/-16.83%`。24 个 condition 全部显著优于 zero 和 shuffled effect，但只有
+  16/24 对 persistence 改善至少 10%；失败的 8 个 condition 正好是 AgiBot 与 Droid
+  的全部 H=1/2/3/4。
+- **时间间隔分解**：100/200/400/800ms aggregate persistence gain 为
+  `+1.00%/+15.99%/+22.96%/+29.97%`。h1 在四个 temporal bins 上均为负；h2 只有
+  800ms 明确通过。这说明失败随真实变化量减小而加剧，而不是 history 长度不足。
+- **History 分解**：H=1/2/3/4 aggregate persistence gain 为
+  `+13.56%/+19.97%/+23.76%/+24.84%`，更多 history 有稳定帮助；但每一种 history
+  长度内部的 h1 仍为负，因此仅增加 history 不能修复 short-horizon calibration。
+- **Latent effect 未塌缩**：macro effect std 为 `0.1959`，高于 `0.1` 门槛；所有
+  24 个 condition 中 correct effect 都比 zero 和 shuffled effect 好至少 10%。这证明
+  posterior effect 携带真实 future transition 信息，Dynamics 也实际读取了 effect。
+- **正式判决**：`aggregate_status=passed`，`temporal_status=failed`，总
+  `status=failed`。v59 证明了 teacher-conditioned latent effect 对中长时 object
+  transition 有用并能泛化到未采样窗口，但没有形成统一、时间校准的 transition model；
+  对短时或近 persistence 数据，模型会预测过量变化。当前最高优先级不是继续延长 v59，
+  而是修正 transition target 与 Dynamics 的变化尺度/静止分解，并针对 AgiBot、Droid
+  的短时窗口建立一般化的 no-change/small-change 表达。
