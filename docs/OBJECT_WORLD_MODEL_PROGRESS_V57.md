@@ -1099,3 +1099,44 @@ geometry，只有约 5.99% 是 Dynamics 相对 teacher state 的新增误差。�
 Dynamics、调 loss weight 或继续 V60 长训，而是先把 object state 从“单一 semantic vector +
 单 Gaussian moment”改成能够表达 object-local appearance 与多区域 support 的紧凑组合状态；
 Dynamics 必须等新 state 的 observation-grounded ceiling 明显改善后再训练。
+
+### 2026-08-27：V61 单 Student SigLIP2 Continuous-Carrier Object State
+
+**What changed**
+
+1. 主线从 V60 的单一 semantic vector 与单 Gaussian support，改为一个 RGB-only Student
+   Encoder 产生 token field，再由 128 个连续 carriers 与 16 个 persistent object roots
+   表达 object-local appearance、support、identity、dynamic、visibility 和 presence。carrier
+   center 来自对 Student token field 的可学习连续加权；patch 只作为 encoder 的内部采样，
+   不再作为 object GT、重建单元或主要评测对象。
+2. Student 只有一个视觉 backbone。实现四个共享下游状态头的对照：`dino`、`siglip2`、
+   `siglip2_dino`、`siglip2_dino_object`。最后两组分别增加 frozen DINO continuous-point
+   alignment，以及 frozen SigLIP2 object-crop semantic alignment；它们都是 training-only
+   teacher，不构成第二条 Student 分支，部署路径只保留一个 Student。
+3. Object State 监督改为 continuous CoTracker points 和 soft trajectory relations：同一 track
+   的 carrier/root assignment、连续坐标、motion、visibility/presence、same-object relation 和
+   different-motion relation分别监督。SigLIP2 object target 由 soft relation component 的首尾帧
+   object-centered crops 得到，并增加 batch 内 semantic retrieval；不使用 instance annotation、
+   hard component pseudo-label 或固定 slot index 作为 GT。
+
+**Why**
+
+V60 observation-grounded 复评显示约 82.32% 的绝对误差已经存在于“单一 semantic average +
+最小 compositor”下限，Dynamics 只占约 5.99%。因此继续优化 Dynamics 或 patch-field decoder
+无法解决 object state 不充分的问题；V61 必须先比较 DINO 与 SigLIP2 对 object semantics 的
+贡献，并验证 continuous carriers 是否能在外部轨迹坐标上形成稳定、可分离、可重现的对象状态。
+
+**Impact**
+
+- V61 是 `object_state`-only 阶段，明确不含 Dynamics、latent effect、language 或 explicit
+  action；V60 及更早 checkpoint 不允许 warm-start，四组实验都从各自 foundation model 初始化。
+- 核心 W&B 指标改为 `track_coordinate_error`、`carrier_track_cycle_error`、
+  `object_root_track_cycle_error`、`relation_same_error`、`relation_different_error`、
+  `visibility_error`、`presence_error`、`track_reappearance_identity_error`、
+  `dino_local_alignment_error`、`object_semantic_retrieval_accuracy`、effective carriers/roots 和
+  scene owner fraction。成功标准是 held video 上这些外部目标共同改善，不再以 dense patch
+  reconstruction 或 action-free persistence prediction 作为 Object State 成功标准。
+- 实现分支为 `codex/siglip-continuous-carrier-v61`。本地已完成 Python compile、Ruff、shell
+  syntax 和 `git diff --check`；本机 Python 无 `torch`，所以 CPU tensor-contract 尚未执行。
+  真实 DINO/SigLIP2/CoTracker GPU verifier、四组 probe、held evaluator 和 W&B 结论仍属于
+  `待服务器验证`，在结果返回前不能声称 SigLIP2 或 V61 已经有效。
