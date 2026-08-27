@@ -53,6 +53,7 @@ def parse_args():
     parser.add_argument("--output", required=True)
     parser.add_argument("--chunk_length", type=int, default=4)
     parser.add_argument("--temporal_step_ms", default="100,200,400")
+    parser.add_argument("--held_group_stride", type=int, default=20)
     parser.add_argument("--student_frame_batch", type=int, default=16)
     parser.add_argument("--dino_frame_batch", type=int, default=16)
     parser.add_argument("--siglip2_teacher_batch", type=int, default=16)
@@ -146,7 +147,27 @@ def main():
         args.temporal_step_ms,
         max_items=32,
         seed=args.seed,
+        group_partition="train",
+        held_group_stride=args.held_group_stride,
     )
+    held_dataset = MultiSourceRobotVideoDataset(
+        args.data_index,
+        "train",
+        str(args.chunk_length),
+        args.temporal_step_ms,
+        max_items=32,
+        seed=args.seed,
+        group_partition="held",
+        held_group_stride=args.held_group_stride,
+    )
+    training_groups = set(
+        zip(dataset._group_source_indices, dataset.sampling_group_names)
+    )
+    held_groups = set(
+        zip(held_dataset._group_source_indices, held_dataset.sampling_group_names)
+    )
+    if training_groups & held_groups:
+        raise RuntimeError("v61 train and held task groups overlap")
     batch = batch_from_sample(dataset[(0, args.chunk_length)], device)
     model = ContinuousCarrierObjectWorldModelV61(
         config,
@@ -248,6 +269,11 @@ def main():
         "training_only_dino_teacher": True,
         "training_only_cotracker_teacher": True,
         "training_only_siglip2_crop_teacher": config.uses_object_semantics,
+        "group_partition": "train",
+        "held_group_stride": args.held_group_stride,
+        "training_group_count": len(training_groups),
+        "held_group_count": len(held_groups),
+        "train_held_group_overlap": 0,
         "historical_checkpoint_used": False,
         "student_token_count": field.features.shape[2],
         "carrier_count": config.carrier_count,

@@ -47,10 +47,8 @@ class StudentVisualEncoderV61(nn.Module):
         else:
             self._build_siglip2(siglip2_checkpoint)
         self.projector = nn.Sequential(
-            nn.LayerNorm(self.native_dim),
             nn.Linear(self.native_dim, config.student_dim),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(config.student_dim, config.student_dim),
+            nn.LayerNorm(config.student_dim),
         )
 
     def _build_dino(self, checkpoint: str) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .fixed_teacher_projection_v61 import fixed_group_projection_v61
 from .point_track_teacher import sample_patch_field
 
 
@@ -121,7 +122,10 @@ def _dino_alignment(model, state, assignment, evidence):
         "btpq,btqd->btpd", assignment, state.carriers.identity.float()
     )
     prediction = F.normalize(model.identity_to_dino(identity), dim=-1, eps=1e-6)
-    error = 1.0 - (prediction * evidence.sampled_features.float()).sum(dim=-1)
+    target = fixed_group_projection_v61(
+        evidence.sampled_features, model.config.teacher_projection_dim
+    )
+    error = 1.0 - (prediction * target).sum(dim=-1)
     return _weighted_mean(error, evidence.visibility.float()), error
 
 
@@ -138,12 +142,15 @@ def _object_semantic_alignment(model, state, root_average, components):
     root_semantic = F.normalize(model.root_to_siglip(root_identity), dim=-1, eps=1e-6)
     prediction = torch.einsum("bmr,bard->bamd", component_root, root_semantic)
     prediction = F.normalize(prediction, dim=-1, eps=1e-6)
-    error = 1.0 - (prediction * components.semantic.float()).sum(dim=-1)
+    target = fixed_group_projection_v61(
+        components.semantic, model.config.teacher_projection_dim
+    )
+    error = 1.0 - (prediction * target).sum(dim=-1)
     valid = components.semantic_valid & components.valid[:, None]
     alignment = _weighted_mean(error, valid.float())
     final_valid = valid[:, -1]
     predicted_vectors = prediction[:, -1][final_valid]
-    target_vectors = components.semantic.float()[:, -1][final_valid]
+    target_vectors = target[:, -1][final_valid]
     if len(predicted_vectors) > 1:
         logits = predicted_vectors @ target_vectors.T / 0.07
         labels = torch.arange(len(predicted_vectors), device=logits.device)
@@ -198,6 +205,24 @@ def _state_regularizers(state):
         effective_carriers,
         effective_roots,
     )
+
+
+def _track_appearance_retrieval(identity, visibility):
+    source = identity[:, 0, 1::2]
+    target = identity[:, -1, 1::2]
+    valid = visibility[:, 0, 1::2] & visibility[:, -1, 1::2]
+    temporal_error = _weighted_mean(
+        1.0 - F.cosine_similarity(source, target, dim=-1), valid.float()
+    )
+    source_vectors = source[valid]
+    target_vectors = target[valid]
+    if len(source_vectors) > 1:
+        logits = source_vectors @ target_vectors.T / 0.07
+        labels = torch.arange(len(source_vectors), device=logits.device)
+        retrieval_accuracy = (logits.argmax(dim=-1) == labels).float().mean()
+    else:
+        retrieval_accuracy = temporal_error.detach() * 0.0
+    return temporal_error, retrieval_accuracy
 
 
 def continuous_carrier_objective_v61(
@@ -256,6 +281,9 @@ def continuous_carrier_objective_v61(
         effective_carriers,
         effective_roots,
     ) = regularizers
+    track_appearance_error, track_appearance_retrieval = _track_appearance_retrieval(
+        identity, evidence.visibility
+    )
     relation_loss = same + different
     assignment_loss = carrier_cycle + root_cycle
     lifecycle_loss = visibility + presence
@@ -290,10 +318,6 @@ def continuous_carrier_objective_v61(
         "track_motion_error": motion.detach(),
         "visibility_error": visibility.detach(),
         "presence_error": presence.detach(),
-        "dino_local_alignment_error": dino.detach(),
-        "object_semantic_alignment_error": object_semantic.detach(),
-        "object_semantic_retrieval_loss": object_retrieval.detach(),
-        "object_semantic_retrieval_accuracy": object_retrieval_accuracy.detach(),
         "carrier_repulsion": repulsion.detach(),
         "root_balance_penalty": root_balance.detach(),
         "root_identity_consistency_error": root_identity_consistency.detach(),
@@ -306,11 +330,26 @@ def continuous_carrier_objective_v61(
         "track_reappearance_identity_error": _weighted_mean(
             reappearance_identity, reappearance_weight
         ).detach(),
+        "heldout_track_appearance_temporal_error": track_appearance_error.detach(),
+        "heldout_track_appearance_retrieval_accuracy": (
+            track_appearance_retrieval.detach()
+        ),
         "continuous_track_count": evidence.visibility.float()
         .sum(dim=-1)
         .mean()
         .detach(),
-        "dino_local_error_unweighted": dino_error.mean().detach(),
-        "object_semantic_error_unweighted": object_semantic_error.mean().detach(),
     }
+    if config.uses_dino_alignment:
+        parts["dino_local_alignment_error"] = dino.detach()
+        parts["dino_local_error_unweighted"] = dino_error.mean().detach()
+        parts["heldout_track_dino_error"] = _weighted_mean(
+            dino_error[..., 1::2], evidence.visibility[..., 1::2].float()
+        ).detach()
+    if config.uses_object_semantics:
+        parts["object_semantic_alignment_error"] = object_semantic.detach()
+        parts["object_semantic_retrieval_loss"] = object_retrieval.detach()
+        parts["object_semantic_retrieval_accuracy"] = object_retrieval_accuracy.detach()
+        parts["object_semantic_error_unweighted"] = (
+            object_semantic_error.mean().detach()
+        )
     return loss, parts, carrier_assignment, root_assignment

@@ -1,62 +1,64 @@
-"""Strict full-state checkpoint contract for v61 comparison runs."""
+"""Checkpoint contracts for frozen-state v61 carrier Dynamics."""
 
 from __future__ import annotations
 
 import json
 import os
-import random
 
 import torch
-import torch.distributed as dist
 
-from .v61_config import ARCHITECTURE, CHECKPOINT_VERSION, STAGE
-
-
-def collect_rng_states(context) -> list[dict]:
-    local = {
-        "torch": torch.get_rng_state(),
-        "cuda": torch.cuda.get_rng_state(torch.device(context.device)),
-        "python": random.getstate(),
-    }
-    if not context.distributed:
-        return [local]
-    states: list[dict | None] = [None] * context.world_size
-    dist.all_gather_object(states, local)
-    if any(state is None for state in states):
-        raise RuntimeError("failed to gather v61 RNG states")
-    return [state for state in states if state is not None]
+from .v61_config import (
+    ARCHITECTURE,
+    CHECKPOINT_VERSION,
+    DYNAMICS_ARCHITECTURE,
+    DYNAMICS_STAGE,
+    STAGE,
+)
 
 
-def restore_rng_state(checkpoint: dict, context) -> None:
-    states = checkpoint["rng_states"]
-    if len(states) != context.world_size:
-        raise ValueError("v61 resume GPU count differs")
-    state = states[context.rank]
-    torch.set_rng_state(state["torch"])
-    torch.cuda.set_rng_state(state["cuda"], device=torch.device(context.device))
-    random.setstate(state["python"])
-
-
-def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
+def validate_state_checkpoint_v61(
+    checkpoint: dict, config, source_revision: str, held_group_stride: int
+):
     expected = {
         "checkpoint_version": CHECKPOINT_VERSION,
         "architecture": ARCHITECTURE,
         "stage": STAGE,
+        "git_commit": source_revision,
+        "config": config.to_dict(),
+    }
+    differences = {
+        name: (checkpoint.get(name), value)
+        for name, value in expected.items()
+        if checkpoint.get(name) != value
+    }
+    if differences:
+        raise ValueError(f"v61 Dynamics state checkpoint differs: {differences}")
+    if checkpoint.get("args", {}).get("held_group_stride") != held_group_stride:
+        raise ValueError("v61 state and Dynamics held-group partitions differ")
+
+
+def validate_dynamics_resume_v61(checkpoint, args, world_size, config):
+    expected = {
+        "checkpoint_version": CHECKPOINT_VERSION,
+        "architecture": DYNAMICS_ARCHITECTURE,
+        "stage": DYNAMICS_STAGE,
         "parallelism": "ddp_full_state_dict",
         "git_commit": args.git_commit,
         "world_size": world_size,
         "config": config.to_dict(),
+        "state_checkpoint": args.state_checkpoint,
+        "effect_capacity": args.effect_capacity,
     }
     differences = {
-        key: (checkpoint.get(key), value)
-        for key, value in expected.items()
-        if checkpoint.get(key) != value
+        name: (checkpoint.get(name), value)
+        for name, value in expected.items()
+        if checkpoint.get(name) != value
     }
     if differences:
-        raise ValueError(f"v61 resume header differs: {differences}")
-    saved = checkpoint.get("args", {})
+        raise ValueError(f"v61 Dynamics resume header differs: {differences}")
     immutable = (
         "variant",
+        "effect_capacity",
         "data_index",
         "chunk_lengths",
         "temporal_step_ms",
@@ -65,9 +67,7 @@ def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
         "grad_accum",
         "target_global_batch",
         "steps",
-        "backbone_lr",
-        "head_lr",
-        "lr_floor_ratio",
+        "lr",
         "weight_decay",
         "warmup_steps",
         "seed",
@@ -76,22 +76,25 @@ def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
         "siglip2_checkpoint",
         "tracker_checkpoint",
     )
+    saved = checkpoint.get("args", {})
     argument_differences = {
         name: (saved.get(name), getattr(args, name))
         for name in immutable
         if saved.get(name) != getattr(args, name)
     }
     if argument_differences:
-        raise ValueError(f"v61 resume arguments differ: {argument_differences}")
+        raise ValueError(
+            f"v61 Dynamics resume arguments differ: {argument_differences}"
+        )
 
 
-def save_checkpoint(
-    path, model, optimizer, scheduler, args, global_step, rng_states, checkpoint_kind
+def save_dynamics_checkpoint_v61(
+    path, model, optimizer, scheduler, args, step, rng_states, checkpoint_kind
 ):
     state = {
         "checkpoint_version": CHECKPOINT_VERSION,
-        "architecture": ARCHITECTURE,
-        "stage": STAGE,
+        "architecture": DYNAMICS_ARCHITECTURE,
+        "stage": DYNAMICS_STAGE,
         "parallelism": "ddp_full_state_dict",
         "git_commit": args.git_commit,
         "model": {
@@ -101,11 +104,12 @@ def save_checkpoint(
         "scheduler": scheduler.state_dict(),
         "config": model.config.to_dict(),
         "args": vars(args),
-        "global_step": int(global_step),
+        "global_step": int(step),
         "world_size": len(rng_states),
         "rng_states": rng_states,
         "checkpoint_kind": checkpoint_kind,
-        "historical_checkpoint_used": False,
+        "state_checkpoint": args.state_checkpoint,
+        "effect_capacity": args.effect_capacity,
     }
     temporary = f"{path}.tmp.{os.getpid()}"
     torch.save(state, temporary)
@@ -118,14 +122,16 @@ def save_checkpoint(
     os.replace(temporary_link, latest)
     manifest = {
         "checkpoint_version": CHECKPOINT_VERSION,
-        "architecture": ARCHITECTURE,
-        "stage": STAGE,
+        "architecture": DYNAMICS_ARCHITECTURE,
+        "stage": DYNAMICS_STAGE,
         "checkpoint_kind": checkpoint_kind,
         "checkpoint_path": os.path.abspath(path),
-        "global_step": int(global_step),
+        "global_step": int(step),
         "world_size": len(rng_states),
         "git_commit": args.git_commit,
         "size_bytes": os.path.getsize(path),
+        "state_checkpoint": args.state_checkpoint,
+        "effect_capacity": args.effect_capacity,
     }
     with open(
         os.path.join(os.path.dirname(path), "checkpoint_manifest.json"),

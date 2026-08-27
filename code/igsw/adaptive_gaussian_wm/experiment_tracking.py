@@ -1,4 +1,5 @@
 """Rank-zero Weights & Biases tracking for adaptive WM training."""
+
 from __future__ import annotations
 
 import argparse
@@ -71,6 +72,11 @@ _DIAGNOSTIC_PREFIXES = (
     "common_fate_",
     "object_",
     "effect_",
+    "future_",
+    "persistence_",
+    "zero_effect_",
+    "shuffled_effect_",
+    "heldout_",
     "masked_",
     "scene_",
     "transient_",
@@ -142,18 +148,12 @@ class WandbTracker:
 
     def log(self, record: dict) -> None:
         step = int(record["global_step"])
-        payload = {
-            _metric_name(name): value
-            for name, value in record.items()
-        }
+        payload = {_metric_name(name): value for name, value in record.items()}
         self.run.log(payload, step=step)
 
     def record_checkpoint(self, manifest: dict) -> None:
         self.run.summary.update(
-            {
-                f"checkpoint/latest_{name}": value
-                for name, value in manifest.items()
-            }
+            {f"checkpoint/latest_{name}": value for name, value in manifest.items()}
         )
 
     def finish(self) -> None:

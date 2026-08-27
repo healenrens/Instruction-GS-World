@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, replace
 CHECKPOINT_VERSION = 61
 ARCHITECTURE = "single_encoder_continuous_carrier_object_state_v1"
 STAGE = "object_state"
+DYNAMICS_ARCHITECTURE = "latent_effect_continuous_carrier_dynamics_v1"
+DYNAMICS_STAGE = "dynamics"
 VARIANTS = (
     "dino",
     "siglip2",
@@ -27,6 +29,7 @@ class ContinuousCarrierObjectStateConfig:
     siglip2_max_patches: int = 256
     siglip2_dim: int = 768
     student_dim: int = 256
+    teacher_projection_dim: int = 256
     carrier_count: int = 128
     object_roots: int = 16
     identity_dim: int = 128
@@ -91,6 +94,7 @@ class ContinuousCarrierObjectStateConfig:
             self.siglip2_max_patches,
             self.siglip2_dim,
             self.student_dim,
+            self.teacher_projection_dim,
             self.carrier_count,
             self.object_roots,
             self.identity_dim,
@@ -107,6 +111,10 @@ class ContinuousCarrierObjectStateConfig:
             raise ValueError("student dimension must divide root heads")
         if self.siglip2_image_size % self.siglip2_patch_size:
             raise ValueError("SigLIP2 image size must divide its patch size")
+        if self.dino_dim % self.teacher_projection_dim:
+            raise ValueError("DINO dimension must divide the fixed teacher space")
+        if self.siglip2_dim % self.teacher_projection_dim:
+            raise ValueError("SigLIP2 dimension must divide the fixed teacher space")
         if self.carrier_count < self.object_roots:
             raise ValueError("carrier count must cover all object roots")
         positive = (

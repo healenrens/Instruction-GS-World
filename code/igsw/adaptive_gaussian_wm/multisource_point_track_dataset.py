@@ -13,8 +13,9 @@ import torch
 from torch.utils.data import Dataset
 from torchvision.io import ImageReadMode, decode_jpeg
 
+from .multisource_group_partition_v61 import select_group_partition_v61
 from .multisource_video_index import load_multisource_index
-from .temporal_object_dataset import parse_int_choices
+from .temporal_object_dataset import parse_int_choices, parse_millisecond_choices
 from .video_file_decoder import VideoDecodeError, decode_video_frames, square_dino_rgb
 
 
@@ -25,13 +26,6 @@ MULTISOURCE_VIDEO_CONTRACT = "multisource_native_robot_video_v1"
 def _stable_integer(*parts: object) -> int:
     payload = "\0".join(str(part) for part in parts).encode()
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little")
-
-
-def _parse_milliseconds(value: str) -> tuple[int, ...]:
-    choices = parse_int_choices(value, "temporal step milliseconds")
-    if choices[-1] > 2000:
-        raise ValueError("temporal steps exceed the v52 clip contract")
-    return choices
 
 
 @dataclass(frozen=True)
@@ -65,13 +59,15 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         temporal_step_ms: str = "33,67,100,133",
         max_items: int = 0,
         seed: int = 17,
+        group_partition: str = "all",
+        held_group_stride: int = 20,
     ):
         self.index_path = os.path.abspath(index_path)
         self.sources, episodes, payload = load_multisource_index(
             self.index_path, skip_missing_payloads=True
         )
         self.dynamic_history_lengths = parse_int_choices(chunk_lengths, "chunk lengths")
-        self.temporal_step_ms = _parse_milliseconds(temporal_step_ms)
+        self.temporal_step_ms = parse_millisecond_choices(temporal_step_ms)
         if self.dynamic_history_lengths[0] < 3 or self.dynamic_history_lengths[-1] > 32:
             raise ValueError("multisource chunk lengths must stay within [3,32]")
         self.start_step_seconds = float(payload.get("start_step_seconds", 0.5))
@@ -79,9 +75,14 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         if self.start_step_seconds <= 0.0 or self.samples_per_task < 1:
             raise ValueError("multisource sampling configuration is invalid")
         self.seed = int(seed)
+        self.group_partition = group_partition
+        self.held_group_stride = int(held_group_stride)
         self.balance_sampling = True
         self.sampling_group_targets_may_undersample = True
-        self.contract_label = "task-diverse multisource RGB-only Object State clips"
+        self.contract_label = (
+            "task-diverse multisource RGB-only Object State clips "
+            f"partition={group_partition}:{held_group_stride}"
+        )
         self.condition_dim = 0
         self.teacher_sidecar_sha256 = ""
         self.data_sha256 = ""
@@ -97,6 +98,13 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         selected = [episode for episode in episodes if episode.split == split]
         if not selected:
             raise ValueError(f"multisource index has no {split} episodes")
+        selected = select_group_partition_v61(
+            selected, self.group_partition, self.held_group_stride
+        )
+        if not selected:
+            raise ValueError(
+                f"multisource {self.group_partition} group partition is empty"
+            )
         selected.sort(
             key=lambda item: (item.source_index, item.group, item.episode_index)
         )

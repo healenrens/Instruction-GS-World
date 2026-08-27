@@ -1,4 +1,4 @@
-"""Held source/task probes for a trained v61 Object State checkpoint."""
+"""Held source-balanced evaluation for posterior carrier Dynamics."""
 
 from __future__ import annotations
 
@@ -13,9 +13,8 @@ import torch
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
-from igsw.adaptive_gaussian_wm.carrier_teacher_v61 import (  # noqa: E402
-    FrozenSiglip2ObjectTeacherV61,
-    build_object_components_v61,
+from igsw.adaptive_gaussian_wm.continuous_carrier_dynamics_model_v61 import (  # noqa: E402
+    ContinuousCarrierDynamicsModelV61,
 )
 from igsw.adaptive_gaussian_wm.continuous_carrier_world_model_v61 import (  # noqa: E402
     ContinuousCarrierObjectWorldModelV61,
@@ -34,8 +33,8 @@ from igsw.adaptive_gaussian_wm.trajectory_relation_teacher_v56 import (  # noqa:
     build_trajectory_relation_teacher_v56,
 )
 from igsw.adaptive_gaussian_wm.v61_config import (  # noqa: E402
-    ARCHITECTURE,
     CHECKPOINT_VERSION,
+    DYNAMICS_ARCHITECTURE,
     config_for_variant,
 )
 
@@ -53,7 +52,6 @@ def parse_args():
     parser.add_argument("--held_group_stride", type=int, default=20)
     parser.add_argument("--student_frame_batch", type=int, default=16)
     parser.add_argument("--dino_frame_batch", type=int, default=16)
-    parser.add_argument("--siglip2_teacher_batch", type=int, default=16)
     parser.add_argument("--amp", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument(
         "--wandb_mode", choices=("online", "offline", "disabled"), default="online"
@@ -61,21 +59,17 @@ def parse_args():
     parser.add_argument("--wandb_project", default="instruct-gs-world")
     parser.add_argument("--wandb_entity", default="")
     parser.add_argument("--wandb_name", required=True)
-    parser.add_argument(
-        "--wandb_group", default="continuous-carrier-object-state-v61-eval"
-    )
+    parser.add_argument("--wandb_group", default="continuous-carrier-dynamics-v61-eval")
     parser.add_argument("--wandb_dir", required=True)
     return parser.parse_args()
 
 
 def _batch(sample, device):
-    return move_to_device(
-        {
-            name: value[None] if torch.is_tensor(value) else value
-            for name, value in sample.items()
-        },
-        device,
-    )
+    values = {
+        name: value[None] if torch.is_tensor(value) else value
+        for name, value in sample.items()
+    }
+    return move_to_device(values, device)
 
 
 def _mean(records):
@@ -93,10 +87,11 @@ def main():
         args.checkpoint, map_location="cpu", weights_only=False, mmap=True
     )
     if checkpoint.get("checkpoint_version") != CHECKPOINT_VERSION:
-        raise ValueError("v61 evaluator requires a version-61 checkpoint")
-    if checkpoint.get("architecture") != ARCHITECTURE:
-        raise ValueError("v61 evaluator checkpoint architecture differs")
+        raise ValueError("v61 Dynamics evaluator requires checkpoint version 61")
+    if checkpoint.get("architecture") != DYNAMICS_ARCHITECTURE:
+        raise ValueError("v61 Dynamics evaluator architecture differs")
     variant = checkpoint["config"]["variant"]
+    capacity = checkpoint["effect_capacity"]
     config = config_for_variant(variant)
     device = torch.device("cuda")
     torch.cuda.set_device(0)
@@ -111,30 +106,20 @@ def main():
         held_group_stride=args.held_group_stride,
     )
     if not dataset.source_audit_indices:
-        raise ValueError("v61 evaluator requires complete source audit indices")
-    model = (
-        ContinuousCarrierObjectWorldModelV61(
-            config,
-            args.dino_checkpoint,
-            args.siglip2_checkpoint,
-            args.student_frame_batch,
-        )
-        .to(device)
-        .eval()
-    )
+        raise ValueError("v61 Dynamics evaluator requires source audit indices")
+    state_model = ContinuousCarrierObjectWorldModelV61(
+        config,
+        args.dino_checkpoint,
+        args.siglip2_checkpoint,
+        args.student_frame_batch,
+    ).to(device)
+    model = ContinuousCarrierDynamicsModelV61(state_model, capacity).to(device).eval()
     model.load_state_dict(checkpoint["model"], strict=True)
     dino = FrozenDinoVideoRuntime(
         config, device, args.amp, args.dino_frame_batch, args.dino_checkpoint
     )
     tracker = FrozenPointTrackerRuntime(
         config, device, args.tracker_checkpoint, sequence_batch=1
-    )
-    semantic_teacher = (
-        FrozenSiglip2ObjectTeacherV61(
-            args.siglip2_checkpoint, device, args.siglip2_teacher_batch
-        )
-        if config.uses_object_semantics
-        else None
     )
     amp_context = (
         (lambda: torch.autocast("cuda", dtype=torch.bfloat16))
@@ -156,7 +141,7 @@ def main():
                 "checkpoint": args.checkpoint,
                 "checkpoint_step": checkpoint["global_step"],
                 "variant": variant,
-                "student_encoder": config.student_encoder,
+                "effect_capacity": capacity,
                 "chunk_lengths": args.chunk_lengths,
                 "temporal_step_ms": args.temporal_step_ms,
                 "group_partition": "held",
@@ -178,15 +163,8 @@ def main():
                     relation = build_trajectory_relation_teacher_v56(
                         evidence, config, batch["frame_times"]
                     )
-                    components = build_object_components_v61(
-                        batch,
-                        evidence,
-                        relation,
-                        config.object_roots,
-                        semantic_teacher,
-                    )
                     with amp_context():
-                        output = model(batch, evidence, relation, components)
+                        output = model(batch, evidence, relation)
                     metrics = {
                         name: float(value) for name, value in output["parts"].items()
                     }
@@ -215,17 +193,28 @@ def main():
                     condition += 1
     macro = _mean(records)
     sources = {name: _mean(values) for name, values in source_records.items()}
+    accepted = (
+        macro["persistence_relative_gain"] >= 0.10
+        and macro["zero_effect_relative_gain"] >= 0.10
+        and macro["shuffled_effect_relative_gain"] >= 0.10
+    )
     report = {
         "status": "completed",
+        "accepted": accepted,
         "checkpoint_version": CHECKPOINT_VERSION,
-        "architecture": ARCHITECTURE,
+        "architecture": DYNAMICS_ARCHITECTURE,
         "variant": variant,
-        "student_encoder": config.student_encoder,
+        "effect_capacity": capacity,
         "checkpoint": os.path.abspath(args.checkpoint),
         "checkpoint_step": checkpoint["global_step"],
         "conditions": len(records),
         "group_partition": "held",
         "held_group_stride": args.held_group_stride,
+        "acceptance": {
+            "minimum_persistence_relative_gain": 0.10,
+            "minimum_zero_effect_relative_gain": 0.10,
+            "minimum_shuffled_effect_relative_gain": 0.10,
+        },
         "macro": macro,
         "sources": sources,
     }
@@ -244,6 +233,7 @@ def main():
         run.summary.update(
             {
                 "evaluation/status": "completed",
+                "evaluation/accepted": accepted,
                 "evaluation/conditions": len(records),
                 "evaluation/report": os.path.abspath(args.output),
             }

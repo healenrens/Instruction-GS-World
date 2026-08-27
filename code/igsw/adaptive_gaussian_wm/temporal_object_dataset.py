@@ -36,6 +36,13 @@ def parse_int_choices(value: str, label: str) -> tuple[int, ...]:
     return choices
 
 
+def parse_millisecond_choices(value: str) -> tuple[int, ...]:
+    choices = parse_int_choices(value, "temporal step milliseconds")
+    if choices[-1] > 2000:
+        raise ValueError("temporal steps exceed the v52 clip contract")
+    return choices
+
+
 @dataclass(frozen=True)
 class _ChunkRecord:
     path: str

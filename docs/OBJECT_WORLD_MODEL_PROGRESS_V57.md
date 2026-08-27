@@ -1140,3 +1140,37 @@ V60 observation-grounded 复评显示约 82.32% 的绝对误差已经存在于�
   syntax 和 `git diff --check`；本机 Python 无 `torch`，所以 CPU tensor-contract 尚未执行。
   真实 DINO/SigLIP2/CoTracker GPU verifier、四组 probe、held evaluator 和 W&B 结论仍属于
   `待服务器验证`，在结果返回前不能声称 SigLIP2 或 V61 已经有效。
+
+### 2026-08-27：V61 Teacher Space、Held Split 与 Object-Bound Dynamics 补全
+
+**What changed**
+
+1. Frozen DINO 的 1024 维 local descriptor 与 frozen SigLIP2 的 768 维 object descriptor
+   改为参数固定的 grouped projection，统一进入 256 维 teacher space；Student carrier/root
+   只预测该 256 维目标，不再通过可学习 head 追逐 teacher 原始维度。
+2. multisource 数据增加 source-local task-group held partition。V61 state 与 Dynamics 训练排除
+   held groups，评测只读取 held groups；四个 encoder variant、四种 effect capacity 和所有 resume
+   必须使用相同 `held_group_stride`。
+3. Object State 训练和验收保持独立。只有选定的 DINO-aligned state checkpoint 通过后，才冻结
+   Student 与 state encoder，训练 posterior-conditioned Dynamics。latent effect 容量对照为
+   `4x32_global`、`4x32_bound`、`8x64_bound` 和 `16x32_root`；默认 `8x64_bound`
+   同时预测 effect value、activation 和对 16 个 object roots + scene 的 owner distribution。
+   前两组隔离 object binding，`4x32_bound` 与 `8x64_bound` 隔离总容量，后两组保持
+   512 个标量维度并比较 learned sparse factors 与 root-wise factorization。
+
+**Why**
+
+全局 `[4,32]` effect 不仅可能容量不足，更缺少 object binding，无法区分同时发生的机械臂、
+物体、遮挡与 scene 变化；原维度可学习 teacher head 也会让监督坐标系随 Student 漂移。
+
+**Impact**
+
+- Dynamics 不做 history-only deterministic regression。Posterior 训练期读取 source/target state，
+  Dynamics 分别运行 correct、zero 和 shuffled effect；部署期的 Prior、language 与 explicit action
+  仍不在 V61 范围内。
+- zero/shuffled route 只提供 detached intervention reference，不能通过故意恶化对照路径满足
+  margin；梯度只推动 correct posterior-effect route 降低真实 future observation error。
+- Dynamics 只在 held task groups 上验收：future continuous-track coordinate/appearance/lifecycle
+  error 必须相对 persistence、zero effect 和 shuffled effect 都改善至少 10%。
+- `object_state` checkpoint 与 `dynamics` checkpoint 具有不同 architecture/stage contract；旧 V61
+  首次提交的 checkpoint 因 teacher space 与 held split 已变化，不能 resume 到补全后的版本。

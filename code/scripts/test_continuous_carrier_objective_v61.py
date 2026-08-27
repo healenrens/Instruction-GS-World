@@ -38,8 +38,12 @@ class ObjectiveHarness(nn.Module):
         super().__init__()
         self.config = config
         self.state_encoder = ContinuousCarrierObjectStateEncoderV61(config)
-        self.identity_to_dino = nn.Linear(config.identity_dim, config.dino_dim)
-        self.root_to_siglip = nn.Linear(config.identity_dim, config.siglip2_dim)
+        self.identity_to_dino = nn.Linear(
+            config.identity_dim, config.teacher_projection_dim
+        )
+        self.root_to_siglip = nn.Linear(
+            config.identity_dim, config.teacher_projection_dim
+        )
         self.motion_readout = nn.Linear(
             config.dynamic_dim, len(config.dynamic_horizons) * 2
         )

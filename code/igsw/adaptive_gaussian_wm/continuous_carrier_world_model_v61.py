@@ -35,7 +35,7 @@ class ContinuousCarrierObjectWorldModelV61(nn.Module):
                 nn.LayerNorm(config.identity_dim),
                 nn.Linear(config.identity_dim, config.student_dim),
                 nn.GELU(approximate="tanh"),
-                nn.Linear(config.student_dim, config.dino_dim),
+                nn.Linear(config.student_dim, config.teacher_projection_dim),
             )
             if config.uses_dino_alignment
             else None
@@ -45,7 +45,7 @@ class ContinuousCarrierObjectWorldModelV61(nn.Module):
                 nn.LayerNorm(config.identity_dim),
                 nn.Linear(config.identity_dim, config.student_dim),
                 nn.GELU(approximate="tanh"),
-                nn.Linear(config.student_dim, config.siglip2_dim),
+                nn.Linear(config.student_dim, config.teacher_projection_dim),
             )
             if config.uses_object_semantics
             else None
