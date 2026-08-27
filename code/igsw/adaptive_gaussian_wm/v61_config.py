@@ -12,22 +12,21 @@ DYNAMICS_ARCHITECTURE = "latent_effect_continuous_carrier_dynamics_v1"
 DYNAMICS_STAGE = "dynamics"
 VARIANTS = (
     "dino",
-    "siglip2",
-    "siglip2_dino",
-    "siglip2_dino_object",
+    "siglip",
+    "siglip_dino",
+    "siglip_dino_object",
 )
 
 
 @dataclass(frozen=True)
 class ContinuousCarrierObjectStateConfig:
-    variant: str = "siglip2_dino_object"
+    variant: str = "siglip_dino_object"
     dino_model_name: str = "vit_large_patch14_dinov2.lvd142m"
     dino_image_size: int = 224
     dino_dim: int = 1024
-    siglip2_image_size: int = 224
-    siglip2_patch_size: int = 16
-    siglip2_max_patches: int = 256
-    siglip2_dim: int = 768
+    siglip_image_size: int = 224
+    siglip_patch_size: int = 16
+    siglip_dim: int = 768
     student_dim: int = 256
     teacher_projection_dim: int = 256
     carrier_count: int = 128
@@ -65,15 +64,15 @@ class ContinuousCarrierObjectStateConfig:
 
     @property
     def student_encoder(self) -> str:
-        return "dino" if self.variant == "dino" else "siglip2"
+        return "dino" if self.variant == "dino" else "siglip"
 
     @property
     def uses_dino_alignment(self) -> bool:
-        return self.variant in ("siglip2_dino", "siglip2_dino_object")
+        return self.variant in ("siglip_dino", "siglip_dino_object")
 
     @property
     def uses_object_semantics(self) -> bool:
-        return self.variant == "siglip2_dino_object"
+        return self.variant == "siglip_dino_object"
 
     @property
     def total_owners(self) -> int:
@@ -89,10 +88,9 @@ class ContinuousCarrierObjectStateConfig:
         dimensions = (
             self.dino_image_size,
             self.dino_dim,
-            self.siglip2_image_size,
-            self.siglip2_patch_size,
-            self.siglip2_max_patches,
-            self.siglip2_dim,
+            self.siglip_image_size,
+            self.siglip_patch_size,
+            self.siglip_dim,
             self.student_dim,
             self.teacher_projection_dim,
             self.carrier_count,
@@ -109,12 +107,12 @@ class ContinuousCarrierObjectStateConfig:
             raise ValueError("student dimension must divide carrier heads")
         if self.student_dim % self.root_heads:
             raise ValueError("student dimension must divide root heads")
-        if self.siglip2_image_size % self.siglip2_patch_size:
-            raise ValueError("SigLIP2 image size must divide its patch size")
+        if self.siglip_image_size % self.siglip_patch_size:
+            raise ValueError("SigLIP image size must divide its patch size")
         if self.dino_dim % self.teacher_projection_dim:
             raise ValueError("DINO dimension must divide the fixed teacher space")
-        if self.siglip2_dim % self.teacher_projection_dim:
-            raise ValueError("SigLIP2 dimension must divide the fixed teacher space")
+        if self.siglip_dim % self.teacher_projection_dim:
+            raise ValueError("SigLIP dimension must divide the fixed teacher space")
         if self.carrier_count < self.object_roots:
             raise ValueError("carrier count must cover all object roots")
         positive = (
@@ -145,9 +143,9 @@ def config_for_variant(variant: str) -> ContinuousCarrierObjectStateConfig:
     config = replace(
         config,
         dino_alignment_weight=(
-            0.5 if variant in ("siglip2_dino", "siglip2_dino_object") else 0.0
+            0.5 if variant in ("siglip_dino", "siglip_dino_object") else 0.0
         ),
-        object_semantic_weight=(0.5 if variant == "siglip2_dino_object" else 0.0),
+        object_semantic_weight=(0.5 if variant == "siglip_dino_object" else 0.0),
     )
     config.validate()
     return config

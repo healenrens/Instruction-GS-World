@@ -8,7 +8,7 @@ RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 SOURCE_REVISION="${SOURCE_REVISION:-}"
 SEED="${SEED:-17}"
 LOG_ROOT="${LOG_ROOT:-${RUNTIME_ROOT}/logs/v61_encoder_ablation_eval_${SOURCE_REVISION:0:7}}"
-VARIANTS=(dino siglip2 siglip2_dino siglip2_dino_object)
+VARIANTS=(dino siglip siglip_dino siglip_dino_object)
 
 mkdir -p "${LOG_ROOT}"
 for index in 0 1 2 3; do

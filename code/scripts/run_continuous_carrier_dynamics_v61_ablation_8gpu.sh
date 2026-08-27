@@ -23,7 +23,7 @@ for index in 0 1 2 3; do
     ROOT="${ROOT}" \
     RUNTIME_ROOT="${RUNTIME_ROOT}" \
     VENV_ROOT="${RUNTIME_ROOT}" \
-    VARIANT="${VARIANT:-siglip2_dino_object}" \
+    VARIANT="${VARIANT:-siglip_dino_object}" \
     EFFECT_CAPACITY="${capacity}" \
     SOURCE_REVISION="${SOURCE_REVISION}" \
     STATE_CHECKPOINT="${STATE_CHECKPOINT}" \

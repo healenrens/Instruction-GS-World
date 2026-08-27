@@ -73,7 +73,7 @@ def validate_resume(checkpoint: dict, args, world_size: int, config) -> None:
         "seed",
         "amp",
         "dino_checkpoint",
-        "siglip2_checkpoint",
+        "siglip_checkpoint",
         "tracker_checkpoint",
     )
     argument_differences = {

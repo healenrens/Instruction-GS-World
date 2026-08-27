@@ -9,7 +9,7 @@ SOURCE_REVISION="${SOURCE_REVISION:-}"
 STEPS="${STEPS:-3000}"
 SEED="${SEED:-17}"
 LOG_ROOT="${LOG_ROOT:-${RUNTIME_ROOT}/logs/v61_encoder_ablation_${SOURCE_REVISION:0:7}}"
-VARIANTS=(dino siglip2 siglip2_dino siglip2_dino_object)
+VARIANTS=(dino siglip siglip_dino siglip_dino_object)
 GPU_GROUPS=(0,1 2,3 4,5 6,7)
 
 mkdir -p "${LOG_ROOT}"

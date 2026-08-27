@@ -73,7 +73,7 @@ def validate_dynamics_resume_v61(checkpoint, args, world_size, config):
         "seed",
         "amp",
         "dino_checkpoint",
-        "siglip2_checkpoint",
+        "siglip_checkpoint",
         "tracker_checkpoint",
     )
     saved = checkpoint.get("args", {})
