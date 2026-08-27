@@ -60,45 +60,51 @@ class ContinuousCarrierExtractorV61(nn.Module):
         self.presence = nn.Linear(dim, 1)
         self.visibility = nn.Linear(dim, 1)
 
-    def _observe(self, field):
-        features = field.features.float()
-        coordinates = field.coordinates.float()
-        batch, frames, tokens, dim = features.shape
-        query = (
-            self.queries[None, None] + self.context(field.pooled.float())[:, :, None]
-        )
-        logits = (
-            torch.einsum("btqd,btnd->btqn", self.query(query), self.key(features))
-            / dim**0.5
-        )
-        spatial = coordinates[:, :, None] - self.spatial_seeds[None, None, :, None]
-        logits = logits - spatial.square().sum(dim=-1) / (
-            2.0 * self.config.spatial_temperature**2
-        )
-        logits = logits.masked_fill(~field.valid[:, :, None], -torch.inf)
-        support = torch.softmax(logits, dim=-1)
-        observed = torch.einsum("btqn,btnd->btqd", support, self.value(features))
-        center = torch.einsum("btqn,btnd->btqd", support, coordinates)
-        offset = coordinates[:, :, None] - center[:, :, :, None]
-        covariance = torch.einsum("btqn,btqni,btqnj->btqij", support, offset, offset)
-        return observed, center, covariance, support
-
     def forward(self, field) -> CarrierStateV61:
-        observed, observed_center, covariance, support = self._observe(field)
-        features, centers = [], []
-        previous_feature = self.queries[None].expand(observed.shape[0], -1, -1)
-        previous_center = self.spatial_seeds[None].expand(observed.shape[0], -1, -1)
-        for frame in range(observed.shape[1]):
+        token_features = field.features.float()
+        coordinates = field.coordinates.float()
+        batch, frames, _, dim = token_features.shape
+        features, centers, covariances, supports = [], [], [], []
+        previous_feature = self.queries[None].expand(batch, -1, -1)
+        previous_center = self.spatial_seeds[None].expand(batch, -1, -1)
+        for frame in range(frames):
+            query = (
+                previous_feature + self.context(field.pooled[:, frame].float())[:, None]
+            )
+            logits = (
+                torch.einsum(
+                    "bqd,bnd->bqn",
+                    self.query(query),
+                    self.key(token_features[:, frame]),
+                )
+                / dim**0.5
+            )
+            spatial = coordinates[:, frame, None] - previous_center[:, :, None]
+            logits = logits - spatial.square().sum(dim=-1) / (
+                2.0 * self.config.spatial_temperature**2
+            )
+            logits = logits.masked_fill(~field.valid[:, frame, None], -torch.inf)
+            support = torch.softmax(logits, dim=-1)
+            observed = torch.einsum(
+                "bqn,bnd->bqd", support, self.value(token_features[:, frame])
+            )
+            observed_center = torch.einsum(
+                "bqn,bnd->bqd", support, coordinates[:, frame]
+            )
+            offset = coordinates[:, frame, None] - observed_center[:, :, None]
+            covariance = torch.einsum("bqn,bqni,bqnj->bqij", support, offset, offset)
             updated = self.memory(
-                observed[:, frame].flatten(0, 1),
+                observed.flatten(0, 1),
                 previous_feature.flatten(0, 1),
             ).reshape_as(previous_feature)
             gate = torch.sigmoid(
                 self.center_gate(torch.cat((previous_feature, updated), dim=-1))
-            )
-            center = torch.lerp(previous_center, observed_center[:, frame], gate)
+            ).float()
+            center = torch.lerp(previous_center.float(), observed_center.float(), gate)
             features.append(updated)
             centers.append(center)
+            covariances.append(covariance)
+            supports.append(support)
             previous_feature, previous_center = updated, center
         feature = torch.stack(features, dim=1)
         center = torch.stack(centers, dim=1)
@@ -107,10 +113,10 @@ class ContinuousCarrierExtractorV61(nn.Module):
             identity=F.normalize(self.identity(feature), dim=-1, eps=1e-6),
             dynamic=self.dynamic(feature),
             center=center,
-            covariance=covariance,
+            covariance=torch.stack(covariances, dim=1),
             presence=torch.sigmoid(self.presence(feature)[..., 0]),
             visibility=torch.sigmoid(self.visibility(feature)[..., 0]),
-            support=support,
+            support=torch.stack(supports, dim=1),
         )
 
 
@@ -129,50 +135,65 @@ class PersistentObjectRootsV61(nn.Module):
         self.presence = nn.Linear(dim, 1)
         self.visibility = nn.Linear(dim, 1)
 
-    def _owners(self, carriers: CarrierStateV61):
-        queries = torch.cat((self.object_queries, self.scene_query), dim=0)
-        logits = (
-            torch.einsum(
-                "md,btqd->btqm", self.query(queries), self.key(carriers.feature)
-            )
-            / self.config.student_dim**0.5
-        )
-        distance = carriers.center[:, :, :, None] - carriers.center[:, :, None]
-        neighborhood = torch.exp(-distance.square().sum(dim=-1) / 0.08).mean(dim=-1)
-        logits[..., -1] = logits[..., -1] + (1.0 - neighborhood)
-        return torch.softmax(logits / self.config.root_temperature, dim=-1)
-
     def forward(self, carriers: CarrierStateV61) -> ObjectRootStateV61:
-        owner = self._owners(carriers)
-        object_owner = owner[..., : self.config.object_roots]
-        weight = object_owner * carriers.presence[..., None]
-        weight = weight / weight.sum(dim=2, keepdim=True).clamp_min(1e-6)
-        observed = torch.einsum("btqm,btqd->btmd", weight, carriers.feature)
-        center = torch.einsum("btqm,btqd->btmd", weight, carriers.center)
-        offset = carriers.center[:, :, :, None] - center[:, :, None]
-        scale = torch.einsum("btqm,btqmd->btm", weight, offset.square().sum(dim=-1))
-        features = []
-        previous = self.object_queries[None].expand(observed.shape[0], -1, -1)
-        for frame in range(observed.shape[1]):
+        batch, frames = carriers.feature.shape[:2]
+        features, centers, scales = [], [], []
+        owners, visibilities, observed_presences = [], [], []
+        previous = self.object_queries[None].expand(batch, -1, -1)
+        for frame in range(frames):
+            queries = torch.cat(
+                (previous, self.scene_query[None].expand(batch, -1, -1)), dim=1
+            )
+            logits = (
+                torch.einsum(
+                    "bmd,bqd->bqm",
+                    self.query(queries),
+                    self.key(carriers.feature[:, frame]),
+                )
+                / self.config.student_dim**0.5
+            )
+            distance = (
+                carriers.center[:, frame, :, None] - carriers.center[:, frame, None]
+            )
+            neighborhood = torch.exp(-distance.square().sum(dim=-1) / 0.08).mean(dim=-1)
+            logits[..., -1] = logits[..., -1] + (1.0 - neighborhood)
+            owner = torch.softmax(logits / self.config.root_temperature, dim=-1)
+            object_owner = owner[..., : self.config.object_roots]
+            weight = object_owner * carriers.presence[:, frame, :, None]
+            weight = weight / weight.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            observed = torch.einsum("bqm,bqd->bmd", weight, carriers.feature[:, frame])
+            center = torch.einsum("bqm,bqd->bmd", weight, carriers.center[:, frame])
+            offset = carriers.center[:, frame, :, None] - center[:, None]
+            scale = torch.einsum("bqm,bqmd->bm", weight, offset.square().sum(dim=-1))
             previous = self.memory(
-                observed[:, frame].flatten(0, 1), previous.flatten(0, 1)
+                observed.flatten(0, 1), previous.flatten(0, 1)
             ).reshape_as(previous)
             features.append(previous)
+            centers.append(center)
+            scales.append(scale)
+            owners.append(owner)
+            visibilities.append(
+                (weight * carriers.visibility[:, frame, :, None]).sum(dim=1)
+            )
+            observed_presence = (
+                object_owner * carriers.presence[:, frame, :, None]
+            ).sum(dim=1)
+            observed_presence = observed_presence / object_owner.sum(dim=1).clamp_min(
+                1e-6
+            )
+            observed_presences.append(observed_presence)
         feature = torch.stack(features, dim=1)
-        carrier_visibility = carriers.visibility[..., None]
-        visibility = (weight * carrier_visibility).sum(dim=2)
-        carrier_presence = carriers.presence[..., None]
-        observed_presence = (object_owner * carrier_presence).sum(dim=2)
-        observed_presence = observed_presence / object_owner.sum(dim=2).clamp_min(1e-6)
+        observed_presence = torch.stack(observed_presences, dim=1)
         return ObjectRootStateV61(
             feature=feature,
             identity=F.normalize(self.identity(feature), dim=-1, eps=1e-6),
             dynamic=self.dynamic(feature),
-            center=center,
-            relative_scale=scale.clamp_min(1e-6).sqrt(),
+            center=torch.stack(centers, dim=1),
+            relative_scale=torch.stack(scales, dim=1).clamp_min(1e-6).sqrt(),
             presence=torch.sigmoid(self.presence(feature)[..., 0]) * observed_presence,
-            visibility=torch.sigmoid(self.visibility(feature)[..., 0]) * visibility,
-            owner=owner,
+            visibility=torch.sigmoid(self.visibility(feature)[..., 0])
+            * torch.stack(visibilities, dim=1),
+            owner=torch.stack(owners, dim=1),
         )
 
 

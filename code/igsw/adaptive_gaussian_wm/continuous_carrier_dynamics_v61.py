@@ -45,16 +45,19 @@ def shuffled_effect_v61(effect: ObjectBoundLatentEffectV61):
             activation=effect.activation.roll(1, dims=0),
             owner=effect.owner.roll(1, dims=0),
         )
+    # Held evaluation uses one video at a time. Permuting intact factor tuples is
+    # invisible to set-valued Dynamics, so independently corrupt channel meaning
+    # and factor-to-object binding when another sample is unavailable.
     return ObjectBoundLatentEffectV61(
-        value=effect.value.flip(1),
-        activation=effect.activation.flip(1),
-        owner=effect.owner.flip(1),
+        value=effect.value.roll(1, dims=-1),
+        activation=effect.activation.roll(1, dims=1),
+        owner=effect.owner.roll(1, dims=1),
     )
 
 
 def frame_state_v61(state: ContinuousObjectStateV61, index: int):
     def take(value):
-        return value[:, index : index + 1]
+        return value[:, index].unsqueeze(1)
 
     return ContinuousObjectStateV61(
         carriers=CarrierStateV61(

@@ -1170,6 +1170,14 @@ V60 observation-grounded 复评显示约 82.32% 的绝对误差已经存在于�
   仍不在 V61 范围内。
 - zero/shuffled route 只提供 detached intervention reference，不能通过故意恶化对照路径满足
   margin；梯度只推动 correct posterior-effect route 降低真实 future observation error。
+- held evaluator 的单样本 shuffled route 会分别打乱 latent channel 与 owner binding。完整
+  `(value, activation, owner)` factor tuple 的顺序置换对 set-valued Dynamics 不可见，不能作为
+  有效反事实。
+- effect variance 使用可反传的 cross-rank gather；它衡量同一 optimizer forward 中所有 rank 的
+  latent channel 变化，不依赖 gradient accumulation 补足统计样本。
+- final audit 将 carrier/root 更新改为真正的 causal predict-correct：下一帧 carrier attention 以
+  上一帧 center 为空间先验，下一帧 owner assignment 以持久 root feature 为 query；固定 seed 和
+  fixed root query 只用于第一帧初始化。
 - reappearance identity 使用遮挡前最后一个 visible identity 作为 reference，跨过任意长度的
   lifecycle-known occlusion，并只在第一次重新 visible 时计分；同时报告有效 reappearance 数量。
 - Dynamics 只在 held task groups 上验收：future continuous-track coordinate/appearance/lifecycle

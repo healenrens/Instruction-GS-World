@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .distributed_statistics import gather_batch_with_grad
 from .fixed_teacher_projection_v61 import fixed_group_projection_v61
 
 
@@ -185,7 +186,8 @@ def carrier_dynamics_objective_v61(
         0.05 + correct_errors["total"] - shuffled_errors["total"].detach()
     )
     active_effect = effect.value.float() * effect.activation[..., None].float()
-    effect_std = active_effect.std(dim=(0, 1), unbiased=False).mean()
+    statistical_effect = gather_batch_with_grad(active_effect)
+    effect_std = statistical_effect.std(dim=(0, 1), unbiased=False).mean()
     effect_variance = F.relu(0.20 - effect_std)
     owner_entropy = (
         -(effect.owner.float() * effect.owner.float().clamp_min(1e-6).log())

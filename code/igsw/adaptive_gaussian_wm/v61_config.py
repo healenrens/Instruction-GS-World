@@ -61,7 +61,7 @@ class ContinuousCarrierObjectStateConfig:
     object_semantic_weight: float = 0.0
     carrier_diversity_weight: float = 0.02
     root_balance_weight: float = 0.01
-    temporal_identity_weight: float = 0.25
+    root_carrier_alignment_weight: float = 0.25
 
     @property
     def student_encoder(self) -> str:

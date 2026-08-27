@@ -173,6 +173,13 @@ def main():
     )
     if correct_zero_difference <= 1e-6:
         raise RuntimeError("v61 Dynamics ignores the posterior latent effect")
+    correct_shuffled_difference = float(
+        (output["correct"].carriers.feature - output["shuffled"].carriers.feature)
+        .abs()
+        .max()
+    )
+    if correct_shuffled_difference <= 1e-6:
+        raise RuntimeError("v61 shuffled effect is not a real intervention")
     report = {
         "status": "passed",
         "checkpoint_version": CHECKPOINT_VERSION,
@@ -193,6 +200,7 @@ def main():
         "explicit_action_used": False,
         "effect_owner_partition_max_error": owner_error,
         "correct_zero_feature_max_difference": correct_zero_difference,
+        "correct_shuffled_feature_max_difference": correct_shuffled_difference,
         "loss": float(output["loss"].detach()),
         "gradient_tensor_count": gradient_tensors,
         "gradient_norm": gradient_norm,

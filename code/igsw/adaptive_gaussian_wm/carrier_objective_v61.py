@@ -187,7 +187,7 @@ def _state_regularizers(state):
     carrier_dynamic = torch.einsum(
         "btqm,btqd->btmd", weight, state.carriers.dynamic.float()
     )
-    identity_consistency = (
+    identity_alignment = (
         1.0
         - F.cosine_similarity(
             F.normalize(carrier_identity, dim=-1, eps=1e-6),
@@ -195,12 +195,12 @@ def _state_regularizers(state):
             dim=-1,
         ).mean()
     )
-    dynamic_consistency = F.smooth_l1_loss(carrier_dynamic, state.roots.dynamic.float())
+    dynamic_alignment = F.smooth_l1_loss(carrier_dynamic, state.roots.dynamic.float())
     return (
         repulsion,
         root_balance,
-        identity_consistency,
-        dynamic_consistency,
+        identity_alignment,
+        dynamic_alignment,
         carrier_presence,
         effective_carriers,
         effective_roots,
@@ -304,8 +304,8 @@ def continuous_carrier_objective_v61(
     (
         repulsion,
         root_balance,
-        root_identity_consistency,
-        root_dynamic_consistency,
+        root_identity_alignment,
+        root_dynamic_alignment,
         carrier_presence,
         effective_carriers,
         effective_roots,
@@ -326,8 +326,8 @@ def continuous_carrier_objective_v61(
         + config.geometry_weight * motion
         + config.lifecycle_weight * lifecycle_loss
         + config.identity_weight * identity_cycle
-        + config.temporal_identity_weight * root_identity_consistency
-        + config.temporal_identity_weight * root_dynamic_consistency
+        + config.root_carrier_alignment_weight * root_identity_alignment
+        + config.root_carrier_alignment_weight * root_dynamic_alignment
         + config.dino_alignment_weight * dino
         + config.object_semantic_weight * (object_semantic + object_retrieval)
         + config.carrier_diversity_weight * repulsion
@@ -346,8 +346,8 @@ def continuous_carrier_objective_v61(
         "presence_error": presence.detach(),
         "carrier_repulsion": repulsion.detach(),
         "root_balance_penalty": root_balance.detach(),
-        "root_identity_consistency_error": root_identity_consistency.detach(),
-        "root_dynamic_consistency_error": root_dynamic_consistency.detach(),
+        "root_carrier_identity_alignment_error": root_identity_alignment.detach(),
+        "root_carrier_dynamic_alignment_error": root_dynamic_alignment.detach(),
         "carrier_presence_mean": carrier_presence.detach(),
         "effective_carriers": effective_carriers.detach(),
         "effective_object_roots": effective_roots.detach(),

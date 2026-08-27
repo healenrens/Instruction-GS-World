@@ -160,7 +160,9 @@ def build_object_components_v61(
         semantic = crops.new_zeros(len(crops), semantic_teacher.feature_dim)
         if bool(flat_valid.any()):
             semantic[flat_valid] = semantic_teacher(crops[flat_valid])
-        semantic = semantic.reshape(len(membership), len(frame_indices), object_roots, -1)
+        semantic = semantic.reshape(
+            len(membership), len(frame_indices), object_roots, -1
+        )
     return TeacherObjectComponentsV61(
         membership=membership.detach(),
         valid=valid.detach(),

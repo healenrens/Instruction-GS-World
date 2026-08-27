@@ -20,6 +20,7 @@ from igsw.adaptive_gaussian_wm.continuous_carrier_dynamics_v61 import (  # noqa:
     EFFECT_CAPACITIES,
     ContinuousCarrierEffectPosteriorV61,
     EffectConditionedCarrierDynamicsV61,
+    frame_state_v61,
     shuffled_effect_v61,
     zero_effect_v61,
 )
@@ -35,31 +36,33 @@ def _normalized(*shape):
     return F.normalize(torch.randn(*shape), dim=-1)
 
 
-def synthetic_state(config, batch=3):
+def synthetic_state(config, batch=3, frames=1):
     carriers, roots, tokens = config.carrier_count, config.object_roots, 16
-    support = torch.softmax(torch.randn(batch, 1, carriers, tokens), dim=-1)
-    owner = torch.softmax(torch.randn(batch, 1, carriers, config.total_owners), dim=-1)
+    support = torch.softmax(torch.randn(batch, frames, carriers, tokens), dim=-1)
+    owner = torch.softmax(
+        torch.randn(batch, frames, carriers, config.total_owners), dim=-1
+    )
     carrier = CarrierStateV61(
-        feature=_normalized(batch, 1, carriers, config.student_dim),
-        identity=_normalized(batch, 1, carriers, config.identity_dim),
-        dynamic=torch.randn(batch, 1, carriers, config.dynamic_dim),
-        center=torch.rand(batch, 1, carriers, 2) * 1.8 - 0.9,
+        feature=_normalized(batch, frames, carriers, config.student_dim),
+        identity=_normalized(batch, frames, carriers, config.identity_dim),
+        dynamic=torch.randn(batch, frames, carriers, config.dynamic_dim),
+        center=torch.rand(batch, frames, carriers, 2) * 1.8 - 0.9,
         covariance=torch.eye(2)[None, None, None]
-        .expand(batch, 1, carriers, -1, -1)
+        .expand(batch, frames, carriers, -1, -1)
         .clone()
         * 0.05,
-        presence=torch.rand(batch, 1, carriers) * 0.5 + 0.25,
-        visibility=torch.rand(batch, 1, carriers) * 0.5 + 0.25,
+        presence=torch.rand(batch, frames, carriers) * 0.5 + 0.25,
+        visibility=torch.rand(batch, frames, carriers) * 0.5 + 0.25,
         support=support,
     )
     root = ObjectRootStateV61(
-        feature=_normalized(batch, 1, roots, config.student_dim),
-        identity=_normalized(batch, 1, roots, config.identity_dim),
-        dynamic=torch.randn(batch, 1, roots, config.dynamic_dim),
-        center=torch.rand(batch, 1, roots, 2) * 1.8 - 0.9,
-        relative_scale=torch.rand(batch, 1, roots) * 0.5 + 0.1,
-        presence=torch.rand(batch, 1, roots) * 0.5 + 0.25,
-        visibility=torch.rand(batch, 1, roots) * 0.5 + 0.25,
+        feature=_normalized(batch, frames, roots, config.student_dim),
+        identity=_normalized(batch, frames, roots, config.identity_dim),
+        dynamic=torch.randn(batch, frames, roots, config.dynamic_dim),
+        center=torch.rand(batch, frames, roots, 2) * 1.8 - 0.9,
+        relative_scale=torch.rand(batch, frames, roots) * 0.5 + 0.1,
+        presence=torch.rand(batch, frames, roots) * 0.5 + 0.25,
+        visibility=torch.rand(batch, frames, roots) * 0.5 + 0.25,
         owner=owner,
     )
     return ContinuousObjectStateV61(carrier, root)
@@ -136,17 +139,39 @@ def run_capacity(capacity):
         raise RuntimeError(f"v61 {capacity} owner partition differs")
     if not all(bool(torch.isfinite(value).all()) for value in parts.values()):
         raise RuntimeError(f"v61 {capacity} diagnostics are non-finite")
+    single_source = synthetic_state(config, batch=1)
+    single_target = synthetic_state(config, batch=1)
+    single_effect = model.effect_posterior(single_source, single_target)
+    single_correct = model.dynamics(single_source, single_effect, delta[:1])
+    single_shuffled = model.dynamics(
+        single_source, shuffled_effect_v61(single_effect), delta[:1]
+    )
+    single_shuffle_difference = float(
+        (single_correct.carriers.feature - single_shuffled.carriers.feature).abs().max()
+    )
+    if single_shuffle_difference <= 1e-6:
+        raise RuntimeError(
+            f"v61 {capacity} single-sample shuffle is not an intervention"
+        )
     return {
         "capacity": capacity,
         "binding": binding,
         "loss": float(loss.detach()),
         "effect_shape": tuple(effect.value.shape),
+        "single_shuffle_feature_difference": single_shuffle_difference,
         "metric_count": len(parts),
     }
 
 
 def main():
     torch.manual_seed(17)
+    config = config_for_variant("siglip2_dino_object")
+    sequence = synthetic_state(config, batch=2, frames=3)
+    final = frame_state_v61(sequence, -1)
+    if final.carriers.feature.shape[1] != 1:
+        raise RuntimeError("v61 frame extraction must preserve the time dimension")
+    if not torch.equal(final.carriers.feature[:, 0], sequence.carriers.feature[:, -1]):
+        raise RuntimeError("v61 negative frame index did not select the final state")
     reports = [run_capacity(capacity) for capacity in EFFECT_CAPACITIES]
     print({"status": "passed", "capacities": reports})
 
