@@ -1049,5 +1049,53 @@ temporal 和 2,000 次 condition bootstrap。结果按以下单向决策解释�
 - **本地验证**：新增 CPU contract 共 9 项，验证 actual-support oracle IoU、teacher/prediction
   等价、错误 persistence semantic 可分辨、sample mask 与 accumulator 有限；Ruff、format、
   Python compile、shell syntax 和 `git diff --check` 均通过。
-- **当前判决**：`待办`。下一项唯一工作是在服务器使用 V60 step 10,000 checkpoint 执行该
-  只读复评并读取 W&B 完整结果。复评完成前不启动新训练、不继续 V60、不命名 V61。
+- **当前判决**：`已完成，拒绝继续优化当前 compact-state Dynamics`。服务器已使用 V60
+  step 10,000 checkpoint 完成只读复评；W&B run 为
+  `mxejelzj / v60_step10000_observation_reeval_005c076`，状态 `finished`。完整 history 包含
+  `6 sources x H=1..4 = 24` 个条件，没有只读取部分 steps。
+
+宏平均结果如下。所有 error 均为相对真实 future frozen-DINO patch field 的 cosine error，
+不是 RGB pixel error：
+
+| 指标 | 结果 | 结论 |
+| --- | ---: | --- |
+| `semantic_compression_floor` | 0.43782 | 单一 object-average semantic 丢失大量 object-local feature 结构 |
+| `direct_observation_floor` | 0.17697 | 即使用真实 future support，最小 compositor 仍有较高绝对误差 |
+| `teacher_moment_support_iou` | 0.62990 | center+covariance 只能粗略覆盖真实 track support |
+| `geometry_state_penalty` | 0.02513 | 五维 geometry 额外贡献约 11.69% 的 correct error |
+| `teacher_state_observation_error` | 0.20209 | 当前 compact teacher state 本身不是充分 observation target |
+| `dynamics_observation_gap` | 0.01287 | Dynamics 只贡献约 5.99% 的 correct error，不是主瓶颈 |
+| `correct_composite_object_error` | 0.21497 | V60 对真实 future object observation 的绝对误差 |
+| `persistence_composite_object_error` | 0.21983 | correct 仅相对改善约 2.04% |
+
+2,000 次 condition bootstrap 给出：`semantic_compression_floor` 95% CI
+`[0.42360, 0.45179]`，`direct_observation_floor` 为 `[0.17005, 0.18463]`，
+`teacher_state_observation_error` 为 `[0.19628, 0.20854]`，
+`prediction_gain_over_persistence` 为 `[0.01240, 0.02887]`。因此较高的 absolute floor 和很小的
+persistence gain 都不是少数 condition 的偶然值。
+
+source 分解进一步显示：RobotWin 和 Bridge 的 prediction gain 分别为 5.19% 与 3.90%，
+HY-Embodied 为 2.47%，RoboMind 为 1.00%；Droid 仅 0.03%，AgiBot 为 -0.34%。24 个条件中
+20 个优于 persistence，但 AgiBot 的 H1/H3/H4 和 Droid H1 为负。history 从 H1 增加到 H4
+没有一致改善，说明当前模型没有稳定利用更长 history。
+
+还发现一个 evaluator 级 shortcut：`shuffled_composite_object_error=0.20484` 虽低于 correct，
+但 shuffled 的 `dense_object_semantic_error=0.56757`、`track_semantic_error=0.47013` 和
+`support_iou=0.32746` 均显著差于 correct 的 `0.45236 / 0.32538 / 0.62006`。原因是 predicted
+support 缩小时 compositor 会复制 source feature，从而以 persistence 掩盖错误 prediction。
+因此 composite error 不能单独用于 effect intervention 排名；下一版 evaluator 必须增加固定
+actual support 上的 prediction-only semantic/geometry error，并把 support miss 单独计罚。
+
+最终归因可写成：
+
+$$
+0.21497\approx 0.17697_{\text{semantic/compositor floor}}
++0.02513_{\text{geometry state}}
++0.01287_{\text{Dynamics}}.
+$$
+
+约 82.32% 的 correct absolute error 已存在于 direct observation floor，约 11.69% 来自 compact
+geometry，只有约 5.99% 是 Dynamics 相对 teacher state 的新增误差。下一项主线不是增大
+Dynamics、调 loss weight 或继续 V60 长训，而是先把 object state 从“单一 semantic vector +
+单 Gaussian moment”改成能够表达 object-local appearance 与多区域 support 的紧凑组合状态；
+Dynamics 必须等新 state 的 observation-grounded ceiling 明显改善后再训练。
