@@ -164,7 +164,8 @@ class PersistentObjectRootsV61(nn.Module):
             observed = torch.einsum("bqm,bqd->bmd", weight, carriers.feature[:, frame])
             center = torch.einsum("bqm,bqd->bmd", weight, carriers.center[:, frame])
             offset = carriers.center[:, frame, :, None] - center[:, None]
-            scale = torch.einsum("bqm,bqmd->bm", weight, offset.square().sum(dim=-1))
+            squared_distance = offset.square().sum(dim=-1)
+            scale = torch.einsum("bqm,bqm->bm", weight, squared_distance)
             previous = self.memory(
                 observed.flatten(0, 1), previous.flatten(0, 1)
             ).reshape_as(previous)
