@@ -75,7 +75,7 @@ def parse_args():
     parser.add_argument("--decode_report", required=True)
     parser.add_argument("--source_revision", required=True)
     parser.add_argument("--dino_checkpoint", required=True)
-    parser.add_argument("--siglip2_checkpoint", required=True)
+    parser.add_argument("--siglip_checkpoint", required=True)
     parser.add_argument("--tracker_checkpoint", required=True)
     parser.add_argument("--resume", default="")
     parser.add_argument("--chunk_lengths", default="4,6,8")
@@ -116,8 +116,8 @@ def validate_arguments(args, world_size, config):
     for name in required_files:
         if not os.path.isfile(getattr(args, name)):
             raise ValueError(f"v61 Dynamics {name} is missing: {getattr(args, name)}")
-    if not os.path.isdir(args.siglip2_checkpoint):
-        raise ValueError("v61 Dynamics SigLIP2 checkpoint is missing")
+    if not os.path.isdir(args.siglip_checkpoint):
+        raise ValueError("v61 Dynamics SigLIP checkpoint is missing")
     if args.resume and not os.path.isfile(args.resume):
         raise ValueError(f"v61 Dynamics resume is missing: {args.resume}")
     dimensions = (
@@ -137,7 +137,7 @@ def validate_arguments(args, world_size, config):
             f"v61 Dynamics effective batch {effective} != {args.target_global_batch}"
         )
     if not config.uses_dino_alignment:
-        raise ValueError("v61 Dynamics requires siglip2_dino or siglip2_dino_object")
+        raise ValueError("v61 Dynamics requires siglip_dino or siglip_dino_object")
     if not 0.0 < args.lr_floor_ratio <= 1.0:
         raise ValueError("v61 Dynamics LR floor ratio must stay within (0,1]")
     if not 0 <= args.warmup_steps < args.steps:
@@ -179,7 +179,7 @@ def main():
         "gate_report",
         "decode_report",
         "dino_checkpoint",
-        "siglip2_checkpoint",
+        "siglip_checkpoint",
         "tracker_checkpoint",
         "resume",
     ):
@@ -231,7 +231,7 @@ def main():
     state_model = ContinuousCarrierObjectWorldModelV61(
         config,
         args.dino_checkpoint,
-        args.siglip2_checkpoint,
+        args.siglip_checkpoint,
         args.student_frame_batch,
     ).to(device)
     state_model.load_state_dict(state_checkpoint["model"], strict=True)

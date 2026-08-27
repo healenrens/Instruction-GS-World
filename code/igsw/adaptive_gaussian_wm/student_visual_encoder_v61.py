@@ -1,4 +1,4 @@
-"""One deployable visual encoder for DINO/SigLIP2 carrier ablations."""
+"""One deployable visual encoder for DINO/SigLIP carrier ablations."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class StudentVisualEncoderV61(nn.Module):
         self,
         config,
         dino_checkpoint: str,
-        siglip2_checkpoint: str,
+        siglip_checkpoint: str,
         frame_batch: int,
     ):
         super().__init__()
@@ -45,7 +45,7 @@ class StudentVisualEncoderV61(nn.Module):
         if self.kind == "dino":
             self._build_dino(dino_checkpoint)
         else:
-            self._build_siglip2(siglip2_checkpoint)
+            self._build_siglip(siglip_checkpoint)
         self.projector = nn.Sequential(
             nn.Linear(self.native_dim, config.student_dim),
             nn.LayerNorm(config.student_dim),
@@ -72,17 +72,16 @@ class StudentVisualEncoderV61(nn.Module):
         self.register_buffer("pixel_std", torch.tensor(cfg["std"]).view(1, 3, 1, 1))
         self._freeze_lower_blocks(self.backbone.blocks, self.backbone.norm)
 
-    def _build_siglip2(self, checkpoint: str) -> None:
-        from transformers import Siglip2VisionModel
+    def _build_siglip(self, checkpoint: str) -> None:
+        from transformers import SiglipVisionModel
 
-        self.backbone = Siglip2VisionModel.from_pretrained(
+        self.backbone = SiglipVisionModel.from_pretrained(
             checkpoint,
             local_files_only=True,
         )
         self.native_dim = int(self.backbone.config.hidden_size)
         self.patch_size = int(self.backbone.config.patch_size)
-        self.image_size = self.config.siglip2_image_size
-        self.max_patches = int(self.backbone.config.num_patches)
+        self.image_size = self.config.siglip_image_size
         self.register_buffer("pixel_mean", torch.full((1, 3, 1, 1), 0.5))
         self.register_buffer("pixel_std", torch.full((1, 3, 1, 1), 0.5))
         self._freeze_lower_blocks(
@@ -140,38 +139,17 @@ class StudentVisualEncoderV61(nn.Module):
         coordinates = _grid_coordinates(grid, grid, rgb.device)
         return native, patch_valid, coordinates, (grid, grid)
 
-    def _siglip2_frames(self, rgb: torch.Tensor, valid: torch.Tensor):
+    def _siglip_frames(self, rgb: torch.Tensor, valid: torch.Tensor):
         image, mask = self._resize(rgb, valid)
         grid = self.image_size // self.patch_size
-        patches = image.reshape(
-            len(image), 3, grid, self.patch_size, grid, self.patch_size
-        )
-        patches = patches.permute(0, 2, 4, 3, 5, 1).reshape(len(image), grid * grid, -1)
         patch_valid = (
             F.avg_pool2d(mask, self.patch_size, self.patch_size).flatten(1) >= 0.5
         )
-        actual = patches.shape[1]
-        if actual > self.max_patches:
-            raise RuntimeError(
-                "SigLIP2 image produces more patches than its checkpoint"
-            )
-        if actual < self.max_patches:
-            patches = F.pad(patches, (0, 0, 0, self.max_patches - actual))
-            patch_valid = F.pad(
-                patch_valid, (0, self.max_patches - actual), value=False
-            )
-        spatial_shapes = torch.tensor(
-            (grid, grid), device=rgb.device, dtype=torch.long
-        )[None].expand(len(rgb), -1)
-        output = self.backbone(
-            pixel_values=patches,
-            pixel_attention_mask=patch_valid,
-            spatial_shapes=spatial_shapes,
-        )
+        output = self.backbone(pixel_values=image)
         coordinates = _grid_coordinates(grid, grid, rgb.device)
         return (
-            output.last_hidden_state[:, :actual],
-            patch_valid[:, :actual],
+            output.last_hidden_state,
+            patch_valid,
             coordinates,
             (grid, grid),
         )
@@ -186,7 +164,7 @@ class StudentVisualEncoderV61(nn.Module):
                     rgb[start:stop], valid[start:stop]
                 )
             else:
-                native, mask, coordinates, grid_hw = self._siglip2_frames(
+                native, mask, coordinates, grid_hw = self._siglip_frames(
                     rgb[start:stop], valid[start:stop]
                 )
             outputs.append(native)

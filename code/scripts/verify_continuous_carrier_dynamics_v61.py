@@ -54,7 +54,7 @@ def parse_args():
     parser.add_argument("--state_checkpoint", required=True)
     parser.add_argument("--data_index", required=True)
     parser.add_argument("--dino_checkpoint", required=True)
-    parser.add_argument("--siglip2_checkpoint", required=True)
+    parser.add_argument("--siglip_checkpoint", required=True)
     parser.add_argument("--tracker_checkpoint", required=True)
     parser.add_argument("--source_revision", required=True)
     parser.add_argument("--output", required=True)
@@ -128,7 +128,7 @@ def main():
     state_model = ContinuousCarrierObjectWorldModelV61(
         config,
         args.dino_checkpoint,
-        args.siglip2_checkpoint,
+        args.siglip_checkpoint,
         args.student_frame_batch,
     ).to(device)
     state_model.load_state_dict(state_checkpoint["model"], strict=True)

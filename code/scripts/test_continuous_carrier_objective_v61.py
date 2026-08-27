@@ -115,7 +115,7 @@ def synthetic_teachers(config, batch=2, frames=5, points=12):
         membership=membership,
         valid=torch.ones(batch, config.object_roots, dtype=torch.bool),
         semantic=F.normalize(
-            torch.randn(batch, 2, config.object_roots, config.siglip2_dim), dim=-1
+            torch.randn(batch, 2, config.object_roots, config.siglip_dim), dim=-1
         ),
         semantic_valid=torch.ones(batch, 2, config.object_roots, dtype=torch.bool),
         frame_indices=torch.tensor((0, frames - 1)),
@@ -125,7 +125,7 @@ def synthetic_teachers(config, batch=2, frames=5, points=12):
 
 def main():
     torch.manual_seed(17)
-    config = config_for_variant("siglip2_dino_object")
+    config = config_for_variant("siglip_dino_object")
     model = ObjectiveHarness(config)
     field = synthetic_field(config)
     evidence, relation, components = synthetic_teachers(config)

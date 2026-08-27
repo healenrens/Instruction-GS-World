@@ -84,7 +84,7 @@ class Harness(nn.Module):
 
 
 def run_capacity(capacity):
-    config = config_for_variant("siglip2_dino_object")
+    config = config_for_variant("siglip_dino_object")
     model = Harness(config, capacity)
     source, target = synthetic_state(config), synthetic_state(config)
     effect = model.effect_posterior(source, target)
@@ -165,7 +165,7 @@ def run_capacity(capacity):
 
 def main():
     torch.manual_seed(17)
-    config = config_for_variant("siglip2_dino_object")
+    config = config_for_variant("siglip_dino_object")
     sequence = synthetic_state(config, batch=2, frames=3)
     final = frame_state_v61(sequence, -1)
     if final.carriers.feature.shape[1] != 1:

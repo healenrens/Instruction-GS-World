@@ -17,7 +17,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
 from igsw.adaptive_gaussian_wm.carrier_teacher_v61 import (  # noqa: E402
-    FrozenSiglip2ObjectTeacherV61,
+    FrozenSiglipObjectTeacherV61,
 )
 from igsw.adaptive_gaussian_wm.continuous_carrier_world_model_v61 import (  # noqa: E402
     ContinuousCarrierObjectWorldModelV61,
@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decode_report", required=True)
     parser.add_argument("--source_revision", required=True)
     parser.add_argument("--dino_checkpoint", required=True)
-    parser.add_argument("--siglip2_checkpoint", required=True)
+    parser.add_argument("--siglip_checkpoint", required=True)
     parser.add_argument("--tracker_checkpoint", required=True)
     parser.add_argument("--resume", default="")
     parser.add_argument("--chunk_lengths", default="4,6,8")
@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefetch_factor", type=int, default=2)
     parser.add_argument("--student_frame_batch", type=int, default=32)
     parser.add_argument("--dino_frame_batch", type=int, default=64)
-    parser.add_argument("--siglip2_teacher_batch", type=int, default=64)
+    parser.add_argument("--siglip_teacher_batch", type=int, default=64)
     parser.add_argument("--max_train_items", type=int, default=0)
     parser.add_argument("--steps", type=int, default=20_000)
     parser.add_argument("--backbone_lr", type=float, default=2e-6)
@@ -109,9 +109,9 @@ def validate_arguments(args, world_size: int, config) -> None:
     for name in required:
         if not os.path.isfile(getattr(args, name)):
             raise ValueError(f"v61 {name} is missing: {getattr(args, name)}")
-    if config.student_encoder == "siglip2" or config.uses_object_semantics:
-        if not os.path.isdir(args.siglip2_checkpoint):
-            raise ValueError("v61 SigLIP2 checkpoint must be a local directory")
+    if config.student_encoder == "siglip" or config.uses_object_semantics:
+        if not os.path.isdir(args.siglip_checkpoint):
+            raise ValueError("v61 SigLIP checkpoint must be a local directory")
     if args.resume and not os.path.isfile(args.resume):
         raise ValueError(f"v61 resume checkpoint is missing: {args.resume}")
     dimensions = (
@@ -121,7 +121,7 @@ def validate_arguments(args, world_size: int, config) -> None:
         args.prefetch_factor,
         args.student_frame_batch,
         args.dino_frame_batch,
-        args.siglip2_teacher_batch,
+        args.siglip_teacher_batch,
         args.steps,
     )
     if min(dimensions) < 1:
@@ -205,7 +205,7 @@ def main() -> None:
         value = getattr(args, name)
         if value:
             setattr(args, name, os.path.abspath(value))
-    args.siglip2_checkpoint = os.path.abspath(args.siglip2_checkpoint)
+    args.siglip_checkpoint = os.path.abspath(args.siglip_checkpoint)
     args.git_commit = args.source_revision
     context = init_torchrun()
     config = config_for_variant(args.variant)
@@ -243,7 +243,7 @@ def main() -> None:
     model = ContinuousCarrierObjectWorldModelV61(
         config,
         args.dino_checkpoint,
-        args.siglip2_checkpoint,
+        args.siglip_checkpoint,
         args.student_frame_batch,
     ).to(device)
     if checkpoint is not None:
@@ -265,8 +265,8 @@ def main() -> None:
         config, device, args.tracker_checkpoint, sequence_batch=1
     )
     semantic_teacher = (
-        FrozenSiglip2ObjectTeacherV61(
-            args.siglip2_checkpoint, device, args.siglip2_teacher_batch
+        FrozenSiglipObjectTeacherV61(
+            args.siglip_checkpoint, device, args.siglip_teacher_batch
         )
         if config.uses_object_semantics
         else None
@@ -321,7 +321,7 @@ def main() -> None:
             "git_commit": args.git_commit,
             "single_student_encoder": True,
             "student_encoder": config.student_encoder,
-            "training_only_teachers": ["DINOv2-L", "CoTracker", "SigLIP2 crops"]
+            "training_only_teachers": ["DINOv2-L", "CoTracker", "SigLIP crops"]
             if config.uses_object_semantics
             else ["DINOv2-L", "CoTracker"],
             "dynamics_present": False,

@@ -14,7 +14,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
 from igsw.adaptive_gaussian_wm.carrier_teacher_v61 import (  # noqa: E402
-    FrozenSiglip2ObjectTeacherV61,
+    FrozenSiglipObjectTeacherV61,
     build_object_components_v61,
 )
 from igsw.adaptive_gaussian_wm.continuous_carrier_world_model_v61 import (  # noqa: E402
@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument("--variant", choices=VARIANTS, required=True)
     parser.add_argument("--data_index", required=True)
     parser.add_argument("--dino_checkpoint", required=True)
-    parser.add_argument("--siglip2_checkpoint", required=True)
+    parser.add_argument("--siglip_checkpoint", required=True)
     parser.add_argument("--tracker_checkpoint", required=True)
     parser.add_argument("--source_revision", required=True)
     parser.add_argument("--output", required=True)
@@ -56,7 +56,7 @@ def parse_args():
     parser.add_argument("--held_group_stride", type=int, default=20)
     parser.add_argument("--student_frame_batch", type=int, default=16)
     parser.add_argument("--dino_frame_batch", type=int, default=16)
-    parser.add_argument("--siglip2_teacher_batch", type=int, default=16)
+    parser.add_argument("--siglip_teacher_batch", type=int, default=16)
     parser.add_argument("--amp", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--seed", type=int, default=17)
     return parser.parse_args()
@@ -172,7 +172,7 @@ def main():
     model = ContinuousCarrierObjectWorldModelV61(
         config,
         args.dino_checkpoint,
-        args.siglip2_checkpoint,
+        args.siglip_checkpoint,
         args.student_frame_batch,
     ).to(device)
     dino = FrozenDinoVideoRuntime(
@@ -182,8 +182,8 @@ def main():
         config, device, args.tracker_checkpoint, sequence_batch=1
     )
     semantic_teacher = (
-        FrozenSiglip2ObjectTeacherV61(
-            args.siglip2_checkpoint, device, args.siglip2_teacher_batch
+        FrozenSiglipObjectTeacherV61(
+            args.siglip_checkpoint, device, args.siglip_teacher_batch
         )
         if config.uses_object_semantics
         else None
@@ -268,7 +268,7 @@ def main():
         "point_tracker_in_deployable_model": False,
         "training_only_dino_teacher": True,
         "training_only_cotracker_teacher": True,
-        "training_only_siglip2_crop_teacher": config.uses_object_semantics,
+        "training_only_siglip_crop_teacher": config.uses_object_semantics,
         "group_partition": "train",
         "held_group_stride": args.held_group_stride,
         "training_group_count": len(training_groups),

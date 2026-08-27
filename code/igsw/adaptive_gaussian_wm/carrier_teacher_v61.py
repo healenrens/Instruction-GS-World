@@ -82,55 +82,28 @@ def _crop_objects(rgb, boxes, valid, image_size: int):
     return crops
 
 
-class FrozenSiglip2ObjectTeacherV61:
+class FrozenSiglipObjectTeacherV61:
     def __init__(self, checkpoint: str, device: torch.device, frame_batch: int):
-        from transformers import Siglip2VisionModel
+        from transformers import SiglipVisionModel
 
         self.model = (
-            Siglip2VisionModel.from_pretrained(checkpoint, local_files_only=True)
+            SiglipVisionModel.from_pretrained(checkpoint, local_files_only=True)
             .to(device)
             .eval()
         )
         self.model.requires_grad_(False)
         self.device = device
         self.frame_batch = int(frame_batch)
-        self.patch_size = int(self.model.config.patch_size)
-        self.max_patches = int(self.model.config.num_patches)
         self.feature_dim = int(self.model.config.hidden_size)
-        self.image_size = 224
-
-    def _patchify(self, images):
-        images = (images - 0.5) / 0.5
-        grid = self.image_size // self.patch_size
-        patches = images.reshape(
-            len(images), 3, grid, self.patch_size, grid, self.patch_size
-        )
-        patches = patches.permute(0, 2, 4, 3, 5, 1).reshape(
-            len(images), grid * grid, -1
-        )
-        actual = patches.shape[1]
-        if actual > self.max_patches:
-            raise RuntimeError("v61 object crop exceeds SigLIP2 patch capacity")
-        mask = torch.ones(len(images), actual, device=images.device, dtype=torch.bool)
-        if actual < self.max_patches:
-            patches = F.pad(patches, (0, 0, 0, self.max_patches - actual))
-            mask = F.pad(mask, (0, self.max_patches - actual), value=False)
-        shapes = torch.tensor((grid, grid), device=images.device)[None].expand(
-            len(images), -1
-        )
-        return patches, mask, shapes
+        self.image_size = int(self.model.config.image_size)
 
     @torch.no_grad()
     def __call__(self, crops: torch.Tensor) -> torch.Tensor:
         outputs = []
         for start in range(0, len(crops), self.frame_batch):
             stop = min(start + self.frame_batch, len(crops))
-            patches, mask, shapes = self._patchify(crops[start:stop])
-            output = self.model(
-                pixel_values=patches,
-                pixel_attention_mask=mask,
-                spatial_shapes=shapes,
-            )
+            images = (crops[start:stop] - 0.5) / 0.5
+            output = self.model(pixel_values=images)
             outputs.append(F.normalize(output.pooler_output.float(), dim=-1, eps=1e-6))
         return torch.cat(outputs)
 
@@ -141,7 +114,7 @@ def build_object_components_v61(
     evidence,
     relation,
     object_roots: int,
-    semantic_teacher: FrozenSiglip2ObjectTeacherV61 | None,
+    semantic_teacher: FrozenSiglipObjectTeacherV61 | None,
 ):
     membership, valid = select_soft_object_components(relation, object_roots)
     frame_indices = torch.tensor(

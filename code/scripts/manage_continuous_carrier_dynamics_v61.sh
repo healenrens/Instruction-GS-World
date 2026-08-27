@@ -8,12 +8,12 @@ ROOT="${ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 PY="${VENV_ROOT}/.venv/bin/python"
-VARIANT="${VARIANT:-siglip2_dino_object}"
+VARIANT="${VARIANT:-siglip_dino_object}"
 EFFECT_CAPACITY="${EFFECT_CAPACITY:-8x64_bound}"
 SOURCE_REVISION="${SOURCE_REVISION:-}"
 DATA_INDEX="${DATA_INDEX:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json}"
 DINO_CHECKPOINT="${DINO_CHECKPOINT:-${RUNTIME_ROOT}/models/dinov2_vitl14/model.safetensors}"
-SIGLIP2_CHECKPOINT="${SIGLIP2_CHECKPOINT:-${RUNTIME_ROOT}/models/siglip2-base-patch16-224}"
+SIGLIP_CHECKPOINT="${SIGLIP_CHECKPOINT:-${RUNTIME_ROOT}/models/siglip2-base-patch16-224}"
 TRACKER_CHECKPOINT="${TRACKER_CHECKPOINT:-${RUNTIME_ROOT}/checkpoints/cotracker/scaled_offline.pth}"
 STATE_RUN_NAME="${STATE_RUN_NAME:-continuous_carrier_v61_${VARIANT}_seed17_${SOURCE_REVISION:0:7}}"
 STATE_CHECKPOINT="${STATE_CHECKPOINT:-${RUNTIME_ROOT}/outputs/${STATE_RUN_NAME}/latest.pt}"
@@ -25,7 +25,7 @@ PID_FILE="${LOG_ROOT}/launcher.pid"
 LAUNCH_LOG="${LOG_ROOT}/launcher.log"
 
 export ROOT RUNTIME_ROOT VENV_ROOT VARIANT EFFECT_CAPACITY SOURCE_REVISION DATA_INDEX
-export DINO_CHECKPOINT SIGLIP2_CHECKPOINT TRACKER_CHECKPOINT STATE_CHECKPOINT
+export DINO_CHECKPOINT SIGLIP_CHECKPOINT TRACKER_CHECKPOINT STATE_CHECKPOINT
 export GATE_REPORT RUN_NAME OUT
 export HF_HOME="${HF_HOME:-${RUNTIME_ROOT}/hf_cache}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${RUNTIME_ROOT}/.cache}"
@@ -41,7 +41,7 @@ verify() {
       --state_checkpoint "${STATE_CHECKPOINT}" \
       --data_index "${DATA_INDEX}" \
       --dino_checkpoint "${DINO_CHECKPOINT}" \
-      --siglip2_checkpoint "${SIGLIP2_CHECKPOINT}" \
+      --siglip_checkpoint "${SIGLIP_CHECKPOINT}" \
       --tracker_checkpoint "${TRACKER_CHECKPOINT}" \
       --source_revision "${SOURCE_REVISION}" \
       --output "${GATE_REPORT}" \

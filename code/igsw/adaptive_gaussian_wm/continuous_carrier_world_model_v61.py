@@ -14,7 +14,7 @@ class ContinuousCarrierObjectWorldModelV61(nn.Module):
         self,
         config,
         dino_checkpoint: str,
-        siglip2_checkpoint: str,
+        siglip_checkpoint: str,
         student_frame_batch: int,
     ):
         super().__init__()
@@ -23,7 +23,7 @@ class ContinuousCarrierObjectWorldModelV61(nn.Module):
         self.student = StudentVisualEncoderV61(
             config,
             dino_checkpoint,
-            siglip2_checkpoint,
+            siglip_checkpoint,
             student_frame_batch,
         )
         self.state_encoder = ContinuousCarrierObjectStateEncoderV61(config)

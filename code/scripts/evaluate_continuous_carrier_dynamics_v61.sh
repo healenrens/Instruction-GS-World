@@ -13,7 +13,7 @@ RUN_NAME="${RUN_NAME:-continuous_carrier_dynamics_v61_${EFFECT_CAPACITY}_seed17_
 CHECKPOINT="${CHECKPOINT:-${RUNTIME_ROOT}/outputs/${RUN_NAME}/latest.pt}"
 DATA_INDEX="${DATA_INDEX:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json}"
 DINO_CHECKPOINT="${DINO_CHECKPOINT:-${RUNTIME_ROOT}/models/dinov2_vitl14/model.safetensors}"
-SIGLIP2_CHECKPOINT="${SIGLIP2_CHECKPOINT:-${RUNTIME_ROOT}/models/siglip2-base-patch16-224}"
+SIGLIP_CHECKPOINT="${SIGLIP_CHECKPOINT:-${RUNTIME_ROOT}/models/siglip2-base-patch16-224}"
 TRACKER_CHECKPOINT="${TRACKER_CHECKPOINT:-${RUNTIME_ROOT}/checkpoints/cotracker/scaled_offline.pth}"
 EVAL_NAME="${EVAL_NAME:-${RUN_NAME}_held_dynamics_eval}"
 OUTPUT="${OUTPUT:-${RUNTIME_ROOT}/outputs/v61_evaluations/${EVAL_NAME}.json}"
@@ -28,7 +28,7 @@ exec "${PY}" "${ROOT}/code/scripts/evaluate_continuous_carrier_dynamics_v61.py" 
   --checkpoint "${CHECKPOINT}" \
   --data_index "${DATA_INDEX}" \
   --dino_checkpoint "${DINO_CHECKPOINT}" \
-  --siglip2_checkpoint "${SIGLIP2_CHECKPOINT}" \
+  --siglip_checkpoint "${SIGLIP_CHECKPOINT}" \
   --tracker_checkpoint "${TRACKER_CHECKPOINT}" \
   --output "${OUTPUT}" \
   --chunk_lengths "${EVAL_CHUNK_LENGTHS:-4,6,8}" \
