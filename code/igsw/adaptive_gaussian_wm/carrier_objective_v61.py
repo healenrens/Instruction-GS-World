@@ -225,6 +225,35 @@ def _track_appearance_retrieval(identity, visibility):
     return temporal_error, retrieval_accuracy
 
 
+def _reappearance_identity_error(identity, evidence, relation):
+    visibility = evidence.visibility.bool()
+    lifecycle_known = relation.lifecycle_known.bool()
+    presence = relation.presence.float() >= 0.5
+    reference = identity[:, 0]
+    seen = visibility[:, 0] & lifecycle_known[:, 0]
+    occluded = torch.zeros_like(seen)
+    errors, weights = [], []
+    for frame in range(1, identity.shape[1]):
+        current_visible = visibility[:, frame] & lifecycle_known[:, frame]
+        reappeared = current_visible & occluded & seen
+        errors.append(1.0 - F.cosine_similarity(identity[:, frame], reference, dim=-1))
+        weights.append(reappeared.float())
+        hidden = (
+            lifecycle_known[:, frame]
+            & presence[:, frame]
+            & ~visibility[:, frame]
+            & seen
+        )
+        occluded = (occluded | hidden) & ~current_visible
+        reference = torch.where(
+            current_visible[..., None], identity[:, frame], reference
+        )
+        seen = seen | current_visible
+    error = torch.stack(errors, dim=1)
+    weight = torch.stack(weights, dim=1)
+    return _weighted_mean(error, weight), weight.sum()
+
+
 def continuous_carrier_objective_v61(
     model, field, state, evidence, relation, components
 ):
@@ -284,6 +313,9 @@ def continuous_carrier_objective_v61(
     track_appearance_error, track_appearance_retrieval = _track_appearance_retrieval(
         identity, evidence.visibility
     )
+    reappearance_error, reappearance_count = _reappearance_identity_error(
+        identity, evidence, relation
+    )
     relation_loss = same + different
     assignment_loss = carrier_cycle + root_cycle
     lifecycle_loss = visibility + presence
@@ -301,12 +333,6 @@ def continuous_carrier_objective_v61(
         + config.carrier_diversity_weight * repulsion
         + config.root_balance_weight * root_balance
     )
-    occluded = relation.lifecycle_known & ~evidence.visibility
-    reappearance_identity = identity[:, 1:] * evidence.visibility[:, 1:, :, None]
-    reappearance_identity = 1.0 - F.cosine_similarity(
-        reappearance_identity, identity[:, :-1], dim=-1
-    )
-    reappearance_weight = (occluded[:, :-1] & evidence.visibility[:, 1:]).float()
     parts = {
         "object_state_loss": loss.detach(),
         "carrier_track_cycle_error": carrier_cycle.detach(),
@@ -327,9 +353,8 @@ def continuous_carrier_objective_v61(
         "effective_object_roots": effective_roots.detach(),
         "scene_owner_fraction": state.roots.owner[..., -1].mean().detach(),
         "track_visibility_prediction_mean": visibility_prediction.mean().detach(),
-        "track_reappearance_identity_error": _weighted_mean(
-            reappearance_identity, reappearance_weight
-        ).detach(),
+        "track_reappearance_identity_error": reappearance_error.detach(),
+        "track_reappearance_count": reappearance_count.detach(),
         "heldout_track_appearance_temporal_error": track_appearance_error.detach(),
         "heldout_track_appearance_retrieval_accuracy": (
             track_appearance_retrieval.detach()

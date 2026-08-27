@@ -1170,6 +1170,8 @@ V60 observation-grounded 复评显示约 82.32% 的绝对误差已经存在于�
   仍不在 V61 范围内。
 - zero/shuffled route 只提供 detached intervention reference，不能通过故意恶化对照路径满足
   margin；梯度只推动 correct posterior-effect route 降低真实 future observation error。
+- reappearance identity 使用遮挡前最后一个 visible identity 作为 reference，跨过任意长度的
+  lifecycle-known occlusion，并只在第一次重新 visible 时计分；同时报告有效 reappearance 数量。
 - Dynamics 只在 held task groups 上验收：future continuous-track coordinate/appearance/lifecycle
   error 必须相对 persistence、zero effect 和 shuffled effect 都改善至少 10%。
 - `object_state` checkpoint 与 `dynamics` checkpoint 具有不同 architecture/stage contract；旧 V61
