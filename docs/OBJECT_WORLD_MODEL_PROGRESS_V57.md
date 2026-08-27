@@ -1,10 +1,10 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-08-23  
+> 更新日期：2026-08-27
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/object-transition-objective-v59`
-> 当前代码提交：`0c7cf6f204c2a57bb099d724fb655b9723d38159`
-> 当前实验：W&B `q02tvfqq`，终态 `killed`，最后 history step 6,760，恢复 checkpoint step 6,750
+> 当前开发分支：`codex/v60-observation-reconstruction-eval`
+> 当前代码提交：`c4b2de4af6fae4f3a155ce375d22aee95bc3c5a5`
+> 当前实验：V60 step 10,000 已完成；observation-grounded 复评待执行
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
 > 远端运行与产物根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/`  
 > W&B：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`
@@ -972,3 +972,82 @@ W&B 的 condition/source/history/temporal/bootstrap/factorization 全量指标�
   contract、Ruff、Python compile 和 shell syntax，真实六源 GPU evaluation 尚未运行。
   下一步唯一任务是执行该 evaluator，并依据四路 factorization 选择下一版修改对象；在结果
   返回前不增加数据、不继续训练，也不改 Dynamics 结构。
+
+### 2026-08-27：暂停 Dynamics 优化并建立 Observation-Grounded 复评
+
+- **触发原因**：V60 sampler-unseen 结果证明 learned effect 对 teacher-defined compact
+  transition 有明显作用，但现有绝对误差仍只比较预测状态与 CoTracker+DINO 构造的
+  pseudo-GT：一个 1024 维 object-average semantic、五个 relative geometry 数值和一个
+  visibility。该误差不是 future RGB 或完整 future DINO patch field reconstruction。
+  baseline gain 只能回答模型是否优于 copy/zero/shuffled，不能回答 compact state 是否保留了
+  足够的真实 observation 信息。
+- **代码证据**：branch `codex/v60-observation-reconstruction-eval`；复评实现提交
+  `c4b2de4af6fae4f3a155ce375d22aee95bc3c5a5`。本轮不修改 V60 model、checkpoint、训练 loss
+  或 optimizer，只增加只读 evaluator、W&B 输出和 CPU 数学契约测试。
+- **Observation GT**：对真实 future RGB 运行同一个 frozen DINOv2-L，直接使用其
+  `16x16x1024` future patch field。query-object 的实际评测区域由可见 related tracks 在
+  patch grid 上做固定 kernel splat 得到。当前版本不声称 RGB pixel reconstruction，因为
+  V60 state 没有 RGB、scene renderer 或 camera/background state；DINO patch field 是第一层
+  真实 observation 复评，后续 RGB probe 必须单独报告 decoder floor。
+
+复评固定比较以下四条主要路径：
+
+$$
+R_{direct}=R\left(Y_{t+\Delta}^{teacher},M_{t+\Delta}^{track}\right),
+$$
+
+$$
+R_{state}=R\left(Y_{t+\Delta}^{teacher},M(Y_{t+\Delta}^{teacher})\right),
+$$
+
+$$
+R_{pred}=R\left(\widehat Y_{t+\Delta},M(\widehat Y_{t+\Delta})\right),
+$$
+
+$$
+R_{persist}=R\left(Y_t^{teacher},M(Y_t^{teacher})\right).
+$$
+
+其中 $M_{t+\Delta}^{track}$ 是 future related tracks 直接形成的 observation support；
+$M(Y)$ 是由 state 中 relative center、二维 covariance 和 visibility 构造的 Gaussian moment
+support；$R$ 将单一 semantic vector 填入 object support，并把其余区域保留为 source-frame
+feature persistence。所有路径最终都与真实 future DINO patch field 比较，而不是互相比较。
+
+- `semantic_compression_floor`：teacher future semantic 与真实 object-region future patches
+  的 absolute cosine error。它高说明把 object appearance 压成一个平均 vector 已经丢失关键
+  局部结构，继续改 Dynamics 无法修复。
+- `direct_observation_floor`：使用 teacher semantic 和 actual track support 后仍剩余的 object
+  reconstruction error，反映单向量 semantic 与最小 compositor 的共同下限。
+- `teacher_moment_support_iou` / `geometry_state_penalty`：actual track support 换成 teacher
+  的 center+covariance moment support 后损失多少。它差说明五维 geometry 无法表达 object
+  shape、articulation 或多区域遮挡，应该扩展 object-local carriers，而不是调 loss weight。
+- `teacher_state_observation_error`：完整 teacher compact state 对真实 observation 的可恢复
+  上限。若该值本身很差，则当前学习目标不充分，即便 state loss 降到零也不能完成目标。
+- `dynamics_observation_gap`：V60 prediction 相比 teacher-state ceiling 额外增加的 error。
+  只有 teacher-state ceiling 已经足够好而该 gap 明显时，下一轮才应继续修改 Dynamics。
+- `prediction_gain_over_persistence`：在相同真实 future observation metric 上比较 V60 与
+  persistence。它继续保留，但只是相对价值指标，不再代替 absolute reconstruction。
+- `composite_full/object/background_error`：分别报告全 patch field、query-object support 和
+  其余区域，避免静态背景数量压低 full-frame error，也避免把 V60 缺失的 scene/camera branch
+  误判成 object Dynamics 失败。
+
+本轮不设置事先拍脑袋的 pass threshold。先在与 V60 正式评测完全相同的六 source、
+H=1/2/3/4、100/200/400/800ms、sampler-unseen windows 上收集 macro、micro、source、history、
+temporal 和 2,000 次 condition bootstrap。结果按以下单向决策解释：
+
+1. `semantic_compression_floor` 或 `direct_observation_floor` 高：下一版优先把单一 semantic
+   average 改成可变数量 object-local semantic carriers；禁止继续调 Dynamics。
+2. direct floor 可接受，但 `teacher_moment_support_iou` 低或 `geometry_state_penalty` 高：保留
+   semantic，扩展 geometry/support representation；禁止用更大 Dynamics 掩盖 shape loss。
+3. teacher-state observation error 低，但 `dynamics_observation_gap` 高：当前 state target
+   足够，下一版只修改 effect-conditioned Dynamics。
+4. correct 接近 teacher-state ceiling 且 absolute observation error 低：V60 compact dynamics
+   得到 observation-grounded 支持，再进入 independent tracker/人工子集与 evaluation-only RGB
+   probe；在此之前不做 selector、language 或 policy。
+5. 只有 background error 高：单独增加 scene/camera state，不改变 object state 定义。
+
+- **本地验证**：新增 CPU contract 共 9 项，验证 actual-support oracle IoU、teacher/prediction
+  等价、错误 persistence semantic 可分辨、sample mask 与 accumulator 有限；Ruff、format、
+  Python compile、shell syntax 和 `git diff --check` 均通过。
+- **当前判决**：`待办`。下一项唯一工作是在服务器使用 V60 step 10,000 checkpoint 执行该
+  只读复评并读取 W&B 完整结果。复评完成前不启动新训练、不继续 V60、不命名 V61。
