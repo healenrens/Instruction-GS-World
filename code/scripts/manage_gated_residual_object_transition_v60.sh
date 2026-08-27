@@ -70,8 +70,16 @@ status() {
   if [ -f "${OUT}/train.jsonl" ]; then tail -n "${STATUS_LINES:-80}" "${OUT}/train.jsonl"; fi
 }
 
+evaluate() {
+  export CHECKPOINT="${CHECKPOINT:-${RUNTIME_ROOT}/outputs/gated_residual_object_transition_v60_seed17_c2930c6/v60_transition_0010000.pt}"
+  export EVALUATOR_REVISION="${EVALUATOR_REVISION:-${SOURCE_REVISION}}"
+  export OUTPUT="${OUTPUT:-${RUNTIME_ROOT}/outputs/v60_evaluations/step10000_${EVALUATOR_REVISION}_sampler_unseen.json}"
+  bash "${ROOT}/code/scripts/evaluate_gated_residual_object_transition_v60_suite.sh"
+}
+
 case "${COMMAND}" in
   verify) verify_run ;;
+  evaluate) evaluate ;;
   foreground) foreground ;;
   start) background ;;
   resume)
@@ -89,6 +97,6 @@ case "${COMMAND}" in
       echo "[object-transition-v60-manager] no running launcher"
     fi ;;
   *)
-    echo "usage: $0 {verify|foreground|start|resume|resume-foreground|status|stop}"
+    echo "usage: $0 {verify|evaluate|foreground|start|resume|resume-foreground|status|stop}"
     exit 2 ;;
 esac

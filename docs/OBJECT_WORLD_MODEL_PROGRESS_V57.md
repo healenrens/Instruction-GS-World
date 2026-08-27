@@ -906,3 +906,69 @@ $1-g^*$ 加权，要求低变化样本的 correct prediction 保持接近 source
   `0.99999`；高 gate residual 大于低 gate，change gate 与 residual Dynamics 均有梯度。
   尚未执行真实 GPU verifier、六源训练或 unseen-window evaluation，因此当前只能记为
   `implemented, awaiting real GPU falsification`，不能记为 v60 已解决 temporal failure。
+
+### 2026-08-27：v60 10k 训练结果与正式 Sampler-Unseen Gate
+
+- **训练执行证据**：W&B run `4et02kkh` 已 `finished`，训练 revision 为
+  `c2930c6dd71f6c70e6075d1ad1a436934b15749e`，world size 8、每卡 micro batch 32、
+  gradient accumulation 1、effective batch 256，共完成 10,000 steps。最终 checkpoint 为
+  `/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/gated_residual_object_transition_v60_seed17_c2930c6/v60_transition_0010000.pt`。
+- **训练内主要结果**：末 500 个记录点按有效 transition count 加权后，correct、zero、
+  shuffled、persistence error 分别为 `0.05552/0.11672/0.43762/0.10001`；correct 相对
+  zero、shuffled、persistence 的 gain 分别为 `+52.43%/+87.31%/+44.48%`。按 horizon
+  汇总的 persistence gain 为 h1 `+26.05%`、h2 `+37.11%`、h4 `+50.25%`，相比 v59
+  的 `-21.21%/+3.73%/+33.65%`，短时 over-prediction 在训练曲线上已明显修复。
+- **Gate calibration 结果**：末段 predicted change gate mean 为 `0.2448`，teacher
+  change strength mean 为 `0.2411`，MAE 为 `0.03917`，correlation 为 `0.98057`。
+  high-change 对 persistence 改善约 `59.42%`；但 low-change 占约 `61.6%`，其 correct
+  error `0.03076` 仍高于 persistence `0.02753`，即 persistence gain 为 `-11.73%`。
+  因此 v60 不能仅依据总 loss、全体 gain 或 gate correlation 宣布成功。
+- **当前瓶颈假设**：source base anchor error 在末段约 `0.048`，与 correct future error
+  同量级。训练曲线不能区分剩余误差来自 source base reconstruction、change gate 还是
+  residual content。继续延长同一训练只会混合这三项，缺少明确可证伪结论，故不延长 v60。
+
+本次新增一个只读的 V60 sampler-unseen evaluator。它严格复现 checkpoint 内保存的
+DDP sampler，排除 10,000-step 训练实际访问过的 base indices，再以六个 source、
+H=1/2/3/4、100/200/400/800ms 和 h1/h2/h4 分解结果。每个有效 transition 同时计算：
+
+$$
+\hat Y_{standard}=B_{student}+\hat g\,\Delta\hat Y,
+$$
+
+$$
+\hat Y_{oracle\ gate}=B_{student}+g^*\,\Delta\hat Y,
+$$
+
+$$
+\hat Y_{teacher\ base}=Y_t^{teacher}+\hat g\,\Delta\hat Y,
+$$
+
+$$
+\hat Y_{joint\ oracle}=Y_t^{teacher}+g^*\,\Delta\hat Y.
+$$
+
+四条路径分别表示标准部署 student、仅替换 oracle change magnitude、仅替换 teacher source
+base、同时替换 source base 与 gate。所有路径共享同一个 learned raw residual，因而：
+
+- oracle gate 相对 standard 的 improvement 衡量 gate calibration 的剩余误差；
+- teacher base 相对 standard 的 improvement 衡量 additive source-base anchor 的剩余误差；
+- joint oracle 仍不能超过 persistence 时，说明 residual content 本身没有解释 transition；
+- joint oracle 明显有效但 standard 无效时，才可把失败定位到 deployable base/gate 接口。
+
+这里替换的只是 Dynamics 最终相加的 base；raw residual 仍由 student source hidden state
+条件化。因此该反事实能识别 additive base-anchor bottleneck，但不能独立测量整个 student
+encoder 的误差，也不能把 teacher-base gain 直接写成 object representation 已被修复。
+
+正式 Gate 同时要求：训练/评测 base-index overlap 为零；macro 与 micro 对 zero、shuffled、
+persistence 均改善至少 10%，且 2,000 次 condition bootstrap 的 95% CI 下界为正；每个
+horizon 均达到 10%；low-change 不弱于 persistence；high-change 至少改善 10%；AgiBot 与
+Droid 不再为负；gate correlation 至少 `0.80` 且 MAE 不超过 `0.10`。结果还会同步
+W&B 的 condition/source/history/temporal/bootstrap/factorization 全量指标。
+
+- **边界**：评测仍使用 frozen DINO、CoTracker 和 trajectory-relation teacher，只验证
+  teacher-defined dynamic objective 在 sampler-unseen windows 上是否成立。它不能证明
+  independent object identity、部署期 latent-effect selection 或机器人控制能力。
+- **当前状态**：V60 训练已完成；正式 sampler-unseen evaluator 已实现并通过 CPU synthetic
+  contract、Ruff、Python compile 和 shell syntax，真实六源 GPU evaluation 尚未运行。
+  下一步唯一任务是执行该 evaluator，并依据四路 factorization 选择下一版修改对象；在结果
+  返回前不增加数据、不继续训练，也不改 Dynamics 结构。

@@ -15,6 +15,13 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 from igsw.adaptive_gaussian_wm.gated_residual_object_transition_v60 import (  # noqa: E402
     GatedResidualObjectTransitionModel,
 )
+from igsw.adaptive_gaussian_wm.gated_transition_evaluation_v60 import (  # noqa: E402
+    GatedTransitionEvaluationAccumulator,
+    bootstrap_gains_v60,
+    bootstrap_standard_gains_v60,
+    diagnostic_routes_v60,
+    macro_metrics_v60,
+)
 from igsw.adaptive_gaussian_wm.object_transition_objective_v60 import (  # noqa: E402
     object_transition_objective_v60,
 )
@@ -143,6 +150,7 @@ def main():
         "correct": correct.prediction,
         "zero": base,
         "shuffled": shuffled.prediction,
+        "correct_residual": correct,
     }
     loss, parts = object_transition_objective_v60(output, target, config)
     assert bool(torch.isfinite(loss))
@@ -150,10 +158,25 @@ def main():
     loss.backward()
     assert model.change_gate.network[-1].weight.grad is not None
     assert model.dynamics.semantic_delta.weight.grad is not None
+    routes = diagnostic_routes_v60(output, target)
+    assert routes["teacher_oracle_gate"].semantic.shape == target.future_semantic.shape
+    accumulator = GatedTransitionEvaluationAccumulator(config.dynamic_horizons)
+    accumulator.update(output, target, config)
+    metrics = accumulator.finalize()
+    macro = macro_metrics_v60([metrics, metrics])
+    standard = bootstrap_standard_gains_v60([metrics, metrics], 32, 13)
+    factorized = bootstrap_gains_v60([metrics, metrics], 32, 13)
+    required = (
+        metrics["source_base_error"],
+        macro["student_oracle_gate_active_error"],
+        standard["persistence"]["estimate"],
+        factorized["teacher_oracle_gate"]["estimate"],
+    )
+    assert all(torch.isfinite(torch.tensor(value)) for value in required)
     print(
         {
             "status": "passed",
-            "tests": 4,
+            "tests": 8,
             "low_change_strength": float(target.change_strength[:2].mean()),
             "high_change_strength": float(target.change_strength[2:].mean()),
         }
