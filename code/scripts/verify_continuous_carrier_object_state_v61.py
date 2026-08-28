@@ -17,6 +17,10 @@ from igsw.adaptive_gaussian_wm.carrier_teacher_v61 import (  # noqa: E402
     FrozenSiglipObjectTeacherV61,
     build_object_components_v61,
 )
+from igsw.adaptive_gaussian_wm.bounded_probability_v61 import (  # noqa: E402
+    binary_probability_values,
+    normalize_probability_mass,
+)
 from igsw.adaptive_gaussian_wm.continuous_carrier_world_model_v61 import (  # noqa: E402
     ContinuousCarrierObjectWorldModelV61,
 )
@@ -94,6 +98,42 @@ def finite_gradients(model):
     if missing:
         raise RuntimeError(f"v61 missing required gradient groups: {missing}")
     return len(names), norm**0.5
+
+
+def bounded_probability_contract(config, device, amp_context):
+    low_mass = torch.full(
+        (2, config.object_roots),
+        1e-12,
+        device=device,
+        requires_grad=True,
+    )
+    boundary = torch.tensor((0.0, 1.0), device=device, requires_grad=True)
+    with amp_context():
+        normalized = normalize_probability_mass(
+            low_mass,
+            dim=-1,
+            prior_mass=config.assignment_prior_mass,
+        )
+        boundary_loss = binary_probability_values(
+            boundary,
+            torch.tensor((1.0, 0.0), device=device),
+            config.relation_probability_floor,
+        ).mean()
+        loss = normalized.square().mean() + boundary_loss
+    loss.backward()
+    values = (loss, normalized, low_mass.grad, boundary.grad)
+    if not all(bool(torch.isfinite(value).all()) for value in values):
+        raise RuntimeError("v61 bounded probability contract is non-finite")
+    normalization_error = float(
+        (normalized.sum(dim=-1) - 1.0).abs().max().detach()
+    )
+    maximum_gradient = max(
+        float(low_mass.grad.abs().max()),
+        float(boundary.grad.abs().max()),
+    )
+    if normalization_error >= 1e-6 or not 1.0 < maximum_gradient < 100.0:
+        raise RuntimeError("v61 bounded probability contract differs")
+    return normalization_error, maximum_gradient
 
 
 @torch.no_grad()
@@ -201,6 +241,9 @@ def main():
         if args.amp == "bf16"
         else nullcontext
     )
+    probability_error, probability_gradient = bounded_probability_contract(
+        config, device, amp_context
+    )
     model.train()
     with amp_context():
         output = model(batch, evidence, relation, components)
@@ -284,6 +327,8 @@ def main():
         "loss": float(output["loss"].detach()),
         "gradient_tensor_count": gradient_tensors,
         "gradient_norm": gradient_norm,
+        "bounded_probability_normalization_error": probability_error,
+        "bounded_probability_max_gradient": probability_gradient,
         "frozen_lower_blocks": frozen_lower,
         "trainable_upper_blocks": trainable_upper,
         "metrics": {name: float(value) for name, value in output["parts"].items()},
