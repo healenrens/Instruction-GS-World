@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .bounded_probability_v61 import binary_probability_values
 from .distributed_statistics import gather_batch_with_grad
 from .fixed_teacher_projection_v61 import fixed_group_projection_v61
 
@@ -13,10 +14,8 @@ def _weighted_mean(value, weight):
     return (value * weight).sum() / weight.sum().clamp_min(1.0)
 
 
-def _probability_loss(prediction, target, weight):
-    prediction = prediction.float().clamp(1e-6, 1.0 - 1e-6)
-    value = -target.float() * prediction.log()
-    value = value - (1.0 - target.float()) * (1.0 - prediction).log()
+def _probability_loss(prediction, target, weight, floor):
+    value = binary_probability_values(prediction, target, floor)
     return _weighted_mean(value, weight.float())
 
 
@@ -55,10 +54,16 @@ def _route_errors(model, state, assignment, root_assignment, evidence, relation)
     appearance = _weighted_mean(appearance_error, target_visible)
     lifecycle_weight = relation.lifecycle_known[:, -1].float()
     visibility_error = _probability_loss(
-        visibility, relation.visibility[:, -1], lifecycle_weight
+        visibility,
+        relation.visibility[:, -1],
+        lifecycle_weight,
+        model.config.relation_probability_floor,
     )
     presence_error = _probability_loss(
-        presence, relation.presence[:, -1], lifecycle_weight
+        presence,
+        relation.presence[:, -1],
+        lifecycle_weight,
+        model.config.relation_probability_floor,
     )
     total = coordinate + appearance + 0.25 * (visibility_error + presence_error)
     return {

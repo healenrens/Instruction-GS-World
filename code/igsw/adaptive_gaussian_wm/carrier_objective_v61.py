@@ -5,6 +5,11 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .bounded_probability_v61 import (
+    binary_probability_values,
+    normalize_probability_mass,
+    smooth_binary_probability,
+)
 from .fixed_teacher_projection_v61 import fixed_group_projection_v61
 from .point_track_teacher import sample_patch_field
 
@@ -13,12 +18,8 @@ def _weighted_mean(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return (value * weight).sum() / weight.sum().clamp_min(1.0)
 
 
-def _binary_probability_loss(prediction, target, weight):
-    prediction = prediction.float().clamp(1e-6, 1.0 - 1e-6)
-    value = (
-        -target.float() * prediction.log()
-        - (1.0 - target.float()) * (1.0 - prediction).log()
-    )
+def _binary_probability_loss(prediction, target, weight, floor):
+    value = binary_probability_values(prediction, target, floor)
     return _weighted_mean(value, weight.float())
 
 
@@ -27,28 +28,35 @@ def track_assignments_v61(state, field, evidence, config):
     assignment = sample_patch_field(
         support_field.float(), evidence.coordinates.float(), field.grid_hw
     )
-    assignment = assignment * state.carriers.presence[:, :, None]
-    assignment = assignment / assignment.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+    assignment = assignment * state.carriers.presence[:, :, None].float()
+    assignment = normalize_probability_mass(
+        assignment,
+        dim=-1,
+        prior_mass=config.assignment_prior_mass,
+    )
     root = torch.einsum(
         "btpq,btqm->btpm",
         assignment,
         state.roots.owner[..., : config.object_roots],
     )
-    root = root / root.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+    root = normalize_probability_mass(
+        root,
+        dim=-1,
+        prior_mass=config.assignment_prior_mass,
+    )
     return assignment, root
 
 
-def _relation_terms(root_assignment, relation, evidence):
+def _relation_terms(root_assignment, relation, evidence, probability_floor):
     visible = evidence.visibility.float()
     average = (root_assignment * visible[..., None]).sum(dim=1)
     average = average / visible.sum(dim=1)[..., None].clamp_min(1.0)
-    coassignment = torch.einsum("bpm,bqm->bpq", average, average).clamp(
-        1e-6, 1.0 - 1e-6
-    )
+    coassignment = torch.einsum("bpm,bqm->bpq", average, average)
+    probability = smooth_binary_probability(coassignment, probability_floor)
     same = relation.same_confidence.float()
     different = relation.different_confidence.float()
-    same_loss = _weighted_mean(-coassignment.log(), same)
-    different_loss = _weighted_mean(-(1.0 - coassignment).log(), different)
+    same_loss = _weighted_mean(-probability.log(), same)
+    different_loss = _weighted_mean(-torch.log1p(-probability), different)
     return same_loss, different_loss, average, coassignment
 
 
@@ -93,10 +101,16 @@ def _geometry_lifecycle_terms(
     )
     lifecycle_weight = relation.lifecycle_known.float()
     visibility_loss = _binary_probability_loss(
-        visibility, relation.visibility, lifecycle_weight
+        visibility,
+        relation.visibility,
+        lifecycle_weight,
+        model.config.relation_probability_floor,
     )
     presence_loss = _binary_probability_loss(
-        presence, relation.presence, lifecycle_weight
+        presence,
+        relation.presence,
+        lifecycle_weight,
+        model.config.relation_probability_floor,
     )
     track_dynamic = torch.einsum(
         "btpq,btqd->btpd", assignment, state.carriers.dynamic.float()
@@ -135,9 +149,11 @@ def _object_semantic_alignment(model, state, root_average, components):
     component_root = component_root / membership.sum(dim=-1, keepdim=True).clamp_min(
         1e-6
     )
-    component_root = component_root / component_root.sum(
-        dim=-1, keepdim=True
-    ).clamp_min(1e-6)
+    component_root = normalize_probability_mass(
+        component_root,
+        dim=-1,
+        prior_mass=model.config.assignment_prior_mass,
+    )
     root_identity = state.roots.identity.index_select(1, components.frame_indices)
     root_semantic = F.normalize(model.root_to_siglip(root_identity), dim=-1, eps=1e-6)
     prediction = torch.einsum("bmr,bard->bamd", component_root, root_semantic)
@@ -162,7 +178,7 @@ def _object_semantic_alignment(model, state, root_average, components):
     return alignment, retrieval, retrieval_accuracy, error
 
 
-def _state_regularizers(state):
+def _state_regularizers(state, config):
     center = state.carriers.center.float()
     distance = (center[:, :, :, None] - center[:, :, None]).norm(dim=-1)
     diagonal = torch.eye(distance.shape[-1], device=distance.device, dtype=torch.bool)
@@ -179,8 +195,11 @@ def _state_regularizers(state):
         state.roots.presence.float().sum(dim=-1).square()
         / state.roots.presence.float().square().sum(dim=-1).clamp_min(1e-6)
     ).mean()
-    weight = state.roots.owner[..., : state.roots.identity.shape[2]]
-    weight = weight / weight.sum(dim=2, keepdim=True).clamp_min(1e-6)
+    weight = normalize_probability_mass(
+        state.roots.owner[..., : state.roots.identity.shape[2]],
+        dim=2,
+        prior_mass=config.assignment_prior_mass,
+    )
     carrier_identity = torch.einsum(
         "btqm,btqd->btmd", weight, state.carriers.identity.float()
     )
@@ -261,8 +280,11 @@ def continuous_carrier_objective_v61(
     carrier_assignment, root_assignment = track_assignments_v61(
         state, field, evidence, config
     )
-    same, different, root_average, _ = _relation_terms(
-        root_assignment, relation, evidence
+    same, different, root_average, coassignment = _relation_terms(
+        root_assignment,
+        relation,
+        evidence,
+        config.relation_probability_floor,
     )
     carrier_cycle, root_cycle, identity_cycle, identity = _temporal_track_terms(
         state, carrier_assignment, root_assignment, evidence
@@ -300,7 +322,7 @@ def continuous_carrier_objective_v61(
             object_retrieval_accuracy,
             object_semantic_error,
         ) = values
-    regularizers = _state_regularizers(state)
+    regularizers = _state_regularizers(state, config)
     (
         repulsion,
         root_balance,
@@ -319,6 +341,7 @@ def continuous_carrier_objective_v61(
     relation_loss = same + different
     assignment_loss = carrier_cycle + root_cycle
     lifecycle_loss = visibility + presence
+    object_owner_mass = state.roots.owner[..., : config.object_roots].sum(dim=-1)
     loss = (
         config.track_assignment_weight * assignment_loss
         + config.relation_weight * relation_loss
@@ -352,6 +375,21 @@ def continuous_carrier_objective_v61(
         "effective_carriers": effective_carriers.detach(),
         "effective_object_roots": effective_roots.detach(),
         "scene_owner_fraction": state.roots.owner[..., -1].mean().detach(),
+        "object_owner_mass_mean": object_owner_mass.mean().detach(),
+        "object_owner_mass_min": object_owner_mass.min().detach(),
+        "relation_coassignment_mean": coassignment.mean().detach(),
+        "relation_coassignment_near_zero_fraction": (
+            coassignment < config.relation_probability_floor
+        )
+        .float()
+        .mean()
+        .detach(),
+        "relation_coassignment_near_one_fraction": (
+            coassignment > 1.0 - config.relation_probability_floor
+        )
+        .float()
+        .mean()
+        .detach(),
         "track_visibility_prediction_mean": visibility_prediction.mean().detach(),
         "track_reappearance_identity_error": reappearance_error.detach(),
         "track_reappearance_count": reappearance_count.detach(),

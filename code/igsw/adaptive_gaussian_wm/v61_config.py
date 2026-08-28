@@ -39,6 +39,8 @@ class ContinuousCarrierObjectStateConfig:
     carrier_temperature: float = 0.10
     root_temperature: float = 0.10
     spatial_temperature: float = 0.20
+    assignment_prior_mass: float = 0.01
+    relation_probability_floor: float = 0.01
     relation_confidence_floor: float = 0.10
     group_distance_sigma: float = 0.10
     group_locality_sigma: float = 0.35
@@ -125,6 +127,10 @@ class ContinuousCarrierObjectStateConfig:
         )
         if min(positive) <= 0.0:
             raise ValueError("v61 temperatures must be positive")
+        if not 0.0 < self.assignment_prior_mass < 1.0:
+            raise ValueError("assignment prior mass must stay within (0,1)")
+        if not 0.0 < self.relation_probability_floor < 0.5:
+            raise ValueError("relation probability floor must stay within (0,0.5)")
         if not 0.0 <= self.relation_confidence_floor < 1.0:
             raise ValueError("relation confidence floor must stay within [0,1)")
         expected_dino = 0.5 if self.uses_dino_alignment else 0.0

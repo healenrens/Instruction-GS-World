@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .bounded_probability_v61 import normalize_probability_mass
+
 
 @dataclass(frozen=True)
 class CarrierStateV61:
@@ -157,10 +159,19 @@ class PersistentObjectRootsV61(nn.Module):
             )
             neighborhood = torch.exp(-distance.square().sum(dim=-1) / 0.08).mean(dim=-1)
             logits[..., -1] = logits[..., -1] + (1.0 - neighborhood)
-            owner = torch.softmax(logits / self.config.root_temperature, dim=-1)
-            object_owner = owner[..., : self.config.object_roots]
-            weight = object_owner * carriers.presence[:, frame, :, None]
-            weight = weight / weight.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            scaled_logits = logits.float() / self.config.root_temperature
+            owner = torch.softmax(scaled_logits, dim=-1)
+            conditional_object_owner = torch.softmax(
+                scaled_logits[..., : self.config.object_roots], dim=-1
+            )
+            object_mass = 1.0 - owner[..., -1:]
+            object_owner = conditional_object_owner * object_mass
+            weight = object_owner * carriers.presence[:, frame, :, None].float()
+            weight = normalize_probability_mass(
+                weight,
+                dim=1,
+                prior_mass=self.config.assignment_prior_mass,
+            )
             observed = torch.einsum("bqm,bqd->bmd", weight, carriers.feature[:, frame])
             center = torch.einsum("bqm,bqd->bmd", weight, carriers.center[:, frame])
             offset = carriers.center[:, frame, :, None] - center[:, None]
@@ -176,12 +187,14 @@ class PersistentObjectRootsV61(nn.Module):
             visibilities.append(
                 (weight * carriers.visibility[:, frame, :, None]).sum(dim=1)
             )
-            observed_presence = (
-                object_owner * carriers.presence[:, frame, :, None]
-            ).sum(dim=1)
-            observed_presence = observed_presence / object_owner.sum(dim=1).clamp_min(
-                1e-6
+            owner_weight = normalize_probability_mass(
+                object_owner,
+                dim=1,
+                prior_mass=self.config.assignment_prior_mass,
             )
+            observed_presence = (
+                owner_weight * carriers.presence[:, frame, :, None].float()
+            ).sum(dim=1)
             observed_presences.append(observed_presence)
         feature = torch.stack(features, dim=1)
         observed_presence = torch.stack(observed_presences, dim=1)

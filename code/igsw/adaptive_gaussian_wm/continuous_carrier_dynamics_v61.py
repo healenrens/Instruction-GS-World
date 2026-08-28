@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .bounded_probability_v61 import normalize_probability_mass
 from .continuous_carrier_state_v61 import (
     CarrierStateV61,
     ContinuousObjectStateV61,
@@ -251,9 +252,11 @@ class EffectConditionedCarrierDynamicsV61(nn.Module):
         carrier_binding = torch.einsum(
             "bqo,bko->bqk", carrier_owner, effect.owner.float()
         )
-        carrier_binding = carrier_binding / carrier_binding.sum(
-            dim=-1, keepdim=True
-        ).clamp_min(1e-6)
+        carrier_binding = normalize_probability_mass(
+            carrier_binding,
+            dim=-1,
+            prior_mass=self.config.assignment_prior_mass,
+        )
         carrier = carrier + torch.einsum("bqk,bkd->bqd", carrier_binding, effect_tokens)
         carrier = carrier + self.carrier_mlp(carrier)
         root_owner = F.one_hot(
@@ -261,8 +264,10 @@ class EffectConditionedCarrierDynamicsV61(nn.Module):
             self.config.total_owners,
         ).to(root.dtype)
         root_binding = torch.einsum("ro,bko->brk", root_owner, effect.owner.float())
-        root_binding = root_binding / root_binding.sum(dim=-1, keepdim=True).clamp_min(
-            1e-6
+        root_binding = normalize_probability_mass(
+            root_binding,
+            dim=-1,
+            prior_mass=self.config.assignment_prior_mass,
         )
         root = root + torch.einsum("brk,bkd->brd", root_binding, effect_tokens)
         root_update, _ = self.root_carrier(root, carrier, carrier, need_weights=False)

@@ -13,7 +13,12 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 
 from igsw.adaptive_gaussian_wm.carrier_objective_v61 import (  # noqa: E402
+    _relation_terms,
     continuous_carrier_objective_v61,
+)
+from igsw.adaptive_gaussian_wm.bounded_probability_v61 import (  # noqa: E402
+    binary_probability_values,
+    normalize_probability_mass,
 )
 from igsw.adaptive_gaussian_wm.carrier_teacher_v61 import (  # noqa: E402
     TeacherObjectComponentsV61,
@@ -123,12 +128,77 @@ def synthetic_teachers(config, batch=2, frames=5, points=12):
     return evidence, relation, components
 
 
+def saturated_probability_contract(config, evidence, relation):
+    batch, frames, points = evidence.visibility.shape
+    roots = config.object_roots
+    low_mass_logits = torch.full((batch, frames, points, roots), -20.0)
+    low_mass_logits[..., 0] = 20.0
+    low_mass_logits.requires_grad_()
+    boundary_logits = torch.full((batch, frames, points, roots), -10.0)
+    boundary_logits[..., 0] = 10.0
+    boundary_logits.requires_grad_()
+    binary_boundary = torch.tensor((0.0, 1.0), requires_grad=True)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        low_mass = torch.softmax(low_mass_logits, dim=-1) * 1e-12
+        normalized = normalize_probability_mass(
+            low_mass,
+            dim=-1,
+            prior_mass=config.assignment_prior_mass,
+        )
+        low_same, low_different, _, low_coassignment = _relation_terms(
+            normalized,
+            relation,
+            evidence,
+            config.relation_probability_floor,
+        )
+        boundary = torch.softmax(boundary_logits, dim=-1)
+        boundary_same, boundary_different, _, boundary_coassignment = _relation_terms(
+            boundary,
+            relation,
+            evidence,
+            config.relation_probability_floor,
+        )
+        binary_loss = binary_probability_values(
+            binary_boundary,
+            torch.tensor((1.0, 0.0)),
+            config.relation_probability_floor,
+        ).mean()
+        loss = (
+            low_same
+            + low_different
+            + boundary_same
+            + boundary_different
+            + binary_loss
+        )
+    loss.backward()
+    values = (
+        loss,
+        normalized,
+        low_coassignment,
+        boundary_coassignment,
+        low_mass_logits.grad,
+        boundary_logits.grad,
+        binary_boundary.grad,
+    )
+    if not all(bool(torch.isfinite(value).all()) for value in values):
+        raise RuntimeError("v61 saturated probability contract is non-finite")
+    maximum_gradient = max(
+        float(low_mass_logits.grad.abs().max()),
+        float(boundary_logits.grad.abs().max()),
+        float(binary_boundary.grad.abs().max()),
+    )
+    if not 1.0 < maximum_gradient < 100.0:
+        raise RuntimeError("v61 saturated probability gradient is not bounded")
+    return maximum_gradient
+
+
 def main():
     torch.manual_seed(17)
     config = config_for_variant("siglip_dino_object")
     model = ObjectiveHarness(config)
     field = synthetic_field(config)
     evidence, relation, components = synthetic_teachers(config)
+    saturated_gradient = saturated_probability_contract(config, evidence, relation)
     state = model.state_encoder(field)
     loss, parts, carrier_assignment, root_assignment = continuous_carrier_objective_v61(
         model, field, state, evidence, relation, components
@@ -146,7 +216,7 @@ def main():
     tensors = (*parts.values(), carrier_assignment, root_assignment)
     if not all(bool(torch.isfinite(value).all()) for value in tensors):
         raise RuntimeError("v61 CPU objective produced non-finite diagnostics")
-    if float((root_assignment.sum(dim=-1) - 1.0).abs().max()) >= 1e-5:
+    if float((root_assignment.sum(dim=-1) - 1.0).abs().max().detach()) >= 1e-5:
         raise RuntimeError("v61 track-to-root assignment is not normalized")
     print(
         {
@@ -155,6 +225,7 @@ def main():
             "metric_count": len(parts),
             "carrier_assignment_shape": tuple(carrier_assignment.shape),
             "root_assignment_shape": tuple(root_assignment.shape),
+            "saturated_probability_max_gradient": saturated_gradient,
         }
     )
 
