@@ -17,9 +17,6 @@ TRACKER_CHECKPOINT="${TRACKER_CHECKPOINT:-${RUNTIME_ROOT}/checkpoints/cotracker/
 GATE_REPORT="${GATE_REPORT:-${RUNTIME_ROOT}/outputs/v61_gates/${SOURCE_REVISION}_${VARIANT}.json}"
 RUN_NAME="${RUN_NAME:-continuous_carrier_v61_${VARIANT}_seed17_${SOURCE_REVISION:0:7}}"
 OUT="${OUT:-${RUNTIME_ROOT}/outputs/${RUN_NAME}}"
-LOG_ROOT="${LOG_ROOT:-${RUNTIME_ROOT}/logs/${RUN_NAME}}"
-PID_FILE="${LOG_ROOT}/launcher.pid"
-LAUNCH_LOG="${LOG_ROOT}/launcher.log"
 
 export ROOT RUNTIME_ROOT VENV_ROOT VARIANT SOURCE_REVISION DATA_INDEX
 export DINO_CHECKPOINT SIGLIP_CHECKPOINT TRACKER_CHECKPOINT GATE_REPORT RUN_NAME OUT
@@ -51,32 +48,19 @@ foreground() {
   bash "${ROOT}/code/scripts/train_continuous_carrier_object_state_v61.sh"
 }
 
-background() {
-  mkdir -p "${LOG_ROOT}"
-  nohup bash "${ROOT}/code/scripts/train_continuous_carrier_object_state_v61.sh" \
-    >"${LAUNCH_LOG}" 2>&1 &
-  printf '%s\n' "$!" >"${PID_FILE}"
-  echo "[continuous-carrier-v61-manager] started pid=$! log=${LAUNCH_LOG}"
-}
-
 status() {
-  if [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
-    echo "[continuous-carrier-v61-manager] state=running pid=$(cat "${PID_FILE}")"
-  else
-    echo "[continuous-carrier-v61-manager] state=stopped"
-  fi
+  echo "[continuous-carrier-v61-manager] launch_mode=foreground"
   echo "[continuous-carrier-v61-manager] variant=${VARIANT} gate=${GATE_REPORT} out=${OUT}"
-  if [ -f "${LAUNCH_LOG}" ]; then tail -n "${STATUS_LINES:-80}" "${LAUNCH_LOG}"; fi
   if [ -f "${OUT}/train.jsonl" ]; then tail -n "${STATUS_LINES:-80}" "${OUT}/train.jsonl"; fi
 }
 
 case "${COMMAND}" in
   verify) verify ;;
   foreground) foreground ;;
-  start) background ;;
+  start) foreground ;;
   resume)
     export RESUME="${RESUME:-${OUT}/latest.pt}"
-    background
+    foreground
     ;;
   resume-foreground)
     export RESUME="${RESUME:-${OUT}/latest.pt}"
