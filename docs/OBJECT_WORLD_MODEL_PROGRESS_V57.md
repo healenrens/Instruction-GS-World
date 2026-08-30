@@ -1,10 +1,10 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-08-27
+> 更新日期：2026-08-30
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/v60-observation-reconstruction-eval`
-> 当前代码提交：`c4b2de4af6fae4f3a155ce375d22aee95bc3c5a5`
-> 当前实验：V60 step 10,000 已完成；observation-grounded 复评待执行
+> 当前开发分支：`codex/siglip-continuous-carrier-v61`
+> 当前代码提交：`82bbd8d4873fb3f6552a132ce666d01f39d43ee9`
+> 当前实验：V61 四个 encoder variant 均已完成 3,000 steps；`siglip_dino` 与 `siglip_dino_object` 待统一表征充分性复评
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
 > 远端运行与产物根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/`  
 > W&B：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`
@@ -35,7 +35,7 @@ Observed RGB history + current point/region query
 |---|---|---|
 | G0 Objective validity | 正确解是否比 all-scene、seed-only、merge、split、visibility collapse 等捷径更优？ | 禁止真实长训。 |
 | G1 Query binding | 给定 query，student 是否找到了与其相关、并排除了无关 track 的区域？ | 禁止声称学到完整 object state。 |
-| G2 Persistent state | identity、dynamic、geometry、visibility/unknown 是否各自学到正确含义？ | 禁止训练 Dynamics。 |
+| G2 Persistent state | identity、dynamic、geometry、visibility/unknown 是否无坍缩、低复杂度可读且形成充分状态？ | 禁止训练 Dynamics。 |
 | G3 Independent object validity | 不使用训练 tracker 的 evaluator 是否确认 object coverage、leakage、reappearance 与 deletion locality？ | 禁止把 teacher agreement 写成 object semantics。 |
 | G4 Latent effect | 从真实前后 object state 提取的连续 effect 是否必要、稳定且不含显式 action/center delta？ | 禁止训练 History-only Prior。 |
 | G5 Object Dynamics | 正确 effect 是否显著优于 zero/shuffled，且 rollout 保持 object identity 与 lifecycle？ | 禁止进入任务级 claim。 |
@@ -47,14 +47,17 @@ Observed RGB history + current point/region query
 
 本文档是本项目唯一的研究决策账本。它记录每一轮实验回答了什么问题、怎样执行、观察到什么、为什么导向下一轮。后续开发按第 0 节的 promotion chain 和第 11 节的当前 TODO 推进；前一项未通过，不启动后一项长训。
 
-证据分为四级：
+证据分为五级：
 
 1. **结构 gate**：shape、gradient、causal boundary 和 objective falsification 通过，只说明代码契约成立。
 2. **训练 telemetry**：loss 或在线指标变化，只说明优化器正在拟合某个目标。
-3. **held teacher evaluation**：在未参与优化的 clip 上与 point-track teacher 对齐，仍不是独立 object truth。
-4. **independent evaluation**：使用 simulator ground truth 或人工标注，且不使用训练 tracker，才可证明 object state 具有外部语义。
+3. **representation sufficiency**：collapse、effective rank、retrieval、frozen probe 和 nuisance/Markov 测试，说明 latent 是否存在可读的任务信息。
+4. **held teacher evaluation**：在未参与优化的 clip 上与 point-track teacher 对齐，仍不是独立 object truth。
+5. **independent evaluation**：使用 simulator ground truth 或人工标注，且不使用训练 tracker，才可证明 object state 具有外部语义。
 
 因此，loss 下降、readout 变好、固定 slot index 稳定或 tracker agreement 都不能单独写成“学到了 object”。
+G2/G3 的统一评测定义见
+`/Users/hela/Instruct-GS-World-recovered-20260725/docs/OBJECT_STATE_REPRESENTATION_EVALUATION.md`。
 
 ### 1.1 强制更新协议
 
@@ -477,6 +480,11 @@ $$
 - 上述标准在六源和各个 $H$ 上分别报告，不能只报混合均值。
 
 G2 通过后才运行 independent evaluator。G3 使用不导入训练 CoTracker 的 RoboTwin object ID/mask 或人工标注小集；只有它通过，才允许实现 latent effect 与 Dynamics。
+
+除上述 object-specific 标准外，G2/G3 从 V61 起必须执行统一的 representation sufficiency
+协议：分别报告 identity/dynamic 的 active units 与 effective rank、held retrieval、frozen
+linear/MLP probes、低数据量曲线、nuisance sensitivity、absolute Distortion 和 Markov sufficiency。
+训练 loss、teacher alignment、temporal consistency 或 reconstruction 任一单项改善均不构成晋级。
 
 ## 12. W&B 运行索引
 
@@ -1109,8 +1117,8 @@ Dynamics 必须等新 state 的 observation-grounded ceiling 明显改善后再�
    表达 object-local appearance、support、identity、dynamic、visibility 和 presence。carrier
    center 来自对 Student token field 的可学习连续加权；patch 只作为 encoder 的内部采样，
    不再作为 object GT、重建单元或主要评测对象。
-2. Student 只有一个视觉 backbone。实现四个共享下游状态头的对照：`dino`、`siglip2`、
-   `siglip2_dino`、`siglip2_dino_object`。最后两组分别增加 frozen DINO continuous-point
+2. Student 只有一个视觉 backbone。实现四个共享下游状态头的对照：`dino`、`siglip`、
+   `siglip_dino`、`siglip_dino_object`。最后两组分别增加 frozen DINO continuous-point
    alignment，以及 frozen SigLIP2 object-crop semantic alignment；它们都是 training-only
    teacher，不构成第二条 Student 分支，部署路径只保留一个 Student。
 3. Object State 监督改为 continuous CoTracker points 和 soft trajectory relations：同一 track
@@ -1184,3 +1192,114 @@ V60 observation-grounded 复评显示约 82.32% 的绝对误差已经存在于�
   error 必须相对 persistence、zero effect 和 shuffled effect 都改善至少 10%。
 - `object_state` checkpoint 与 `dynamics` checkpoint 具有不同 architecture/stage contract；旧 V61
   首次提交的 checkpoint 因 teacher space 与 held split 已变化，不能 resume 到补全后的版本。
+
+### 2026-08-30：VAE-style Object State 表征充分性评测协议
+
+**What changed**
+
+1. G2/G3 新增统一的 `Distortion + Rate/Capacity + Utility` 评测地图；deterministic Object State
+   使用 active units、effective rank、owner/carrier usage 代替不存在的 VAE KL，只有未来实际存在
+   Gaussian posterior 时才报告 KL/Rate 和 sampling stability。
+2. Object State 必须通过 frozen kNN/retrieval、linear/MLP probe、低数据量曲线、nuisance probe、
+   absolute observation error 和 Markov sufficiency；training loss、teacher agreement、temporal
+   consistency 或 reconstruction 不再具有单项晋级权。
+3. 正式协议落地到
+   `/Users/hela/Instruct-GS-World-recovered-20260725/docs/OBJECT_STATE_REPRESENTATION_EVALUATION.md`，
+   并记录 V61 `dino` run `fcak90ya` 的当前证据边界。
+
+**Why**
+
+V61 `dino` probe 可以把训练 objective 稳定降到较低水平，但 held temporal identity error 很低时，
+identity retrieval 仍只有约 `0.36%`；这说明“前后相似”可以由 identity homogenization 获得，不能
+证明 latent 已形成可区分的 object feature。
+
+**Impact**
+
+- V61 `dino` 只被接受为数值稳定的 optimization baseline，不被接受为 G2 Object State。
+- `siglip`、`siglip_dino`、`siglip_dino_object` 必须在同一预算下完成，并使用同一套表征充分性
+  评测后才能选择 checkpoint。
+- 在 representation sufficiency 与 independent object validity 通过前，继续禁止启动 latent-effect
+  Dynamics、Prior 或 task-level claim。
+
+### 2026-08-30：V61 四组 Encoder Ablation 正式结果
+
+**执行**
+
+四组 run 均使用提交 `82bbd8d4873fb3f6552a132ce666d01f39d43ee9`、seed 17、8 GPU、
+effective batch 256、3,000 steps 和相同 held-group split。W&B run 分别为：
+
+- `dino`: `fcak90ya`
+- `siglip`: `9ttfq8h4`
+- `siglip_dino`: `60mczuva`
+- `siglip_dino_object`: `vaos6ix0`
+
+四组状态均为 `finished`，最终 step 均为 3,000，未出现 non-finite。以下为最后 480 steps
+的均值；不同 variant 含有不同附加 objective，因此 `object_state_loss` 总值不可横向排序，必须比较
+共享指标。
+
+| 指标 | dino | siglip | siglip_dino | siglip_dino_object |
+|---|---:|---:|---:|---:|
+| held identity retrieval | 0.378% | 0.345% | 7.173% | 9.927% |
+| held temporal identity error | 0.001144 | 0.000940 | 0.001553 | 0.003692 |
+| coordinate error | 0.02344 | 0.03029 | 0.03234 | 0.04276 |
+| motion error | 0.01393 | 0.01393 | 0.01393 | 0.01392 |
+| visibility error | 0.03923 | 0.03911 | 0.03922 | 0.04440 |
+| presence error | 0.01181 | 0.01178 | 0.01255 | 0.01780 |
+| scene owner fraction | 5.44% | 9.48% | 6.10% | 0.0168% |
+| effective owner categories / 17 | 3.45 | 3.47 | 3.17 | 2.87 |
+| effective carriers / 128 | 127.82 | 127.76 | 127.61 | 127.42 |
+| held DINO alignment error | N/A | N/A | 0.3540 | 0.3516 |
+| object semantic retrieval | N/A | N/A | N/A | 16.01% |
+
+**推导结论**
+
+1. `dino` 与 `siglip` 的 held identity retrieval 都低于 0.4%，因此单独更换视觉 backbone 不能消除
+   identity homogenization。极低 temporal error 主要说明向量彼此接近，不等于对象可区分。
+2. `siglip_dino` 的 retrieval 从约 0.35% 提升到 7.17%，且从 step 500 的 2.97% 持续增长到
+   step 3,000 的约 7.32%。frozen DINO local alignment 是本轮第一个被实验证实有效的 identity
+   anchor，而不是 SigLIP backbone 本身。
+3. `siglip_dino_object` 将 held identity retrieval 进一步提高到 9.93%，object-semantic retrieval
+   持续增长到约 16.17%。object-level semantic target 确实增加了身份区分信息。
+4. 完整 variant 同时出现新的 shortcut：scene owner fraction 几乎降为零，effective owner categories
+   只有 2.87，128 个 carriers 仍几乎全部 active；coordinate、visibility、presence 和 relation 指标也
+   比 `dino` 更差。它倾向于把大量区域压到少数 object owners 来满足 semantic retrieval，尚未形成
+   compositional Object State。
+5. 四组 motion error 几乎相同，说明本轮没有获得 dynamic-state 增益。该实验只验证了 semantic
+   identity signal，不构成 Dynamics 或 Markov sufficiency 的证据。
+
+**判决**
+
+- `siglip_dino_object` 是当前 identity discrimination 最强的 probe，但因 scene/owner collapse，不能
+  直接晋级 G2。
+- `siglip_dino` 是当前较合理的 Pareto candidate：它保留了大部分 identity 增益，结构退化弱于完整
+  variant；它仍未通过 capacity、owner decomposition 与 independent object validity。
+- 当前 Gate 保持在 G2/G3。禁止因为任一训练 loss 已收敛而启动 latent-effect Dynamics。
+- 下一项唯一工作是对 `siglip_dino` 与 `siglip_dino_object` 执行统一 representation sufficiency
+  evaluator：identity/dynamic active units、effective rank、Recall@K、frozen probes、nuisance probes、
+  occlusion/reappearance、deletion locality、scene leakage 和 Markov sufficiency。结果返回前不再增加
+  backbone variant，也不延长当前 3,000-step probe。
+
+### 2026-08-30：V61 Representation Sufficiency Evaluator 实现
+
+**What changed**
+
+新增一个不修改训练 checkpoint 的 held evaluator，同时读取 `siglip_dino` 与
+`siglip_dino_object`。它共享 frozen DINO、CoTracker 和 object-component teacher 的每个 clip 输出，
+分别收集两个 Student 的 compact state，并将 capacity、Recall@K、reappearance、frozen probes、
+nuisance、scene leakage、external-track deletion locality 与 Markov diagnostics 写到同一个 W&B run。
+
+**Why**
+
+四组 probe 已经证明 semantic target 可以提高 retrieval，但训练 telemetry 无法区分“identity feature
+更可分”与“owner assignment 更集中”的收益。新 evaluator 直接检查 latent rank、低复杂度可读性、
+跨遮挡检索和 history 增量，避免继续依靠总 loss 或单个 temporal error 选择 checkpoint。
+
+**Impact**
+
+- 评测入口为
+  `/Users/hela/Instruct-GS-World-recovered-20260725/code/scripts/evaluate_representation_sufficiency_v61.sh`。
+- 评测在前台单进程运行，不启动训练、不修改 checkpoint、不访问 GitHub。
+- truth scope 明确为 held training teacher，只能裁决 G2 candidate；独立 simulator/object-mask G3
+  evaluator 仍然待办。
+- 当前状态为 `代码已实现，服务器 GPU 复评待执行`。W&B 结果返回前，两个 checkpoint 都不晋级
+  Dynamics。
