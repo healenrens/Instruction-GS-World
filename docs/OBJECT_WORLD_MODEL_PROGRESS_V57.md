@@ -1,10 +1,11 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/siglip-continuous-carrier-v61`
-> 当前代码提交：`82bbd8d4873fb3f6552a132ce666d01f39d43ee9`
-> 当前实验：V61 四个 encoder variant 均已完成 3,000 steps；`siglip_dino` 与 `siglip_dino_object` 待统一表征充分性复评
+> 当前开发分支：`codex/object-transition-v62`
+> 当前已验证代码提交：`0cd9a40a23bde8d8b07c1756c66e4d022cb822c0`
+> 上次账本提交：`3f677c5e4cc59b5a1169fcaa8e3611b258952f96`
+> 当前实验：V61 统一表征充分性复评已完成且未通过 G2；下一项为第 15 节 V62 dynamic-objective 实验方案
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
 > 远端运行与产物根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/`  
 > W&B：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`
@@ -15,19 +16,23 @@
 
 > 从纯视频学习可部署的、query-conditioned、persistent object state；在该 state 通过独立 object validity 验证后，再学习 latent effect conditioned object dynamics，最终由 goal、language 或 policy 选择 object query 与 latent effect。
 
-固定的数据流是：
+固定的研究数据流分为训练期 teacher 与可部署 student 两条边界清楚的路径：
 
 ```text
+Training-only target path:
+RGB clip -> frozen point tracks + frozen DINO/SigLIP fields
+         -> continuous query-object observations -> teacher object-state target
+
+Deployable student path:
 Observed RGB history + current point/region query
-  -> frozen perception patches
-  -> query-conditioned object binding
-  -> persistent object state
-  -> latent effect posterior (training only)
-  -> object-level Dynamics
-  -> future object state
+  -> frozen perception fields -> query-conditioned persistent object state
+
+Transition path:
+matched source/target object states -> latent effect posterior (training only)
+source object state + latent effect + delta-time -> future object state
 ```
 
-训练期 point tracker 可以使用完整视频构造 correspondence、relation、visibility evidence；部署 student 只能读取已经观察到的 RGB history 与 query。future RGB、future tracks、teacher state、instance annotation、机器人显式 action 都不得进入 student history path。
+训练期 point tracker 可以使用完整视频构造 correspondence、relation、visibility evidence；部署 student 只能读取已经观察到的 RGB history 与 query。DINO/SigLIP 的 patch grid 只允许作为 perception backbone 的内部 feature sampling，不得作为 object GT、object 边界或最终 reconstruction 单元。future RGB、future tracks、teacher state、instance annotation、机器人显式 action 都不得进入 student history path。
 
 这条主线按以下 promotion chain 单向推进：
 
@@ -447,44 +452,37 @@ $$
 
 | Gate | 状态 | 证据 | 下一动作 |
 |---|---|---|---|
-| G0 Objective validity | **部分通过** | v57 已证伪 all-scene、whole-frame、seed-only、other-entity；未证伪 all-visibility-zero | 为 visibility/unknown 增加 external target，并加入 visibility corruption attribution。 |
-| G1 Query binding | **held-teacher 已验证** | `q02tvfqq` positive 0.9771、negative 0.0149；六源 coverage 与 E2E 通过 | 新版本必须回归保持，不重新设计 binding。 |
-| G2 Persistent state | **失败** | visibility 4.82e-6；dynamic head 冻结；compactness/semantic 可被关闭 | 当前唯一实现任务。 |
-| G3 Independent object validity | **待办** | 当前没有与训练 tracker 独立的完整结果 | G2 通过后执行 RoboTwin truth/人工小集 evaluator。 |
-| G4 Latent effect | **禁止提前** | v53 joint tokenizer 不能证明 effect 建立在有效 object state 上 | 等待 G3。 |
-| G5 Object Dynamics | **禁止提前** | 历史 action-free/compact dynamics 结果不能替代 effect-conditioned object dynamics | 等待 G4。 |
+| G0 Objective validity | **dynamic target 待验证** | v52 的 synthetic corruption gate 只证明手工 objective 排序；V61 motion target 允许 near-zero shortcut | 先做 V62 continuous target codec 与 teacher-state oracle。 |
+| G1 Query binding | **held-teacher 已验证，继续冻结** | v57 `q02tvfqq` positive 0.9771、negative 0.0149 | 复用 query/track graph，不再优化固定 slot binding。 |
+| G2 Persistent state | **失败** | V61 dynamic effective rank 2.08/2.75，motion probe 全部低于均值 baseline，source identity 可读性 97.39%/99.38% | oracle target 成立后，从 RGB-only Student 重新学习 state；不继承 V61 state checkpoint。 |
+| G3 Independent object validity | **未通过** | V61 复评 truth scope 仍是 training tracker teacher | Student state 通过后执行 RoboTwin truth/人工小集 evaluator。 |
+| G4 Latent effect | **只允许诊断，不允许晋级** | v59/v60 证明 teacher compact target 上 posterior effect 可被使用，但 target 信息不足且 short/static calibration 不稳定 | 用 teacher-state oracle 隔离检验 effect target；结果不能覆盖 G2/G3。 |
+| G5 Object Dynamics | **待办** | 现有 action-free 与 compact-target Dynamics 均不能证明 object-level future state | teacher oracle、Student state 与 independent validity 依次通过后才训练正式 Dynamics。 |
 | G6 Selector / task A | **禁止提前** | 尚无可部署 state 与 effect | 等待 G5。 |
 
 ### 11.2 下一版本的唯一改动面
 
-下一版本只修复 G0/G2，不修改 v57 relation binding 主体：
+V62 是同一条主线下的一个完整 program，但严格按顺序运行：
 
-1. teacher 从 observed-history tracks 产生 `visible / occluded-candidate / unknown` target；invisible 不得自动成为 absent。
-2. `L_visibility` 直接监督 student observability；class balance 和 calibration 由 teacher mask 决定。
-3. semantic consistency 与 compactness 使用 stop-gradient teacher-valid mask，禁止使用 student visibility 作为 loss 开关。
-4. identity 只在 teacher 确认 same-entity 且可比较的时刻保持；dynamic 和 geometry 必须允许变化。
-5. unknown patches 单独报告，不强迫它们成为 object 或 background。
-6. 增加 `all_visibility_zero`、`all_visibility_one`、identity swap、merge、split、background lock、shuffled track ID 和 occlusion reset falsification。
-7. W&B 必须按六个 source 与 $H=1,2,3,4$ 分开记录 binding、visibility calibration、reappearance、support area 和 unknown activation。
+1. 先建立不依赖 Student 的 continuous teacher object observation 与 state codec，确认学习目标本身保留 object-local semantic、support 和 lifecycle。
+2. 在固定 $100\,\mathrm{ms}$ 上运行 teacher-state transition oracle，确认正确 transition effect 必须优于 persistence、zero 和 matched-shuffled effect。
+3. oracle 通过后才把 deterministic effect 改为 Gaussian VAE posterior，并用 rate-distortion 选择容量。
+4. 只有 target、oracle 与 effect bottleneck 都通过，才从 observed RGB history 训练单一路径 RGB-only Student；DINO/SigLIP 是同一 Student 的 frozen perception 输入，不拆成两个 Student 分支。
+5. Student state 通过 G2/G3 后，才训练 Student-conditioned Dynamics、multi-horizon rollout 和部署期 Prior。
+
+完整模型、数据、loss、执行预算和判决树见第 15 节。V62 的第一项实现只允许覆盖第 15.7 节的 E0 与 E1，禁止一次启动端到端长训。
 
 ### 11.3 严格晋级标准
 
-下一版本只有同时满足以下条件才能从 G2 晋级 G3：
+晋级不再由单个 loss 或相对 baseline gain 决定。V62 必须同时报告：
 
-- heldout support positive 不低于 0.90，negative 不高于 0.10；
-- visibility 不得坍缩到常数，balanced accuracy 与 F1 必须优于同分布常数 baseline；
-- predicted visible rate 与 teacher visible rate 的相对误差不高于 20%；
-- occlusion/reappearance subset 的 identity retrieval 显著优于 shuffled track ID；
-- query perturbation 后 support 随 query 移动，不形成固定 foreground template；
-- identity 稳定时，dynamic 与 geometry 在 motion-active clips 上保持非零变化；
-- 上述标准在六源和各个 $H$ 上分别报告，不能只报混合均值。
+- 对真实 held teacher observation 的 absolute semantic、continuous support、lifecycle distortion；
+- correct、zero、matched-shuffled 和 persistence 四条路径的原始误差与样本数；
+- static、motion-active、occlusion、六源、history length 和 delta-time 分解；
+- effect 的 active units、effective rank、KL/rate、donor identity/source leakage；
+- Student state 的 retrieval、nuisance probe、Markov sufficiency 与 independent truth。
 
-G2 通过后才运行 independent evaluator。G3 使用不导入训练 CoTracker 的 RoboTwin object ID/mask 或人工标注小集；只有它通过，才允许实现 latent effect 与 Dynamics。
-
-除上述 object-specific 标准外，G2/G3 从 V61 起必须执行统一的 representation sufficiency
-协议：分别报告 identity/dynamic 的 active units 与 effective rank、held retrieval、frozen
-linear/MLP probes、低数据量曲线、nuisance sensitivity、absolute Distortion 和 Markov sufficiency。
-训练 loss、teacher alignment、temporal consistency 或 reconstruction 任一单项改善均不构成晋级。
+每阶段的数值门槛见第 15.8 节。E0 或 E1 失败时，不允许通过增加 Student、Prior、语言、数据量或训练步数来掩盖目标失败。
 
 ## 12. W&B 运行索引
 
@@ -1356,3 +1354,478 @@ nuisance、scene leakage、external-track deletion locality 与 Markov diagnosti
   absolute-position shortcut，dynamic 接受可读的 relative motion/lifecycle 监督，owner decomposition
   阻止 scene 消失和少数 owner 集中。只有 frozen probes 同时恢复 capacity、dynamic utility 和跨 source
   compositional validity 后，才重新进入 Dynamics。
+
+## 15. 2026-08-31：V62 Object Transition Learning 完整实验方案
+
+### 15.1 What changed / Why / Impact
+
+**What changed**
+
+1. 当前最高优先级从继续优化 V61 identity/owner 指标，改为先证明一个可学习、可证伪的
+   object transition target。V62 不把 point residual flow 直接叫作 dynamic state，也不把
+   action-free short prediction 当作 object dynamics。
+2. V62 采用同一套代码中的阶段化训练：continuous teacher object codec、teacher-state oracle、
+   variational effect、RGB-only Student、Student-conditioned Dynamics、multi-horizon rollout、Prior。
+   阶段之间只能按 Gate 单向推进。
+3. DINO/SigLIP patch grid 只保留为 frozen perception field 的内部实现。训练和评测的 object target
+   改成 continuous query-object observations；不以 patch、instance mask、固定 slot index 或整图 RGB
+   reconstruction 定义 object。
+
+**Why**
+
+V61 的 `identity` 与 `dynamic` 都是同一 recurrent carrier feature 的线性投影；motion target 又是减去
+全局平均后、按真实时间归一化的 point residual flow，而 Student 没有接收对应 `delta-time`。这使
+`dynamic` 接近常数、motion readout 接近零成为低成本解。V61 复评中 dynamic effective rank 只有
+`2.08/2.75`，linear 与 MLP motion probe 都不如均值 baseline，说明继续增加维度、数据或训练步数不会
+自动修正学习目标。
+
+**Impact**
+
+- V61 checkpoint、optimizer 和 carrier state 不进入 V62 初始化；它们只作为失败 baseline。
+- 六源视频 index、冻结 DINO、冻结 SigLIP、冻结 CoTracker、source-balanced sampler、W&B 与前台 DDP
+  运行基础设施继续复用。
+- V62 E0/E1 可以在 G2/G3 未通过时执行，因为它们只诊断 target 与 transition objective，不构成
+  Student 或 deployable world model 晋级。E2 以后仍严格受 G2-G5 约束。
+
+### 15.2 本轮只解决的科学问题
+
+V62 需要依次回答四个问题：
+
+1. **Target validity**：纯视频 teacher 能否定义一个足够丰富、非 patch-level、非单向量平均的
+   object observation？
+2. **Transition sufficiency**：给定正确 source object state，从真实 source/target 提取的 effect
+   是否是预测 target object state 所必需的变量？
+3. **Deployable state estimation**：只读 observed RGB history 的 Student 能否估计同一种 object state，
+   而不是复制 dataset、background 或 absolute coordinate shortcut？
+4. **Deployable dynamics**：Student source state 与正确 posterior effect 能否预测未来 object state，
+   并支持多步 composition？
+
+这四个问题不能在一个端到端 loss 中同时回答。若 teacher-state oracle 都失败，则 Student、backbone、
+Prior 和语言均不是当前根因；若 oracle 通过而 Student 失败，才把问题定位到视觉状态估计。
+
+### 15.3 数据与因果契约
+
+正式数据继续使用：
+
+`/mnt/pfs/public/xuhaoming/instruct_gs_world/data/multisource_real_robot_video_v53/index.json`
+
+E0/E1 第一版继续使用现有 source/task-balanced sampler，六个 source 均有确定 target budget。teacher
+object change magnitude 记录为连续指标，并在 held evaluation 中分解 `near-static / medium / active`；在
+完成真实数据 change distribution audit 前不创建离线 motion pseudo-label 或声称 motion-balanced sampling。
+change magnitude 不作为模型输入。
+
+第一轮固定真实时间间隔：
+
+$$
+\Delta t = 100\,\mathrm{ms}.
+$$
+
+所有 source 使用时间戳选择最近帧，不用统一 frame index 冒充统一帧率。固定 $100\,\mathrm{ms}$ 的目的
+是先消除 V61 的多时间尺度歧义，并直接检查最容易被 persistence 掩盖的小变化。E5 才扩展到
+$100/200/400/800\,\mathrm{ms}$，且 `delta-time` 必须显式进入 Posterior 与 Dynamics。
+
+因果边界固定为：
+
+- teacher codec 可以在训练期读取当前 object 的 tracks 与当前帧 frozen perception field；
+- transition Posterior 可以读取 matched source/target teacher states；
+- Student 只能读取 observed RGB history、历史时间戳和当前 query；
+- future RGB、future tracks、future object state 不得进入 Student、zero branch 或部署期 Prior；
+- query-object geometry 表达在去除 robust background/global flow 后的相对坐标系中，避免把相机运动
+  当成 object effect；
+- tracker invisibility 只表示 `occluded/unknown`，不能直接监督 `absent`。
+
+### 15.4 Continuous teacher object observation
+
+对当前 query $q$，训练期 teacher 构造可变长度集合：
+
+$$
+\mathcal P_t(q)=
+\left\{
+(x_t^i,f_{D,t}^i,f_{S,t}^i,r_t^i,v_t^i,w_t^i)
+\right\}_{i=1}^{N_t}.
+$$
+
+各变量含义为：
+
+- $x_t^i\in[-1,1]^2$：continuous track coordinate；第一版以 source frame 为原点累计 CoTracker
+  residual flow，去除每个相邻帧的全局平均 flow，同时保留 object 相对位移；
+- $f_{D,t}^i$：在 $x_t^i$ 双线性采样的 frozen DINO feature；
+- $f_{S,t}^i$：在同一连续位置采样的 frozen SigLIP feature；
+- $r_t^i$：该 track 与 query 的 soft same-object relation evidence；
+- $v_t^i$：visible、occluded 或 unknown lifecycle evidence；
+- $w_t^i$：由 relation confidence、track quality 与可见性组成的 detached 置信度。
+
+patch grid 在这里仅用于从 frozen feature field 做连续插值。object support、positive/negative query、
+reconstruction 和评测都不按 patch 单元定义。teacher 不产生 hard instance mask，也不要求每个视频先做
+instance annotation。
+
+### 15.5 Teacher object-state codec
+
+训练期 codec 把 $\mathcal P_t(q)$ 压缩成一个 query-object state：
+
+$$
+Y_t(q)=C_{\tau}(\mathcal P_t(q))
+=\left(u_t,H_t,G_t,l_t\right).
+$$
+
+第一版固定状态容量为：
+
+```text
+identity root u_t       [B, 256]
+local latent carriers H [B, 16, 256]
+relative centers        [B, 16, 2]
+support covariance      [B, 16, 2, 2]
+carrier visibility      [B, 16]
+object lifecycle l_t    [B, 3]     # visible / occluded / unknown logits
+```
+
+这里的 16 个 carrier 是**一个 query object 内部的 local support components**，不是 16 个全图 object
+slots，也不使用固定 index 表示跨视频 identity。codec 使用 set cross-attention 读取可变数量 teacher
+observations；decoder 在任意 continuous coordinate $x$ 上查询：
+
+$$
+(\hat m_t(x),\hat f_{D,t}(x),\hat f_{S,t}(x),\hat v_t(x))
+=D_{\tau}(Y_t(q),x).
+$$
+
+$\hat m_t(x)$ 是 query object 的 soft support probability；两个 semantic feature 是 object-local
+perception target；$\hat v_t(x)$ 是 lifecycle observation。它不生成 RGB，不在规则 patch grid 上重建
+整张图，也不允许不同 object state 通过全局 decoder 相互补偿。
+
+codec loss 为：
+
+$$
+L_{codec}=L_{support}+L_{DINO}+L_{SigLIP}
++0.5L_{identity}+0.25L_{visibility}+0.25L_{lifecycle}+0.02L_{capacity}.
+$$
+
+所有项同时记录 absolute error。`pooled semantic + single Gaussian support + all-visible lifecycle` 只作为
+detached compact baseline 计算 held gap recovery，不进入 target，也不通过调权替代方法判断。positive
+coordinate 来自 query-related tracks；negative coordinate 来自同一 clip 的 unrelated tracks。第一版不把
+缺少 external relation evidence 的连续随机点强行标成 background，以免制造 false negative。
+
+### 15.6 Latent effect 与 Object Dynamics
+
+E1 先使用 deterministic posterior 验证目标；E2 再改成 Gaussian VAE posterior。Posterior 只读取
+matched local state change、relative geometry 与 lifecycle change，不读取 identity root $u_t$：
+
+$$
+z_{t\rightarrow t+\Delta}
+=q_{\phi}(H_t,G_t,l_t,H_{t+\Delta},G_{t+\Delta},l_{t+\Delta},\Delta t).
+$$
+
+默认 effect 为 `[B,8,32]`，总维度 256。`[4,32]`、`[8,32]`、`[8,64]` 只在 E2 做受控
+rate-distortion sweep，不能凭直觉提前断言 128 维或 256 维足够。
+
+正式 VAE Posterior 为：
+
+$$
+q_{\phi}(z\mid Y_t,Y_{t+\Delta},\Delta t)
+=\mathcal N(\mu_{\phi},\operatorname{diag}(\sigma_{\phi}^2)),
+$$
+
+$$
+z=\mu_{\phi}+\sigma_{\phi}\odot\epsilon.
+$$
+
+Dynamics 采用 transport + residual，而不是从零生成完整 future state：
+
+$$
+\widetilde H_{t+\Delta}=A_{\theta}(z,\Delta t)H_t,
+$$
+
+$$
+\widehat H_{t+\Delta}=\widetilde H_{t+\Delta}
++R_{\theta}(H_t,z,\Delta t).
+$$
+
+$A_{\theta}$ 是对 local carriers 的 row-stochastic soft transport；它负责 component 重排与运动。
+$R_{\theta}$ 只负责 transport 不能解释的 deformation、semantic state 与 lifecycle residual。identity root
+默认从 source copy，只允许小的 gated residual；这样 donor effect 不能覆盖 recipient object identity。
+真实 center delta、point flow、RGB difference 或机器人 action 都不会拼进 $z$。
+
+这个分工吸收了 RepWAM 的 semantic visual latent 与 soft transport + residual 思路、AdaWorld 的
+source/target-conditioned variational action tokenizer，以及 PlaySlot 先在 object state 上验证 latent action
+再做 future prediction 的顺序；但 V62 的 effect 表示纯视频中的 object transition，不等同于机器人 action。
+
+预测距离在 continuous held coordinates 上计算：
+
+$$
+D_{obj}(\widehat Y,Y)
+=\bar D_{support}+\bar D_{semantic}+\bar D_{geometry}+\bar D_{lifecycle}.
+$$
+
+训练同时比较：
+
+```text
+correct:         F(Y_t, z_correct, delta-time)
+zero:            F(Y_t, 0, delta-time)
+matched-shuffle: F(Y_t, z_other, delta-time)
+persistence:     Y_t
+```
+
+`matched-shuffle` 必须在相同 source、相同 $\Delta t$ 和相同 change-magnitude bin 内抽取，避免用明显不同
+的 donor effect 制造过于容易的负例。核心 objective 为：
+
+$$
+L_{transition}=D_{obj}(\widehat Y_{correct},Y_{t+\Delta})
++L_{intervention}+L_{static}+0.1L_{identity-copy}+L_{rate}.
+$$
+
+- $L_{intervention}$ 要求 correct 比 zero、matched-shuffle 和 persistence 更好；
+- $L_{static}$ 要求 near-static 样本不被迫制造变化；
+- $L_{identity-copy}$ 阻止 effect 携带 donor identity；
+- $L_{rate}$ 只在 E2 以后启用，并以 KL/rate-distortion 曲线选择容量，而不是只凭重建 loss 选最大 latent。
+
+### 15.7 实验顺序与训练预算
+
+所有阶段使用同一份六源 index、同一 source/motion 分层 sampler、同一 held episode 划分和同一组
+absolute metrics。版本号不随每个阶段重启；它们都属于 V62。
+
+| 阶段 | 唯一问题 | 训练模块 | 预算 | 通过后才允许 |
+|---|---|---|---:|---|
+| E0 Target/Codec | continuous teacher target 是否保留 object observation？ | teacher codec/decoder | 20k steps | E1 |
+| E1 Deterministic Oracle | effect 是否对 future object state 必要？ | deterministic posterior + transport/residual Dynamics | 20k steps | E2 |
+| E2 Variational Effect | VAE bottleneck 是否在有限 rate 下保留 transition？ | Gaussian posterior；128/256/512 dim sweep | 每组 10k，selected 20k | E3 |
+| E3 RGB-only Student | observed RGB history 是否能估计同一 object state？ | 单一 fused DINO+SigLIP Student | 30k steps | G3 independent eval |
+| E4 Student Dynamics | Student source + posterior effect 是否仍可预测？ | freeze Student first，训练 Posterior/Dynamics；随后低 LR joint tune | 30k steps | E5 |
+| E5 Multi-horizon | transition 是否时间校准且可组合？ | explicit time conditioning；direct/rollout consistency | 30k steps | E6 |
+| E6 Prior/Selector | 部署期如何从 goal/language/history 选择 effect？ | conditional stochastic Prior/selector | 50k steps | task A |
+
+共同运行契约：
+
+- GPU 数量自动发现；单机 DDP；目标 global batch 256，80GB 默认单卡 micro batch 32；effect statistics
+  使用本次 forward 的 cross-rank gather，gradient accumulation 只决定 optimizer update；
+- DINO/SigLIP frozen frame encoding 使用独立 frame batch，避免 object model batch 被 perception runtime
+  人为限制；
+- 所有训练前台运行，不使用 `nohup`、`&` 或 detached launcher；
+- runtime 不访问 GitHub；代码同步、verify 与训练是三个独立命令；
+- 每 2,500 steps 保存 milestone，每 250 steps 保存 rolling recovery；resume 必须恢复 sampler、optimizer、
+  scheduler、stage、global step 与 W&B run ID；
+- W&B group 固定为 `object-transition-v62`，每个阶段独立 run，但共享 dataset split revision 与 target
+  normalization statistics。
+
+### 15.8 每阶段 Gate
+
+#### E0 Target/Codec Gate
+
+定义 direct teacher interpolation 为 oracle floor，`pooled semantic + single Gaussian support` 为 compact
+baseline。对每个误差项计算：
+
+$$
+R_{gap}=1-\frac{E_{codec}-E_{oracle}}{E_{baseline}-E_{oracle}}.
+$$
+
+E0 需要：
+
+- semantic、support 与 lifecycle 的 held $R_{gap}$ 均不低于 0.80；
+- 六个 source 的 codec 都优于 compact baseline，不能由一个 source 拉高 aggregate；
+- local carrier effective rank 不低于可用 rank 的 20%，active carrier 数应随 support complexity 改变，
+  不能在所有 source 与所有 object 上长期固定为 1 或 16；
+- query swap、all-scene、merge-all、split-by-time 与 lifecycle corruption 均使对应 absolute error 上升；
+- held coordinate 使用未进入 encoder 的 continuous samples，不能在训练 coordinate 上自评。
+
+E0 失败表示 object target/codec 不成立。此时只允许修正 query relation、continuous support 或 codec，
+禁止进入 effect/Dynamics。
+
+#### E1 Deterministic Oracle Gate
+
+在 source-condition macro 与 transition micro 两种聚合下同时要求：
+
+- correct 相对 zero、matched-shuffle、persistence 均改善至少 10%，2,000 次 bootstrap 的 95% CI
+  下界大于 0；
+- motion-active subset 相对 persistence 改善至少 20%；
+- near-static subset 的 correct error 不得比 persistence 高超过 2%；
+- 六个 source 各自 correct 都优于 persistence，不能靠 source averaging 掩盖失败；
+- effect active rank 不低于 20%，zero/shuffle intervention 改变 prediction，source-only path 对 future
+  swap 的差异小于 $10^{-6}$；
+- 将 donor effect 施加到 matched recipient source 时，recipient identity 保持，donor identity retrieval
+  不得显著高于 chance。
+
+E1 是整个方案最关键的 falsification。它失败时不增加 Student/backbone，也不把 total steps 从 20k
+延长到 50k；先定位 target、transport 或 effect bypass。
+
+#### E2 Variational Effect Gate
+
+- VAE correct absolute distortion 不得比 deterministic oracle 恶化超过 5%；
+- correct-vs-zero/shuffle/persistence 继续满足 E1；
+- active KL dimensions 与 effect effective rank均不低于可用维度的 20%；
+- posterior sampling 的 prediction variance 与 teacher transition uncertainty 同方向变化；
+- 在 128/256/512 三个容量中选择 rate-distortion Pareto 最小者，不选择单纯 reconstruction 最低者。
+
+#### E3 Student State Gate
+
+- 令 $E_{codec}$ 为 teacher codec error、$E_{compact}$ 为 compact baseline error；RGB-only Student 必须满足
+  $E_{student}\le E_{codec}+0.2(E_{compact}-E_{codec})$，即至少保留 codec 相对 compact baseline 的
+  80% 改进；
+- identity retrieval、reappearance、continuous support、visibility calibration 与 motion/lifecycle frozen
+  probe 全部优于 V61 `siglip_dino`；
+- source、camera、absolute coordinate nuisance probe 不得以 object utility 提升为代价继续恶化；
+- H=1/2/3/4 分别报告，motion-active 与 occlusion subset 上增加 observed history 必须带来正收益；
+- 使用不导入训练 CoTracker 的 RoboTwin truth 或人工小集通过 G3，才可进入 E4。
+
+#### E4/E5 Dynamics Gate
+
+- 使用 Student source 后仍满足 E1 的 correct/zero/matched-shuffle/persistence 门槛；
+- 100/200/400/800ms 每个 horizon 单独通过，不能只报 aggregate；
+- 四次 100ms rollout 与 direct 400ms prediction 都优于 persistence，rollout error 不得超过 direct
+  400ms error 的 1.5 倍；
+- identity、support、visibility/existence 的 rollout error 分开报告；
+- reversed effect 与 forward effect 的 composition 应接近 identity transition；否则 effect 不具备可组合性。
+
+#### E6 Prior/Selector Gate
+
+- Prior 不使用 future state/tracks；只读取 observed state 与 goal、language 或 policy condition；
+- 多模态 future 使用 best-of-N coverage 与 calibration，单样本均值不能写成部署性能；
+- correct goal/instruction 相比 matched wrong condition 的 object-state future error至少改善 5%；
+- 最终只在 RoboTwin task A 上验证，与 XR-2 无关。
+
+### 15.9 必须保留的对照实验
+
+1. **旧 motion target 对照**：V61 mean-subtracted point residual flow，证明新 target 的收益不是网络增大。
+2. **Dynamics parameterization**：transport-only、residual-only、transport+residual，判断 object motion 与
+   deformation 分别需要什么。
+3. **Effect capacity**：128、256、512 dimensions，以 rate-distortion 选容量。
+4. **Time contract**：fixed 100ms、mixed horizon without time（负对照）、explicit delta-time。
+5. **Perception semantics**：frozen DINO only 与 fused frozen DINO+SigLIP；只在 E0/E3 选定 Gate 上比较，
+   不再建立两个 Student 分支。
+6. **Target information**：semantic-only、support-only、semantic+support+lifecycle，验证哪部分使 effect
+   对 object transition 必要。
+
+这些对照共享 sampler、steps、batch、seed、target normalization 和 evaluator。一次实验只改变表中一个
+因素，禁止同时修改 backbone、latent dimension、loss 与 sampler 后再归因。
+
+### 15.10 W&B 指标与报告方式
+
+每个 condition 都必须记录 raw numerator、denominator 与 sample count，最终重新聚合，不能平均 batch
+mean。最少包含：
+
+```text
+absolute/semantic_error
+absolute/support_error
+absolute/geometry_error
+absolute/lifecycle_brier
+transition/correct_error
+transition/zero_error
+transition/matched_shuffle_error
+transition/persistence_error
+transition/gain_over_{zero,shuffle,persistence}
+effect/active_units
+effect/effective_rank
+effect/kl_total
+effect/identity_leakage
+effect/source_leakage
+codec/active_carriers
+codec/effective_rank
+codec/gap_recovery
+runtime/decode_replacement_fraction
+```
+
+所有 transition 指标按 source、change bin、history length、delta-time、visibility state 和 direct/rollout
+分解。训练曲线、held teacher evaluation、independent truth 与 task A 是四个不同 W&B run type，不能在
+同一个 summary 中用一个 `passed` 覆盖。
+
+### 15.11 失败判决树
+
+```text
+E0 codec fails
+  -> target/grouping/continuous support 错；不看 Dynamics。
+
+E0 passes, E1 fails
+  -> transition target、transport/residual 或 effect bypass 错；不训练 Student。
+
+E1 passes, E2 fails
+  -> bottleneck/rate contract 错；不扩大 Student/backbone。
+
+E2 passes, E3 fails
+  -> RGB-only state estimation 错；只修 Student/Object State。
+
+E3/G3 passes, E4 fails
+  -> Student state 与 Dynamics 接口或 effect conditioning 错。
+
+E4 passes, E5 fails
+  -> time calibration/composition 错；不训练 Prior。
+
+E5 passes, E6 fails
+  -> condition/selector/multimodality 错；不否定已验证 Object Dynamics。
+```
+
+### 15.12 预期代码结构与第一项 TODO
+
+V62 计划使用以下解耦模块，单文件保持小于 550 行：
+
+```text
+adaptive_gaussian_wm/
+  continuous_object_observation_v62.py
+  teacher_object_codec_v62.py
+  teacher_object_autoencoder_v62.py
+  teacher_object_codec_objective_v62.py
+  continuous_object_decoder_v62.py
+  object_effect_posterior_v62.py
+  object_transport_dynamics_v62.py
+  object_transition_objective_v62.py
+  object_transition_metrics_v62.py
+  object_transition_teacher_runtime_v62.py
+  teacher_transition_oracle_v62.py
+  v62_config.py
+  v62_checkpointing.py
+  v62_training_loop.py
+scripts/
+  verify_object_transition_v62.py
+  train_object_transition_v62.py
+  train_object_transition_v62.sh
+  evaluate_object_transition_v62.py
+  manage_object_transition_v62.sh
+  test_object_transition_v62.py
+```
+
+第一项实现固定为 **E0 continuous teacher target/codec + E1 deterministic teacher-state oracle**。本轮不实现
+RGB-only Student、Prior、language、task A、RGB decoder 或旧 checkpoint warm-start。E0/E1 的 held report
+返回前，不开始后续模块的长训。
+
+### 15.13 E0/E1 实现记录
+
+2026-08-31 已在 `/Users/hela/Instruct-GS-World-recovered-20260725/` 的
+`codex/object-transition-v62` 分支完成 E0/E1 代码，尚未启动服务器训练。
+
+**E0 已实现**
+
+- frozen DINOv2-L、frozen SigLIP 与 frozen CoTracker 只存在于 training-only teacher runtime；三者不进入
+  checkpoint trainable state；
+- relation teacher 从真实视频轨迹选择一个 query object，并生成 continuous coordinates、soft support、
+  visibility 与 visible/occluded/unknown lifecycle；
+- DINO 1024 维和 SigLIP 768 维 feature 分别通过 parameter-free grouped projection 形成 256 维 target；
+- query object 被压缩为 16 个 `[256]` local carriers、一个 `[256]` identity root、relative center、2D
+  covariance、presence、visibility 和 lifecycle logits；
+- compositional decoder 只在请求坐标上输出 support、DINO/SigLIP semantic 与 visibility，不做 RGB 或
+  full patch-grid reconstruction；
+- loss 与 W&B 同时记录 absolute errors、single-Gaussian/pooled compact baseline、gap recovery、carrier
+  overlap/effective count 与 object-valid fraction。
+
+**E1 已实现**
+
+- E1 只允许读取本版本 E0 checkpoint；codec 与 decoder 全冻结，V61 及更早 checkpoint 禁止 warm-start；
+- deterministic Posterior 输入 source/target local state 与显式 `delta_seconds`，不读取 identity root，输出
+  `[B,8,32]` bounded effect；
+- Dynamics 使用 row-stochastic 16×16 soft transport 加 feature/geometry/lifecycle residual，identity root
+  从 recipient source 精确复制；
+- 同一次 forward 计算 correct、zero、same-source/change-bin matched-shuffle 与 persistence；训练 objective
+  只推动 correct prediction，并用 detached intervention baselines 防止通过主动恶化负例取巧；
+- W&B 记录四条路径 absolute error、gain、effect variance/effective rank、transport entropy、target/predicted
+  change magnitude、identity-copy error 和 matched-shuffle quality。
+
+**运行与评测接口**
+
+- `verify_object_transition_v62.py` 使用真实六源 RGB、DINO、SigLIP 与 CoTracker 执行 forward/backward contract；
+- `train_object_transition_v62.py` 和 `train_object_transition_v62.sh` 支持 E0/E1、自动卡数、单机 DDP、W&B、
+  milestone/recovery checkpoint 与 strict resume；launcher 只前台 `exec torchrun`；
+- `evaluate_object_transition_v62.py` 在 held groups 上逐 source 记录 E0 absolute/gap 指标和 E1 intervention
+  指标，并同步 W&B；
+- `manage_object_transition_v62.sh` 只编排 foreground verify/train/resume/eval，不提供后台启动。
+
+**当前验证边界**
+
+- 已完成 Ruff、Python compile、Bash syntax、单文件行数与 `git diff --check`；
+- 本地 Python 环境没有 PyTorch，因此 `test_object_transition_v62.py` 的 tensor/backward 测试未在本地执行；
+- real-teacher GPU verifier、E0 训练、E0 held Gate、E1 verifier/训练/held Gate 均待服务器按顺序执行；
+- 在 E0 held report 达到第 15.8 节门槛前，不得启动 E1；E1 通过前不得实现或启动 E2/E3。
