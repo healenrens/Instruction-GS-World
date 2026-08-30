@@ -4,6 +4,7 @@
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
 > 当前开发分支：`codex/object-transition-v62`
 > 当前已验证代码提交：`0cd9a40a23bde8d8b07c1756c66e4d022cb822c0`
+> V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`（仅静态验证，待 GPU verifier）
 > 上次账本提交：`3f677c5e4cc59b5a1169fcaa8e3611b258952f96`
 > 当前实验：V61 统一表征充分性复评已完成且未通过 G2；下一项为第 15 节 V62 dynamic-objective 实验方案
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
