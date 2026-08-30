@@ -340,3 +340,55 @@ rate 单独记录，不能把替换样本比例差异解释为模型收益。mot
 V61 没有 compositional image decoder，因此第 4 项只能称为 `external-track root-assignment deletion
 locality`，不能写成独立图像重建 locality。整个 evaluator 的 truth scope 固定为
 `held_training_teacher_not_independent_object_truth`：它用于 G2 checkpoint 选择，不构成 G3 通过。
+
+## 12. V61 统一复评结果与 Gate 判决
+
+W&B run `t33taede` 已完成，evaluator revision 为
+`0cd9a40a23bde8d8b07c1756c66e4d022cb822c0`。它在 144 个 held conditions 上比较两个 seed 17、
+step 3,000 checkpoint，输入数据、teacher 输出和 probe split 相同。
+
+### 12.1 Capacity 与 retrieval
+
+`siglip_dino` 的 identity active units/effective rank 为 `29 / 5.04`；`siglip_dino_object` 为
+`88 / 2.67`。完整 variant 虽然让更多维度越过方差阈值，独立信息维度反而更少。两者 identity
+off-diagonal cosine 为 `0.9949/0.9812`，仍高度同质化。
+
+first-to-last Recall@1 为 `40.29%/34.09%`，chance 为 `2.38%`，frozen DINO teacher 为 `49.27%`；
+reappearance Recall@1 为 `32.95%/23.80%`，chance 为 `1.05%`，teacher 为 `34.32%`。因此
+`siglip_dino` 保留了可用于 correspondence 的信息，而完整 semantic objective 使正式 held
+persistent-identity 指标退化。
+
+### 12.2 Shortcut 与 compositionality
+
+identity 对 source 的 linear balanced accuracy 为 `97.39%/99.38%`，远高于六分类 chance
+`16.67%`；coordinate-from-identity linear gain 为 `0.941/0.862`。identity 因此高度携带 dataset
+domain 与绝对空间信息，而非纯 object identity。
+
+`siglip_dino_object` 的 scene owner fraction 为 `0.0022%`，effective owner categories 为
+`2.90 / 17`；`siglip_dino` 为 `5.78%` 和 `3.16 / 17`。external-track root-assignment deletion
+locality 从 `6.17` 降到 `4.27`。完整 variant 的 same-different margin 虽从 `0.0123` 增至
+`0.0284`，但这是以 owner/scene collapse、较低 effective rank 和较差 locality 为代价。
+
+### 12.3 Dynamic utility 与 Markov 诊断
+
+两者 dynamic active units 都是 `128 / 128`，effective rank 却只有 `2.08/2.75`。motion linear gain
+为 `-0.445/-0.503`，小型 MLP gain 为 `-0.037/-0.059`；负值表示 probe 比训练集 motion 均值基线更差。
+visibility MLP balanced accuracy 为 `50.0%/53.1%`，也接近 chance。
+
+`siglip_dino` 的 current-only motion gain 为 `-0.401`，加入 previous state 后为 `-0.102`，history
+incremental gain 为 `+0.299`。历史含有当前 state 丢失的信息，但两条路径都未超过常数基线。
+`siglip_dino_object` 的 current/history gain 为 `-0.471/-0.518`。因此不能将较小的 history 增益解释为
+Markov sufficiency；当前首先失败的是 dynamic information 的可读性。
+
+### 12.4 最终判决
+
+本次 evaluation 状态为 `completed`，但 promotion decision 为
+`not_automatic_requires_g2_and_independent_g3_review`。按第 9 节规则：
+
+- 两个 checkpoint 均为 `iterate at G2/G3`；
+- `siglip_dino` 仅保留为诊断 baseline，`siglip_dino_object` 不晋级；
+- 当前禁止训练 latent-effect Dynamics；
+- 下一版只修正 representation objective，不增加 backbone variant，也不依靠延长训练；
+- 必须提高 identity/dynamic effective rank，降低 source/coordinate shortcut，让 motion/visibility
+  可由 frozen probe 读出，并恢复 scene/object compositional decomposition，再复用本 evaluator 和
+  independent G3 truth 复评。

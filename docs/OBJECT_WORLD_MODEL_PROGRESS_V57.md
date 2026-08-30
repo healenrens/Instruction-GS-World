@@ -1303,3 +1303,56 @@ nuisance、scene leakage、external-track deletion locality 与 Markov diagnosti
   evaluator 仍然待办。
 - 当前状态为 `代码已实现，服务器 GPU 复评待执行`。W&B 结果返回前，两个 checkpoint 都不晋级
   Dynamics。
+
+### 2026-08-30：V61 Representation Sufficiency 正式复评结果
+
+**执行**
+
+- W&B run `t33taede`（`v61_representation_sufficiency_0cd9a40`）状态为 `finished`；evaluator
+  提交为 `0cd9a40a23bde8d8b07c1756c66e4d022cb822c0`。
+- 对比 `siglip_dino` 与 `siglip_dino_object` 两个 seed 17、step 3,000 checkpoint；共 144 个 held
+  conditions，覆盖 6 个 source、3 个 clip length，decode replacement rate 为 `2.083%`。
+- truth scope 是 `held_training_teacher_not_independent_object_truth`，只裁决 G2 candidate，不替代 G3。
+
+| 指标 | `siglip_dino` | `siglip_dino_object` |
+|---|---:|---:|
+| identity active units / 128 | 29 | 88 |
+| identity effective rank / 128 | 5.04 | 2.67 |
+| dynamic effective rank / 128 | 2.08 | 2.75 |
+| first-to-last Recall@1 | 40.29% | 34.09% |
+| reappearance Recall@1 | 32.95% | 23.80% |
+| external-track deletion locality | 6.17 | 4.27 |
+| identity same-different margin | 0.0123 | 0.0284 |
+| effective owner categories / 17 | 3.16 | 2.90 |
+| scene owner fraction | 5.78% | 0.0022% |
+| source-from-identity linear accuracy | 97.39% | 99.38% |
+| coordinate-from-identity linear gain | 0.941 | 0.862 |
+| motion-from-dynamic linear gain | -0.445 | -0.503 |
+| motion-from-dynamic MLP gain | -0.037 | -0.059 |
+| visibility MLP balanced accuracy | 50.0% | 53.1% |
+
+**推导结论**
+
+1. `siglip_dino` 的 first-to-last 与 reappearance retrieval 明显高于 chance（2.38% 与 1.05%），
+   并接近 frozen DINO teacher（49.27% 与 34.32%），说明它保留了跨帧 appearance correspondence。
+   但 identity effective rank 只有 `5.04 / 128`，source 可读性达到 `97.39%`，因此该 retrieval 同时
+   混入 dataset style、background 和绝对位置 shortcut，不能直接解释为稳定 object identity。
+2. `siglip_dino_object` 虽将 same-different margin 提高到 `0.0284`，正式 held Recall@1、遮挡重现和
+   deletion locality 却全部下降。88 个 active identity dimensions 只形成 2.67 的 effective rank，
+   scene fraction 又接近零，证明 semantic objective 形成了 owner/feature shortcut，而非更好的
+   persistent object。
+3. dynamic state 没有学成。两者 128 维 dynamic feature 的 effective rank 都低于 3；linear/MLP
+   motion probe 均不如训练集 motion 均值基线，visibility 也接近 chance。`siglip_dino` 加入 previous
+   dynamic 后 motion gain 从 `-0.401` 改善到 `-0.102`，说明当前 state 丢失历史信息；但两条路径都
+   未超过均值基线，所以当前首先失败的是 dynamic representation，而非已经证明了 Markov sufficiency。
+4. `siglip_dino_object` 的 first-to-last Recall@1 在六个 source 和 clip length 4/6/8 上全部低于
+   `siglip_dino`，退化不是单一数据源或时间跨度偶然现象。
+
+**判决与主线**
+
+- 两个 checkpoint 都未通过 G2；不启动 latent-effect Dynamics、Prior 或 task-level claim。
+- `siglip_dino` 仅保留为下一版诊断 baseline，`siglip_dino_object` 不晋级。
+- 延长当前训练不能解决主要问题。下一版必须修正 representation objective：identity 去除 source 和
+  absolute-position shortcut，dynamic 接受可读的 relative motion/lifecycle 监督，owner decomposition
+  阻止 scene 消失和少数 owner 集中。只有 frozen probes 同时恢复 capacity、dynamic utility 和跨 source
+  compositional validity 后，才重新进入 Dynamics。
