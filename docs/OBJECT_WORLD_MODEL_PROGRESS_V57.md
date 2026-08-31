@@ -1850,6 +1850,12 @@ RGB-only Student、Prior、language、task A、RGB decoder 或旧 checkpoint war
 - 以上全部是 train-batch telemetry，不是 source-balanced held evaluation。当前只允许从 recovery
   checkpoint 继续 E0，同时运行 B/C/D 结构审计；不得把 step 3,340 曲线解释为 E0 Gate 通过或进入
   E1 长训的依据。
+- 首次中断的直接异常为 `continuous_object_decoder_v62.py` 对奇异 `2x2 covariance` 执行
+  `torch.linalg.inv`。根因是二阶矩处于 BF16 autocast：接近 rank-1 的 covariance 会把 `1e-3` floor
+  舍入掉。提交 `3a3f7c671f2881831d67e5ccb4039532675ddc30` 将 codec 与 compact baseline 的 spatial
+  moments 固定为 FP32，并以 Cholesky solve 计算 Mahalanobis distance；同时记录 covariance minimum
+  eigenvalue 与 condition number。该修复不改变参数、optimizer 或 checkpoint shape，step 3,250
+  recovery checkpoint 可继续使用。
 
 ### 15.14 B/C/D 并行结构审计
 
