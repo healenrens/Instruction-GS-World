@@ -56,7 +56,6 @@ def validate_resume_v62(checkpoint, args, context, config):
         "architecture": ARCHITECTURE,
         "stage": args.stage,
         "parallelism": "ddp_full_state_dict",
-        "git_commit": args.source_revision,
         "world_size": context.world_size,
         "config": config.to_dict(),
     }
@@ -67,6 +66,14 @@ def validate_resume_v62(checkpoint, args, context, config):
     }
     if differences:
         raise ValueError(f"v62 resume header differs: {differences}")
+    compatible_revisions = {args.source_revision}
+    if args.resume_compatible_source_revision:
+        compatible_revisions.add(args.resume_compatible_source_revision)
+    if checkpoint.get("git_commit") not in compatible_revisions:
+        raise ValueError(
+            "v62 resume checkpoint revision differs: "
+            f"{checkpoint.get('git_commit')} not in {sorted(compatible_revisions)}"
+        )
     immutable = (
         "stage",
         "data_index",
@@ -119,6 +126,9 @@ def save_checkpoint_v62(
         "rng_states": rng_states,
         "checkpoint_kind": checkpoint_kind,
         "historical_checkpoint_used": False,
+        "resume_compatible_source_revision": (
+            args.resume_compatible_source_revision or None
+        ),
     }
     temporary = f"{path}.tmp.{os.getpid()}"
     torch.save(state, temporary)
@@ -138,6 +148,9 @@ def save_checkpoint_v62(
         "global_step": int(step),
         "world_size": len(rng_states),
         "git_commit": args.source_revision,
+        "resume_compatible_source_revision": (
+            args.resume_compatible_source_revision or None
+        ),
         "size_bytes": os.path.getsize(path),
     }
     with open(

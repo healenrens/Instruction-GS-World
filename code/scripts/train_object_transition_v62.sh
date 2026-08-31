@@ -78,6 +78,9 @@ if [ "${STAGE}" = teacher_transition_oracle ]; then
   ARGS+=(--codec_checkpoint "${CODEC_CHECKPOINT:-}")
 fi
 if [ -n "${RESUME:-}" ]; then ARGS+=(--resume "${RESUME}"); fi
+if [ -n "${RESUME_COMPATIBLE_SOURCE_REVISION:-}" ]; then
+  ARGS+=(--resume_compatible_source_revision "${RESUME_COMPATIBLE_SOURCE_REVISION}")
+fi
 if [ -n "${WANDB_RUN_ID:-}" ]; then ARGS+=(--wandb_run_id "${WANDB_RUN_ID}"); fi
 if [ -n "${MAX_TRAIN_ITEMS:-}" ]; then ARGS+=(--max_train_items "${MAX_TRAIN_ITEMS}"); fi
 

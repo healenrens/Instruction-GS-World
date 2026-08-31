@@ -1917,3 +1917,16 @@ A/E0、B、C、D 的正式入口统一固定为单机 8 卡；B/C 按 rank 切�
   `/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`，也不调用 Git 或 GitHub；
 - release 根写入 `SOURCE_REVISION`，B/C/D launcher 在没有 `.git` 的运行快照中从该文件读取 provenance；
 - 该修正只改变代码分发边界，不改变 B/C/D 数据、模型、8 卡 DDP、指标或输出隔离契约。
+
+#### E0 第二次中断与 checkpoint 迁移
+
+- E0 恢复运行到 step 3,940 后再次在 `continuous_object_decoder_v62.py` 的
+  `torch.linalg.inv(state.covariance.float())` 中断；当前修复提交已使用 Cholesky solve，因此该 traceback
+  直接证明任务仍从 `/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/` 的旧代码启动，而不是数值修复失效；
+- recovery checkpoint 每 250 steps 保存，因此本次可恢复边界为 step 3,750，而不是最后打印的 step 3,940；
+- E0 也改为从 immutable release 运行。新增显式
+  `RESUME_COMPATIBLE_SOURCE_REVISION`，只允许 checkpoint 中记录的指定旧提交或当前 release 提交通过；
+- 该迁移不放宽 architecture、stage、world size、model/config、batch、optimizer、scheduler、训练步数或数据契约；
+  covariance 修复没有新增参数或改变 tensor shape；
+- 迁移后保存的 checkpoint 使用当前 release 的真实 `git_commit`，并额外记录旧 checkpoint revision，后续
+  resume 不需要伪装成旧代码。

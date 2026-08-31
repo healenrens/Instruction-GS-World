@@ -70,6 +70,7 @@ def parse_args():
     parser.add_argument("--tracker_checkpoint", required=True)
     parser.add_argument("--codec_checkpoint", default="")
     parser.add_argument("--resume", default="")
+    parser.add_argument("--resume_compatible_source_revision", default="")
     parser.add_argument("--chunk_lengths", default="3")
     parser.add_argument("--temporal_step_ms", default="100")
     parser.add_argument("--held_group_stride", type=int, default=20)
