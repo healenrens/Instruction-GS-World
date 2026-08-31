@@ -1904,3 +1904,16 @@ A/E0、B、C、D 的正式入口统一固定为单机 8 卡；B/C 按 rank 切�
   训练过程中持续替换的 recovery/latest 路径；
 - D 的 optimizer step 只发生在进程内临时模型上，不写入 E0/E1 输出，也不构成 E1 训练结果；
 - B/C/D 只回答 target、binding 与 runtime 的结构性问题，不替代第 15.8 节 E0/E1 held Gate。
+
+#### 在线任务源码兼容修正
+
+- 首次提交 B/C/D 后，在线任务在 Python 启动前报
+  `code/scripts/run_teacher_target_audit_v62b.sh: No such file or directory`。仓库提交内入口存在，失败原因是
+  在线任务挂载了旧的源码快照，而在线运行环境又不能访问 GitHub；
+- 新增 `deploy_object_transition_v62_runtime.sh`。代码同步阶段把当前提交的完整 `code/igsw` 与
+  `code/scripts` 复制到
+  `/mnt/pfs/public/xuhaoming/instruct_gs_world/runtime/object_transition_v62/releases/<SOURCE_REVISION>/`；
+- 在线 B/C/D 只从该 immutable release 运行，不读取
+  `/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`，也不调用 Git 或 GitHub；
+- release 根写入 `SOURCE_REVISION`，B/C/D launcher 在没有 `.git` 的运行快照中从该文件读取 provenance；
+- 该修正只改变代码分发边界，不改变 B/C/D 数据、模型、8 卡 DDP、指标或输出隔离契约。

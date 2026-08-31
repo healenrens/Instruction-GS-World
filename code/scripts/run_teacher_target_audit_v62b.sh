@@ -5,7 +5,13 @@ ROOT="${ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 TORCHRUN="${VENV_ROOT}/.venv/bin/torchrun"
-SOURCE_REVISION="${SOURCE_REVISION:-$(git -C "${ROOT}" rev-parse HEAD)}"
+if [ -z "${SOURCE_REVISION:-}" ]; then
+  if [ -f "${ROOT}/SOURCE_REVISION" ]; then
+    read -r SOURCE_REVISION < "${ROOT}/SOURCE_REVISION"
+  else
+    SOURCE_REVISION="$(git -C "${ROOT}" rev-parse HEAD)"
+  fi
+fi
 RUN_ID="${RUN_ID:-v62b_teacher_target_$(date +%Y%m%d_%H%M%S)_$$}"
 OUT_ROOT="${OUT_ROOT:-${RUNTIME_ROOT}/outputs/v62_parallel/b_teacher_target/${RUN_ID}}"
 REPORT="${REPORT:-${OUT_ROOT}/teacher_target_structural_audit.json}"
