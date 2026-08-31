@@ -1835,6 +1835,22 @@ RGB-only Student、Prior、language、task A、RGB decoder 或旧 checkpoint war
 - E0 训练、E0 held Gate、E1 verifier/训练/held Gate 仍待按顺序执行；
 - 在 E0 held report 达到第 15.8 节门槛前，不得启动 E1；E1 通过前不得实现或启动 E2/E3。
 
+**E0 首次长训状态（2026-08-31）**
+
+- W&B run `24jo2k1m`（`object_transition_v62_e0_seed17_f00082d`）使用单机 8 卡、每卡 32、
+  effective batch 256；目标为 20,000 steps；
+- 该 run 的 W&B terminal state 为 `crashed`，最后训练记录为 step 3,340，最近 rolling recovery
+  checkpoint 为 step 3,250，因此不能记录为 E0 完成；
+- step 3,340 的 train-batch 指标为：loss 0.4254、DINO cosine error 0.1431、SigLIP cosine error
+  0.1585、semantic gap recovery 0.3399、support BCE 0.0996、support gap recovery 0.0785、
+  support soft-IoU 0.2826、lifecycle gap recovery 0.4891、visibility BCE 0.0250；
+- 从前 20 个日志点到最后 20 个日志点，loss 下降约 75.8%，semantic gap recovery 从负值升到约
+  0.325，说明 codec 确实在学习；但 support gap 从约 step 1,000 起长期停留在约 0.07，远低于
+  E0 held gate 的 0.80；
+- 以上全部是 train-batch telemetry，不是 source-balanced held evaluation。当前只允许从 recovery
+  checkpoint 继续 E0，同时运行 B/C/D 结构审计；不得把 step 3,340 曲线解释为 E0 Gate 通过或进入
+  E1 长训的依据。
+
 ### 15.14 B/C/D 并行结构审计
 
 2026-08-31 在 `codex/v62-structural-audits` 增加三个**不改训练参数、不写训练 checkpoint**的独立入口。
