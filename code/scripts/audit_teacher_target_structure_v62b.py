@@ -16,6 +16,12 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 from igsw.adaptive_gaussian_wm.multisource_point_track_dataset import (  # noqa: E402
     MultiSourceRobotVideoDataset,
 )
+from igsw.adaptive_gaussian_wm.distributed_audit_v62 import (  # noqa: E402
+    finish_distributed_audit_v62,
+    gather_rank_payloads_v62,
+    initialize_distributed_audit_v62,
+    shard_indices_v62,
+)
 from igsw.adaptive_gaussian_wm.object_transition_audit_runtime_v62 import (  # noqa: E402
     ObjectTransitionAuditRuntimeV62,
 )
@@ -93,17 +99,31 @@ class MetricAccumulator:
             for name, value in self.numerators.items()
         }
 
+    def state_dict(self):
+        return {
+            "numerators": self.numerators,
+            "denominators": self.denominators,
+        }
+
+    @classmethod
+    def from_state_dict(cls, state):
+        accumulator = cls()
+        accumulator.numerators = dict(state["numerators"])
+        accumulator.denominators = dict(state["denominators"])
+        return accumulator
+
 
 @torch.no_grad()
-def evaluate_source(args, dataset, source_index, runtime, device):
+def evaluate_source(args, dataset, source_index, runtime, context):
     indices = dataset.balanced_source_evaluation_indices(
         source_index, args.items_per_source
     )
+    indices = shard_indices_v62(indices, context)
     accumulator = MetricAccumulator()
     for start in range(0, len(indices), args.batch):
         selected = indices[start : start + args.batch]
         batch = default_collate([dataset[(index, 3)] for index in selected])
-        bundle = runtime(move_to_device(batch, device))
+        bundle = runtime(move_to_device(batch, context.device))
         metrics = teacher_target_structural_metrics_v62(bundle)
         accumulator.add(metrics, bundle.observation.object_valid)
     return accumulator
@@ -143,7 +163,7 @@ def write_wandb(args, report):
 
 def main():
     args = parse_args()
-    device = torch.device("cuda")
+    context = initialize_distributed_audit_v62()
     config = ObjectTransitionConfigV62()
     config.validate()
     dataset = MultiSourceRobotVideoDataset(
@@ -158,7 +178,7 @@ def main():
     )
     runtime = ObjectTransitionAuditRuntimeV62(
         config,
-        device,
+        context.device,
         args.amp,
         args.dino_checkpoint,
         args.siglip_checkpoint,
@@ -166,10 +186,24 @@ def main():
         args.dino_frame_batch,
         args.siglip_frame_batch,
     )
-    source_accumulators = {
-        name: evaluate_source(args, dataset, index, runtime, device)
+    local_accumulators = {
+        name: evaluate_source(args, dataset, index, runtime, context)
         for index, name in enumerate(dataset.source_names)
     }
+    rank_payloads = gather_rank_payloads_v62(
+        {
+            name: accumulator.state_dict()
+            for name, accumulator in local_accumulators.items()
+        },
+        context,
+    )
+    if not context.is_main:
+        finish_distributed_audit_v62()
+        return
+    source_accumulators = {name: MetricAccumulator() for name in dataset.source_names}
+    for rank_payload in rank_payloads:
+        for name, state in rank_payload.items():
+            source_accumulators[name].merge(MetricAccumulator.from_state_dict(state))
     overall_accumulator = MetricAccumulator()
     for accumulator in source_accumulators.values():
         overall_accumulator.merge(accumulator)
@@ -182,6 +216,7 @@ def main():
         "data": os.path.abspath(args.data_index),
         "held_group_stride": args.held_group_stride,
         "items_per_source": args.items_per_source,
+        "world_size": context.world_size,
         "teacher_only": True,
         "checkpoint_used": False,
         "corruption": "deterministic_half_track_roll",
@@ -202,6 +237,7 @@ def main():
         handle.write("\n")
     write_wandb(args, report)
     print(json.dumps(report, sort_keys=True))
+    finish_distributed_audit_v62()
 
 
 if __name__ == "__main__":

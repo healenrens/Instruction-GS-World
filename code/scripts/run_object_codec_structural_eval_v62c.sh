@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
-PY="${VENV_ROOT}/.venv/bin/python"
+TORCHRUN="${VENV_ROOT}/.venv/bin/torchrun"
 SOURCE_REVISION="${SOURCE_REVISION:-$(git -C "${ROOT}" rev-parse HEAD)}"
 RUN_ID="${RUN_ID:-v62c_codec_structure_$(date +%Y%m%d_%H%M%S)_$$}"
 OUT_ROOT="${OUT_ROOT:-${RUNTIME_ROOT}/outputs/v62_parallel/c_codec_structure/${RUN_ID}}"
@@ -17,9 +17,10 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export PYTHONPATH="${RUNTIME_ROOT}/third_party/co-tracker:${ROOT}/code:${PYTHONPATH:-}"
 mkdir -p "${OUT_ROOT}" "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}"
 
-echo "[v62c] run_id=${RUN_ID} checkpoint=${E0_CHECKPOINT} report=${REPORT}"
+echo "[v62c] run_id=${RUN_ID} world=8 checkpoint=${E0_CHECKPOINT} report=${REPORT}"
 cd "${ROOT}"
-exec "${PY}" "${ROOT}/code/scripts/evaluate_object_codec_structure_v62c.py" \
+exec "${TORCHRUN}" --standalone --nproc_per_node 8 \
+  "${ROOT}/code/scripts/evaluate_object_codec_structure_v62c.py" \
   --checkpoint "${E0_CHECKPOINT}" \
   --data_index "${DATA_INDEX:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json}" \
   --dino_checkpoint "${DINO_CHECKPOINT:-${RUNTIME_ROOT}/models/dinov2_vitl14/model.safetensors}" \

@@ -1839,6 +1839,8 @@ RGB-only Student、Prior、language、task A、RGB decoder 或旧 checkpoint war
 
 2026-08-31 在 `codex/v62-structural-audits` 增加三个**不改训练参数、不写训练 checkpoint**的独立入口。
 它们只共享只读六源 index、frozen teacher 权重和指定 E0 checkpoint；输出、W&B group 与 run ID 完全隔离。
+A/E0、B、C、D 的正式入口统一固定为单机 8 卡；B/C 按 rank 切分每个 source 的 held 样本，rank 0
+汇总各 rank 的原始 numerator/denominator 或 sum/count 后再写 JSON 和 W&B，不重复计算样本。
 
 #### B：Teacher target structural audit
 
@@ -1866,7 +1868,7 @@ RGB-only Student、Prior、language、task A、RGB decoder 或旧 checkpoint war
 
 - 入口：`run_transition_runtime_probe_v62d.sh`；
 - 只读指定 E0 checkpoint，在 held data 上临时构造 Posterior + transport/residual Dynamics；
-- 通过 `torchrun` 自动使用当前可见 GPU，执行三次真实 DDP forward/backward/optimizer step，不保存模型；
+- 通过 `torchrun --nproc_per_node 8` 执行三次真实 DDP forward/backward/optimizer step，不保存模型；
 - 报告 unused parameter count、gradient norm、rank parameter sync、correct/zero/shuffle/persistence、future-swap
   posterior sensitivity、zero-effect causal isolation 与 identity exact copy；
 - 独立输出根：`outputs/v62_parallel/d_e1_runtime/<RUN_ID>/`；

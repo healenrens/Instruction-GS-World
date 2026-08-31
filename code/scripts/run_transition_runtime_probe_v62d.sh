@@ -5,16 +5,11 @@ ROOT="${ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 TORCHRUN="${VENV_ROOT}/.venv/bin/torchrun"
-PY="${VENV_ROOT}/.venv/bin/python"
 SOURCE_REVISION="${SOURCE_REVISION:-$(git -C "${ROOT}" rev-parse HEAD)}"
 RUN_ID="${RUN_ID:-v62d_e1_runtime_$(date +%Y%m%d_%H%M%S)_$$}"
 OUT_ROOT="${OUT_ROOT:-${RUNTIME_ROOT}/outputs/v62_parallel/d_e1_runtime/${RUN_ID}}"
 REPORT="${REPORT:-${OUT_ROOT}/transition_runtime_ddp.json}"
 E0_CHECKPOINT="${E0_CHECKPOINT:-${RUNTIME_ROOT}/outputs/object_transition_v62_e0_seed17_f00082d/v62_e0_0002500.pt}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-auto}"
-if [ "${NPROC_PER_NODE}" = auto ]; then
-  NPROC_PER_NODE="$(${PY} -c 'import torch; print(torch.cuda.device_count())')"
-fi
 
 export HF_HOME="${HF_HOME:-${RUNTIME_ROOT}/hf_cache}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${RUNTIME_ROOT}/.cache}"
@@ -22,9 +17,9 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export PYTHONPATH="${RUNTIME_ROOT}/third_party/co-tracker:${ROOT}/code:${PYTHONPATH:-}"
 mkdir -p "${OUT_ROOT}" "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}"
 
-echo "[v62d] run_id=${RUN_ID} world=${NPROC_PER_NODE} checkpoint=${E0_CHECKPOINT} report=${REPORT}"
+echo "[v62d] run_id=${RUN_ID} world=8 checkpoint=${E0_CHECKPOINT} report=${REPORT}"
 cd "${ROOT}"
-exec "${TORCHRUN}" --standalone --nproc_per_node "${NPROC_PER_NODE}" \
+exec "${TORCHRUN}" --standalone --nproc_per_node 8 \
   "${ROOT}/code/scripts/verify_transition_runtime_ddp_v62d.py" \
   --codec_checkpoint "${E0_CHECKPOINT}" \
   --data_index "${DATA_INDEX:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json}" \

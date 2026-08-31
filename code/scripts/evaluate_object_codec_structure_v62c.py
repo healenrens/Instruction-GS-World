@@ -16,6 +16,12 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "code"))
 from igsw.adaptive_gaussian_wm.multisource_point_track_dataset import (  # noqa: E402
     MultiSourceRobotVideoDataset,
 )
+from igsw.adaptive_gaussian_wm.distributed_audit_v62 import (  # noqa: E402
+    finish_distributed_audit_v62,
+    gather_rank_payloads_v62,
+    initialize_distributed_audit_v62,
+    shard_indices_v62,
+)
 from igsw.adaptive_gaussian_wm.object_codec_structural_eval_v62 import (  # noqa: E402
     evaluate_object_codec_structure_v62,
 )
@@ -82,17 +88,28 @@ class ScalarAccumulator:
     def means(self):
         return {name: value / max(self.count, 1) for name, value in self.sums.items()}
 
+    def state_dict(self):
+        return {"sums": self.sums, "count": self.count}
+
+    @classmethod
+    def from_state_dict(cls, state):
+        accumulator = cls()
+        accumulator.sums = dict(state["sums"])
+        accumulator.count = int(state["count"])
+        return accumulator
+
 
 @torch.no_grad()
-def evaluate_source(args, dataset, source_index, model, teacher, device):
+def evaluate_source(args, dataset, source_index, model, teacher, context):
     indices = dataset.balanced_source_evaluation_indices(
         source_index, args.items_per_source
     )
+    indices = shard_indices_v62(indices, context)
     accumulator = ScalarAccumulator()
     for start in range(0, len(indices), args.batch):
         selected = indices[start : start + args.batch]
         batch = default_collate([dataset[(index, 3)] for index in selected])
-        observation = teacher(move_to_device(batch, device))
+        observation = teacher(move_to_device(batch, context.device))
         metrics = evaluate_object_codec_structure_v62(model, observation)
         accumulator.add(metrics, len(selected))
     return accumulator
@@ -132,14 +149,14 @@ def write_wandb(args, report):
 
 def main():
     args = parse_args()
-    device = torch.device("cuda")
+    context = initialize_distributed_audit_v62()
     config = ObjectTransitionConfigV62()
     checkpoint = load_e0_codec_checkpoint_v62(args.checkpoint, config)
-    model = TeacherObjectAutoencoderV62(config).to(device).eval()
+    model = TeacherObjectAutoencoderV62(config).to(context.device).eval()
     model.load_state_dict(checkpoint["model"], strict=True)
     teacher = ObjectTransitionTeacherRuntimeV62(
         config,
-        device,
+        context.device,
         args.amp,
         args.dino_checkpoint,
         args.siglip_checkpoint,
@@ -157,10 +174,24 @@ def main():
         group_partition="held",
         held_group_stride=args.held_group_stride,
     )
-    source_accumulators = {
-        name: evaluate_source(args, dataset, index, model, teacher, device)
+    local_accumulators = {
+        name: evaluate_source(args, dataset, index, model, teacher, context)
         for index, name in enumerate(dataset.source_names)
     }
+    rank_payloads = gather_rank_payloads_v62(
+        {
+            name: accumulator.state_dict()
+            for name, accumulator in local_accumulators.items()
+        },
+        context,
+    )
+    if not context.is_main:
+        finish_distributed_audit_v62()
+        return
+    source_accumulators = {name: ScalarAccumulator() for name in dataset.source_names}
+    for rank_payload in rank_payloads:
+        for name, state in rank_payload.items():
+            source_accumulators[name].merge(ScalarAccumulator.from_state_dict(state))
     overall_accumulator = ScalarAccumulator()
     for accumulator in source_accumulators.values():
         overall_accumulator.merge(accumulator)
@@ -175,6 +206,7 @@ def main():
         "data": os.path.abspath(args.data_index),
         "held_group_stride": args.held_group_stride,
         "items_per_source": args.items_per_source,
+        "world_size": context.world_size,
         "conditions": [
             "normal",
             "continuous_coordinate_holdout",
@@ -201,6 +233,7 @@ def main():
         handle.write("\n")
     write_wandb(args, report)
     print(json.dumps(report, sort_keys=True))
+    finish_distributed_audit_v62()
 
 
 if __name__ == "__main__":

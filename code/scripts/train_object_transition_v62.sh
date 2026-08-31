@@ -19,10 +19,7 @@ TRACKER_CHECKPOINT="${TRACKER_CHECKPOINT:-${RUNTIME_ROOT}/checkpoints/cotracker/
 RUN_NAME="${RUN_NAME:-object_transition_v62_${STAGE}_seed17_${SOURCE_REVISION:0:7}}"
 OUT="${OUT:-${RUNTIME_ROOT}/outputs/${RUN_NAME}}"
 
-NPROC_PER_NODE="${NPROC_PER_NODE:-auto}"
-if [ "${NPROC_PER_NODE}" = auto ]; then
-  NPROC_PER_NODE="$(${PY} -c 'import torch; print(torch.cuda.device_count())')"
-fi
+NPROC_PER_NODE=8
 MIN_GPU_MEMORY_MIB="$(${PY} -c 'import torch; print(min(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count())) // 2**20)')"
 BATCH_PER_GPU="${BATCH_PER_GPU:-auto}"
 if [ "${BATCH_PER_GPU}" = auto ]; then
