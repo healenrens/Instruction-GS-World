@@ -5,6 +5,11 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .covariance_geometry_v62 import (
+    mahalanobis_squared_v62,
+    object_spatial_moments_v62,
+)
+
 
 def weighted_mean_v62(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return (value.float() * weight.float()).sum() / weight.float().sum().clamp_min(1.0)
@@ -57,18 +62,11 @@ def compact_object_baseline_errors_v62(frame, covariance_floor: float):
     support = frame["support"].float()
     positive = support * valid
     coordinates = frame["coordinates"].float()
-    center = (coordinates * positive[..., None]).sum(dim=1)
-    center = center / positive.sum(dim=1, keepdim=True).clamp_min(1e-6)
+    center, covariance = object_spatial_moments_v62(
+        coordinates, positive, covariance_floor
+    )
     offset = coordinates - center[:, None]
-    covariance = torch.einsum("bp,bpi,bpj->bij", positive, offset, offset)
-    covariance = (
-        covariance / positive.sum(dim=1, keepdim=True).clamp_min(1e-6)[..., None]
-    )
-    eye = torch.eye(2, device=covariance.device, dtype=covariance.dtype)
-    covariance = covariance + covariance_floor * eye
-    squared = torch.einsum(
-        "bpi,bij,bpj->bp", offset, torch.linalg.inv(covariance), offset
-    )
+    squared = mahalanobis_squared_v62(offset[:, :, None], covariance[:, None])[:, :, 0]
     support_probability = torch.exp(-0.5 * squared).clamp(1e-4, 1.0 - 1e-4)
     support_bce = weighted_mean_v62(
         F.binary_cross_entropy_with_logits(

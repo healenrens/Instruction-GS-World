@@ -49,6 +49,16 @@ def teacher_object_codec_objective_v62(state, decoded, frame, config):
         torch.log(torch.tensor(float(config.carrier_count), device=mass.device))
         - carrier_entropy
     )
+    covariance_eigenvalues = torch.linalg.eigvalsh(state.covariance.float())
+    covariance_weight = object_valid[:, None].expand_as(covariance_eigenvalues[..., 0])
+    covariance_min_eigenvalue = weighted_mean_v62(
+        covariance_eigenvalues[..., 0], covariance_weight
+    )
+    covariance_condition_number = weighted_mean_v62(
+        covariance_eigenvalues[..., 1]
+        / covariance_eigenvalues[..., 0].clamp_min(config.covariance_floor),
+        covariance_weight,
+    )
     total = (
         config.support_weight * errors["support_bce"]
         + config.semantic_weight
@@ -65,6 +75,8 @@ def teacher_object_codec_objective_v62(state, decoded, frame, config):
         "carrier_capacity_penalty": capacity.detach(),
         "carrier_support_overlap": overlap.detach(),
         "carrier_effective_count": effective_carriers.detach(),
+        "covariance_min_eigenvalue": covariance_min_eigenvalue.detach(),
+        "covariance_condition_number": covariance_condition_number.detach(),
         "object_valid_fraction": frame["object_valid"].float().mean(),
         "positive_point_fraction": frame["support"].float().mean(),
         "support_gap_recovery": (

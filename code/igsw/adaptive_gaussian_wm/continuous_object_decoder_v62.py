@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .covariance_geometry_v62 import mahalanobis_squared_v62
+
 
 @dataclass(frozen=True)
 class DecodedObjectFieldV62:
@@ -45,8 +47,7 @@ class ContinuousObjectDecoderV62(nn.Module):
     def forward(self, state, coordinates: torch.Tensor) -> DecodedObjectFieldV62:
         coordinates = coordinates.float()
         offset = coordinates[:, :, None] - state.center[:, None].float()
-        precision = torch.linalg.inv(state.covariance.float())
-        squared = torch.einsum("bpki,bkij,bpkj->bpk", offset, precision, offset)
+        squared = mahalanobis_squared_v62(offset, state.covariance)
         presence = state.presence.float().clamp(1e-4, 1.0 - 1e-4)
         basis_logits = -0.5 * squared + torch.logit(presence)[:, None]
         carrier_weights = torch.softmax(basis_logits, dim=-1)

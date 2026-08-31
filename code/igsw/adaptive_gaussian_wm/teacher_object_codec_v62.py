@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .covariance_geometry_v62 import carrier_spatial_moments_v62
+
 
 @dataclass(frozen=True)
 class TeacherObjectStateV62:
@@ -94,11 +96,9 @@ class TeacherObjectCodecV62(nn.Module):
         observed = torch.einsum("bkp,bpd->bkd", assignment, self.value(points))
         carriers = queries + observed
         carriers = carriers + self.carrier_update(carriers)
-        center = torch.einsum("bkp,bpd->bkd", assignment, coordinates)
-        offset = coordinates[:, None] - center[:, :, None]
-        covariance = torch.einsum("bkp,bkpi,bkpj->bkij", assignment, offset, offset)
-        eye = torch.eye(2, device=covariance.device, dtype=covariance.dtype)
-        covariance = covariance + self.config.covariance_floor * eye
+        center, covariance = carrier_spatial_moments_v62(
+            coordinates, assignment, self.config.covariance_floor
+        )
         identity_weight = support * visibility
         identity_input = torch.cat((frame["dino"], frame["siglip"]), dim=-1).float()
         pooled = (identity_input * identity_weight[..., None]).sum(dim=1)
