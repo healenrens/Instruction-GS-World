@@ -2,9 +2,10 @@
 
 > 更新日期：2026-08-31
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/object-transition-v62`
-> 当前已验证代码提交：`0cd9a40a23bde8d8b07c1756c66e4d022cb822c0`
-> V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`（仅静态验证，待 GPU verifier）
+> 当前开发分支：`codex/v62-structural-audits`
+> 当前已验证代码提交：`f00082d7678f24dd7323ebcb789ef40fca7c0654`（E0 real-teacher GPU verifier）
+> V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
+> V62 B/C/D structural audit 实现提交：`2ad1158084ff0e8b4070f43c6721261df1884485`（静态验证，待服务器执行）
 > 上次账本提交：`3f677c5e4cc59b5a1169fcaa8e3611b258952f96`
 > 当前实验：V61 统一表征充分性复评已完成且未通过 G2；下一项为第 15 节 V62 dynamic-objective 实验方案
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
@@ -1828,5 +1829,53 @@ RGB-only Student、Prior、language、task A、RGB decoder 或旧 checkpoint war
 
 - 已完成 Ruff、Python compile、Bash syntax、单文件行数与 `git diff --check`；
 - 本地 Python 环境没有 PyTorch，因此 `test_object_transition_v62.py` 的 tensor/backward 测试未在本地执行；
-- real-teacher GPU verifier、E0 训练、E0 held Gate、E1 verifier/训练/held Gate 均待服务器按顺序执行；
+- 服务器已在 `f00082d7678f24dd7323ebcb789ef40fca7c0654` 完成 E0 real-teacher GPU verifier：六源覆盖、
+  finite gradients、无历史 checkpoint、无 RGB/patch-grid target，`status=passed`；该结果只证明启动路径，不是 E0
+  训练或 held quality 结果；
+- E0 训练、E0 held Gate、E1 verifier/训练/held Gate 仍待按顺序执行；
 - 在 E0 held report 达到第 15.8 节门槛前，不得启动 E1；E1 通过前不得实现或启动 E2/E3。
+
+### 15.14 B/C/D 并行结构审计
+
+2026-08-31 在 `codex/v62-structural-audits` 增加三个**不改训练参数、不写训练 checkpoint**的独立入口。
+它们只共享只读六源 index、frozen teacher 权重和指定 E0 checkpoint；输出、W&B group 与 run ID 完全隔离。
+
+#### B：Teacher target structural audit
+
+- 入口：`run_teacher_target_audit_v62b.sh`；
+- 不读取任何训练 checkpoint，直接在 held 六源视频上运行 frozen DINO、SigLIP、CoTracker 与 relation teacher；
+- 保持 membership 质量分布不变，将 track membership 确定性平移一半作为 corruption；
+- 比较 selected 与 shuffled 的 DINO/SigLIP group dispersion、motion dispersion、relative-geometry
+  instability、same/different relation evidence、persistence、motion salience 与 effective track count；
+- 每项记录 numerator、denominator、每源均值和全局 micro aggregate；
+- 独立输出根：`outputs/v62_parallel/b_teacher_target/<RUN_ID>/`；
+- W&B group：`object-transition-v62b-teacher-audit`。
+
+#### C：E0 codec structural counterfactual
+
+- 入口：`run_object_codec_structural_eval_v62c.sh`；
+- 只读一个 E0 checkpoint，在 held 六源数据上执行 normal、continuous-coordinate holdout、query swap、
+  all-scene、merge-all、carrier deletion、carrier swap 与 split-by-time；
+- 报告 absolute codec/compact/oracle error、gap recovery、各 corruption 的 error increase、carrier deletion
+  inside/outside external support change ratio，以及 normal/split temporal identity error；
+- continuous holdout 使用一半 tracks 编码、另一半 tracks 解码，避免在输入坐标上自评；
+- 独立输出根：`outputs/v62_parallel/c_codec_structure/<RUN_ID>/`；
+- W&B group：`object-transition-v62c-codec-structure`。
+
+#### D：E1 DDP/runtime probe
+
+- 入口：`run_transition_runtime_probe_v62d.sh`；
+- 只读指定 E0 checkpoint，在 held data 上临时构造 Posterior + transport/residual Dynamics；
+- 通过 `torchrun` 自动使用当前可见 GPU，执行三次真实 DDP forward/backward/optimizer step，不保存模型；
+- 报告 unused parameter count、gradient norm、rank parameter sync、correct/zero/shuffle/persistence、future-swap
+  posterior sensitivity、zero-effect causal isolation 与 identity exact copy；
+- 独立输出根：`outputs/v62_parallel/d_e1_runtime/<RUN_ID>/`；
+- W&B group：`object-transition-v62d-ddp-runtime`。
+
+#### 隔离与证据边界
+
+- 三个 launcher 都在前台运行，不使用 `nohup`、`&` 或 detached manager；
+- `RUN_ID` 默认包含时间与 PID；三类任务没有共享 `latest`、log、report 或 checkpoint 路径；
+- B 可以与 E0 训练立即并行；C/D 只有指定 E0 checkpoint 存在后才能执行；
+- D 的 optimizer step 只发生在进程内临时模型上，不写入 E0/E1 输出，也不构成 E1 训练结果；
+- B/C/D 只回答 target、binding 与 runtime 的结构性问题，不替代第 15.8 节 E0/E1 held Gate。
