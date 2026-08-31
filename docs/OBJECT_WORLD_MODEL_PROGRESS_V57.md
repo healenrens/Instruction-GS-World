@@ -1876,6 +1876,7 @@ RGB-only Student、Prior、language、task A、RGB decoder 或旧 checkpoint war
 
 - 三个 launcher 都在前台运行，不使用 `nohup`、`&` 或 detached manager；
 - `RUN_ID` 默认包含时间与 PID；三类任务没有共享 `latest`、log、report 或 checkpoint 路径；
-- B 可以与 E0 训练立即并行；C/D 只有指定 E0 checkpoint 存在后才能执行；
+- B 可以与 E0 训练立即并行；C/D 只有指定 E0 immutable milestone checkpoint 存在后才能执行，禁止读取
+  训练过程中持续替换的 recovery/latest 路径；
 - D 的 optimizer step 只发生在进程内临时模型上，不写入 E0/E1 输出，也不构成 E1 训练结果；
 - B/C/D 只回答 target、binding 与 runtime 的结构性问题，不替代第 15.8 节 E0/E1 held Gate。

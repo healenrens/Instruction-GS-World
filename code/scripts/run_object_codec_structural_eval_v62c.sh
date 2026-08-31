@@ -9,7 +9,7 @@ SOURCE_REVISION="${SOURCE_REVISION:-$(git -C "${ROOT}" rev-parse HEAD)}"
 RUN_ID="${RUN_ID:-v62c_codec_structure_$(date +%Y%m%d_%H%M%S)_$$}"
 OUT_ROOT="${OUT_ROOT:-${RUNTIME_ROOT}/outputs/v62_parallel/c_codec_structure/${RUN_ID}}"
 REPORT="${REPORT:-${OUT_ROOT}/object_codec_structural_eval.json}"
-E0_CHECKPOINT="${E0_CHECKPOINT:-${RUNTIME_ROOT}/outputs/object_transition_v62_e0_seed17_f00082d/latest.pt}"
+E0_CHECKPOINT="${E0_CHECKPOINT:-${RUNTIME_ROOT}/outputs/object_transition_v62_e0_seed17_f00082d/v62_e0_0002500.pt}"
 
 export HF_HOME="${HF_HOME:-${RUNTIME_ROOT}/hf_cache}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${RUNTIME_ROOT}/.cache}"
