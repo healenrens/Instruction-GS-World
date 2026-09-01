@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import fields, replace
 
 import torch
 import torch.nn.functional as F
@@ -59,6 +60,16 @@ def finite_gradients(model):
     return len(gradients), all(bool(torch.isfinite(value).all()) for value in gradients)
 
 
+def state_to_bfloat16(state):
+    return replace(
+        state,
+        **{
+            field.name: getattr(state, field.name).to(torch.bfloat16)
+            for field in fields(state)
+        },
+    )
+
+
 def main():
     torch.manual_seed(17)
     config = ObjectTransitionConfigV62()
@@ -84,6 +95,20 @@ def main():
     )
     if not bool(correct_zero_difference > 0.0):
         raise RuntimeError("v62 E1 correct effect does not alter predicted state")
+    with torch.no_grad():
+        delta_seconds = frame_times[:, 1] - frame_times[:, 0]
+        bf16_source = state_to_bfloat16(e1_output["source"])
+        bf16_target = state_to_bfloat16(e1_output["target"])
+        bf16_effect = e1.posterior(bf16_source, bf16_target, delta_seconds)
+        bf16_prediction, _ = e1.dynamics(bf16_source, bf16_effect, delta_seconds)
+        bf16_decoded = e1.decoder(
+            bf16_prediction, observation.coordinates[:, 1].to(torch.bfloat16)
+        )
+        mixed_precision_boundary_finite = torch.isfinite(
+            bf16_decoded.dino.float()
+        ).all()
+    if not bool(mixed_precision_boundary_finite):
+        raise RuntimeError("v62 mixed-precision module boundary is non-finite")
     report = {
         "status": "passed",
         "e0_loss": float(e0_output["loss"].detach()),
@@ -92,6 +117,7 @@ def main():
         "e1_gradient_tensors": e1_count,
         "effect_shape": list(e1_output["effect"].value.shape),
         "correct_zero_max_difference": float(correct_zero_difference.detach()),
+        "mixed_precision_boundary_finite": bool(mixed_precision_boundary_finite),
     }
     print(json.dumps(report, sort_keys=True))
 

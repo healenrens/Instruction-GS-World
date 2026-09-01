@@ -1930,3 +1930,15 @@ A/E0、B、C、D 的正式入口统一固定为单机 8 卡；B/C 按 rank 切�
   covariance 修复没有新增参数或改变 tensor shape；
 - 迁移后保存的 checkpoint 使用当前 release 的真实 `git_commit`，并额外记录旧 checkpoint revision，后续
   resume 不需要伪装成旧代码。
+
+#### D mixed-precision runtime 修正
+
+- D 在 immutable release `4afe969d6dd2ed05622817a7bd1d8438271e9077` 进入真实 8 卡 forward 后，
+  intervention diagnostics 将 autocast 内产生的 BF16 latent effect 在 autocast 外送入 FP32
+  `effect_input`，触发 `mat1 and mat2 must have the same dtype`；
+- 根因是 Posterior、Dynamics 与 Decoder 的公共接口默认调用者始终位于同一个 autocast context，导致主训练
+  forward 正常而离线 intervention/probe 失败；
+- v62 现在在三个模块边界将 state、effect、coordinate 与 time inputs 转为对应模块 parameter dtype。
+  autocast 内仍由 PyTorch 选择 BF16 kernel，autocast 外则使用 FP32，不改变模型参数、checkpoint shape 或 loss；
+- `test_object_transition_v62.py` 增加 BF16 state/effect 离开 autocast 后依次调用 Posterior、Dynamics 和
+  Decoder 的回归路径，覆盖 D 本次实际失败方式。

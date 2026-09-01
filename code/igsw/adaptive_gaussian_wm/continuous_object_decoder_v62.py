@@ -51,9 +51,10 @@ class ContinuousObjectDecoderV62(nn.Module):
         presence = state.presence.float().clamp(1e-4, 1.0 - 1e-4)
         basis_logits = -0.5 * squared + torch.logit(presence)[:, None]
         carrier_weights = torch.softmax(basis_logits, dim=-1)
-        carrier_values = self.carrier_value(state.carriers)
+        compute_dtype = self.carrier_value[1].weight.dtype
+        carrier_values = self.carrier_value(state.carriers.to(dtype=compute_dtype))
         mixed = torch.einsum("bpk,bkd->bpd", carrier_weights, carrier_values)
-        hidden = mixed + self.coordinate(coordinates)
+        hidden = mixed + self.coordinate(coordinates.to(dtype=compute_dtype))
         hidden = hidden + self.field(hidden)
         carrier_visibility = torch.logit(
             state.visibility.float().clamp(1e-4, 1.0 - 1e-4)

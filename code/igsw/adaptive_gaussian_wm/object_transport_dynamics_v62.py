@@ -73,9 +73,17 @@ class ObjectTransportDynamicsV62(nn.Module):
         return covariance + self.config.covariance_floor * eye
 
     def forward(self, source, effect, delta_seconds):
-        source_hidden = self.state_input(state_tokens_without_identity_v62(source))
-        effect_hidden = self.effect_input(effect.value)
-        time = self.time_input(torch.log1p(delta_seconds.float())[:, None])[:, None]
+        source_tokens = state_tokens_without_identity_v62(source).to(
+            dtype=self.state_input[1].weight.dtype
+        )
+        source_hidden = self.state_input(source_tokens)
+        effect_hidden = self.effect_input(
+            effect.value.to(dtype=self.effect_input.weight.dtype)
+        )
+        time_value = torch.log1p(delta_seconds.float())[:, None]
+        time = self.time_input(
+            time_value.to(dtype=self.time_input[0].weight.dtype)
+        )[:, None]
         target_hidden = self.target_queries[None].expand(len(source_hidden), -1, -1)
         target_hidden = target_hidden + time
         effect_context, _ = self.effect_attention(

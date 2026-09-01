@@ -56,12 +56,20 @@ class DeterministicObjectEffectPosteriorV62(nn.Module):
         )
 
     def forward(self, source, target, delta_seconds) -> ObjectEffectV62:
-        source_tokens = self.state_input(state_tokens_without_identity_v62(source))
-        target_tokens = self.state_input(state_tokens_without_identity_v62(target))
+        state_dtype = self.state_input[1].weight.dtype
+        source_tokens = self.state_input(
+            state_tokens_without_identity_v62(source).to(dtype=state_dtype)
+        )
+        target_tokens = self.state_input(
+            state_tokens_without_identity_v62(target).to(dtype=state_dtype)
+        )
         context = torch.cat(
             (source_tokens + self.source_type, target_tokens + self.target_type), dim=1
         )
-        time = self.time_input(torch.log1p(delta_seconds.float())[:, None])[:, None]
+        time_value = torch.log1p(delta_seconds.float())[:, None]
+        time = self.time_input(
+            time_value.to(dtype=self.time_input[0].weight.dtype)
+        )[:, None]
         queries = self.queries[None].expand(len(context), -1, -1) + time
         hidden, _ = self.attention(queries, context, context, need_weights=False)
         return ObjectEffectV62(value=self.output(hidden))
