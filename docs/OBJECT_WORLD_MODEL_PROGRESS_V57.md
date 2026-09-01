@@ -2010,3 +2010,29 @@ history/summary 为依据。E0 是在线 train telemetry；B/C/D 是 held struct
    point coordinates 上训练 support field。
 4. E1 Dynamics 改成 identity/persistence base 加 effect-gated residual，并强制 `z=0` 时 transport 为 identity、
    feature/geometry/lifecycle residual 全为零；完成新的 D probe 前不进行 E1 长训。
+
+### 15.16 V62 后续改造顺序与 C10k 契约
+
+**What changed**
+
+1. C 的正式复评 checkpoint 固定为 E0 step 10,000 immutable milestone。continuous-query 评测使用偶数
+   point tracks 编码、奇数 point tracks 解码，并增加“全部 tracks 编码、只在奇数 tracks 解码”的
+   full-context reference。
+2. C 分别报告 held-query 的 support BCE/soft-IoU、DINO/SigLIP cosine error、visibility BCE、lifecycle
+   cross-entropy，以及它们相对 compact baseline 和 full-context reference 的 recovery/ratio；不再用单个
+   `continuous_holdout_absolute_error` 代替 semantic 与 support 结论。
+3. 后续主线固定为：C10k 冻结 V62 结论；独立重构 teacher membership 并完成六源 corruption audit；teacher
+   通过后训练 encode-query/decode-query 分离的 codec；codec 通过后实现 persistence base 加
+   effect-gated residual Dynamics；以上全部通过后才整合新的完整预训练入口。
+
+**Why**
+
+step 2,500 的 C 已证明模型使用 query/carrier，但不能区分 unseen-query 失败究竟来自 semantic field 还是
+support/lifecycle；同时 B 和 D 已分别否定当前 teacher coherence 与 zero-effect Dynamics 契约，因此不能把三个
+未验证模块一起放进一次长训后再依赖总 loss 排障。
+
+**Impact**
+
+- item 2（旧 E1 长训）保持关闭；
+- 每一级只生成独立 audit/训练产物，不覆盖当前 E0 checkpoint；
+- 完整预训练代码只在 teacher、codec、Dynamics 三个结构门槛分别获得真实六源证据后交付。

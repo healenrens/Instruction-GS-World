@@ -66,13 +66,31 @@ def _field_total(state, decoded, frame):
 
 def _baseline_total(frame, covariance_floor):
     errors = compact_object_baseline_errors_v62(frame, covariance_floor)
-    return (
+    total = (
         errors["support_bce"]
         + errors["dino_cosine_error"]
         + errors["siglip_cosine_error"]
         + 0.25 * errors["visibility_bce"]
         + 0.25 * errors["lifecycle_cross_entropy"]
     )
+    return total, errors
+
+
+def _average(values):
+    return sum(values) / len(values)
+
+
+def _average_fields(values):
+    return {
+        name: _average([entry[name] for entry in values]) for name in values[0]
+    }
+
+
+def _positive_fraction(frame):
+    valid = frame["object_valid"][:, None].float()
+    return (frame["support"].float() * valid).sum() / valid.expand_as(
+        frame["support"]
+    ).sum().clamp_min(1.0)
 
 
 def _carrier_ablation(state, frame):
@@ -134,7 +152,14 @@ def evaluate_object_codec_structure_v62(model, observation):
     ]
     normal_totals = []
     baseline_totals = []
+    baseline_fields = []
+    full_context_holdout_totals = []
+    full_context_holdout_fields = []
     holdout_totals = []
+    holdout_fields = []
+    holdout_baseline_totals = []
+    holdout_baseline_fields = []
+    holdout_positive_fractions = []
     query_swap_totals = []
     all_scene_totals = []
     merge_all_totals = []
@@ -155,13 +180,42 @@ def evaluate_object_codec_structure_v62(model, observation):
         normal_decoded = output["decoded"][index]
         normal_total, _, _ = _field_total(normal_state, normal_decoded, frame)
         normal_totals.append(normal_total)
-        baseline_totals.append(_baseline_total(frame, model.config.covariance_floor))
+        baseline_total, baseline = _baseline_total(
+            frame, model.config.covariance_floor
+        )
+        baseline_totals.append(baseline_total)
+        baseline_fields.append(baseline)
 
         observed_frame = _slice_frame(frame, observed_indices)
         held_frame = _slice_frame(frame, held_indices)
+        full_context_decoded = model.decoder(
+            normal_state, held_frame["coordinates"]
+        )
+        full_context_total, full_context_errors, full_context_lifecycle = _field_total(
+            normal_state, full_context_decoded, held_frame
+        )
+        full_context_holdout_totals.append(full_context_total)
+        full_context_holdout_fields.append(
+            {
+                **full_context_errors,
+                "lifecycle_cross_entropy": full_context_lifecycle,
+            }
+        )
         held_state = model.codec(observed_frame)
         held_decoded = model.decoder(held_state, held_frame["coordinates"])
-        holdout_totals.append(_field_total(held_state, held_decoded, held_frame)[0])
+        held_total, held_errors, held_lifecycle = _field_total(
+            held_state, held_decoded, held_frame
+        )
+        holdout_totals.append(held_total)
+        holdout_fields.append(
+            {**held_errors, "lifecycle_cross_entropy": held_lifecycle}
+        )
+        held_baseline_total, held_baseline = _baseline_total(
+            held_frame, model.config.covariance_floor
+        )
+        holdout_baseline_totals.append(held_baseline_total)
+        holdout_baseline_fields.append(held_baseline)
+        holdout_positive_fractions.append(_positive_fraction(held_frame))
 
         query_state = model.codec(_query_swap(frame))
         query_decoded = model.decoder(query_state, frame["coordinates"])
@@ -193,34 +247,73 @@ def evaluate_object_codec_structure_v62(model, observation):
             normal_state if index == 0 else model.codec(_query_swap(frame))
         )
 
-    def average(values):
-        return sum(values) / len(values)
-
-    normal_total = average(normal_totals)
-    baseline_total = average(baseline_totals)
-    inside_change = average(inside_changes)
-    outside_change = average(outside_changes)
+    normal_total = _average(normal_totals)
+    baseline_total = _average(baseline_totals)
+    baseline = _average_fields(baseline_fields)
+    full_context_total = _average(full_context_holdout_totals)
+    full_context_fields = _average_fields(full_context_holdout_fields)
+    holdout_total = _average(holdout_totals)
+    holdout = _average_fields(holdout_fields)
+    holdout_baseline_total = _average(holdout_baseline_totals)
+    holdout_baseline = _average_fields(holdout_baseline_fields)
+    inside_change = _average(inside_changes)
+    outside_change = _average(outside_changes)
     valid = observation.object_valid.float()
     normal_identity = _identity_consistency(output["states"], valid)
     split_identity = _identity_consistency(split_states, valid)
     result = {
         "normal_absolute_error": normal_total,
         "compact_baseline_absolute_error": baseline_total,
-        "oracle_absolute_error": normal_total.new_zeros(()),
         "normal_gap_recovery": 1.0 - normal_total / baseline_total.clamp_min(1e-6),
-        "continuous_holdout_absolute_error": average(holdout_totals),
-        "continuous_holdout_ratio": average(holdout_totals)
+        "continuous_full_context_absolute_error": full_context_total,
+        "continuous_full_context_ratio_to_normal": full_context_total
         / normal_total.clamp_min(1e-6),
-        "query_swap_absolute_error": average(query_swap_totals),
-        "query_swap_error_increase": average(query_swap_totals) - normal_total,
-        "all_scene_absolute_error": average(all_scene_totals),
-        "all_scene_error_increase": average(all_scene_totals) - normal_total,
-        "merge_all_absolute_error": average(merge_all_totals),
-        "merge_all_error_increase": average(merge_all_totals) - normal_total,
-        "carrier_delete_absolute_error": average(carrier_delete_totals),
-        "carrier_delete_error_increase": average(carrier_delete_totals) - normal_total,
-        "carrier_swap_absolute_error": average(carrier_swap_totals),
-        "carrier_swap_error_increase": average(carrier_swap_totals) - normal_total,
+        "continuous_holdout_absolute_error": holdout_total,
+        "continuous_holdout_ratio_to_normal": holdout_total
+        / normal_total.clamp_min(1e-6),
+        "continuous_holdout_ratio": holdout_total / normal_total.clamp_min(1e-6),
+        "continuous_holdout_ratio_to_full_context": holdout_total
+        / full_context_total.clamp_min(1e-6),
+        "continuous_holdout_error_increase_over_full_context": holdout_total
+        - full_context_total,
+        "continuous_holdout_compact_baseline_absolute_error": holdout_baseline_total,
+        "continuous_holdout_gap_recovery": 1.0
+        - holdout_total / holdout_baseline_total.clamp_min(1e-6),
+        "continuous_holdout_support_gap_recovery": 1.0
+        - holdout["support_bce"]
+        / holdout_baseline["support_bce"].clamp_min(1e-6),
+        "continuous_holdout_semantic_gap_recovery": 1.0
+        - (holdout["dino_cosine_error"] + holdout["siglip_cosine_error"])
+        / (
+            holdout_baseline["dino_cosine_error"]
+            + holdout_baseline["siglip_cosine_error"]
+        ).clamp_min(1e-6),
+        "continuous_holdout_lifecycle_gap_recovery": 1.0
+        - holdout["lifecycle_cross_entropy"]
+        / holdout_baseline["lifecycle_cross_entropy"].clamp_min(1e-6),
+        "continuous_holdout_support_ratio_to_full_context": holdout["support_bce"]
+        / full_context_fields["support_bce"].clamp_min(1e-6),
+        "continuous_holdout_semantic_ratio_to_full_context": (
+            holdout["dino_cosine_error"] + holdout["siglip_cosine_error"]
+        )
+        / (
+            full_context_fields["dino_cosine_error"]
+            + full_context_fields["siglip_cosine_error"]
+        ).clamp_min(1e-6),
+        "continuous_holdout_positive_point_fraction": _average(
+            holdout_positive_fractions
+        ),
+        "query_swap_absolute_error": _average(query_swap_totals),
+        "query_swap_error_increase": _average(query_swap_totals) - normal_total,
+        "all_scene_absolute_error": _average(all_scene_totals),
+        "all_scene_error_increase": _average(all_scene_totals) - normal_total,
+        "merge_all_absolute_error": _average(merge_all_totals),
+        "merge_all_error_increase": _average(merge_all_totals) - normal_total,
+        "carrier_delete_absolute_error": _average(carrier_delete_totals),
+        "carrier_delete_error_increase": _average(carrier_delete_totals)
+        - normal_total,
+        "carrier_swap_absolute_error": _average(carrier_swap_totals),
+        "carrier_swap_error_increase": _average(carrier_swap_totals) - normal_total,
         "carrier_delete_inside_change": inside_change,
         "carrier_delete_outside_change": outside_change,
         "carrier_delete_locality_ratio": inside_change / outside_change.clamp_min(1e-6),
@@ -229,5 +322,23 @@ def evaluate_object_codec_structure_v62(model, observation):
         "split_by_time_identity_increase": split_identity - normal_identity,
         "object_valid_fraction": observation.object_valid.float().mean(),
     }
+    result.update(
+        {f"compact_baseline_{name}": value for name, value in baseline.items()}
+    )
+    result.update(
+        {
+            f"continuous_full_context_{name}": value
+            for name, value in full_context_fields.items()
+        }
+    )
+    result.update(
+        {f"continuous_holdout_{name}": value for name, value in holdout.items()}
+    )
+    result.update(
+        {
+            f"continuous_holdout_compact_baseline_{name}": value
+            for name, value in holdout_baseline.items()
+        }
+    )
     result.update({f"normal_{name}": value for name, value in output["parts"].items()})
     return result

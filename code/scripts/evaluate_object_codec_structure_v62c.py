@@ -197,7 +197,7 @@ def main():
         overall_accumulator.merge(accumulator)
     report = {
         "status": "completed",
-        "contract": "object_codec_structural_counterfactual_v62c",
+        "contract": "object_codec_structural_counterfactual_v62c_unseen_query_v2",
         "checkpoint_version": CHECKPOINT_VERSION,
         "architecture": ARCHITECTURE,
         "source_revision": args.source_revision,
@@ -209,6 +209,7 @@ def main():
         "world_size": context.world_size,
         "conditions": [
             "normal",
+            "full_context_held_query",
             "continuous_coordinate_holdout",
             "query_swap",
             "all_scene",
@@ -217,6 +218,19 @@ def main():
             "carrier_swap",
             "split_by_time",
         ],
+        "continuous_query_protocol": {
+            "encode_indices": "even point-track indices",
+            "decode_indices": "odd point-track indices",
+            "full_context_reference": "all point tracks encoded, odd indices decoded",
+            "target": "external teacher support, DINO, SigLIP, visibility, lifecycle",
+        },
+        "metric_semantics": {
+            "absolute_error": "support + DINO + SigLIP + 0.25 visibility + 0.25 lifecycle; lower is better",
+            "cosine_error": "one minus cosine similarity to the external teacher feature; lower is better",
+            "support_soft_iou": "soft intersection over union against external teacher support; higher is better",
+            "gap_recovery": "one minus model error divided by compact baseline error; higher is better",
+            "ratio_to_full_context": "half-track encoding error divided by all-track encoding error on identical odd queries; one is parity",
+        },
         "source_metrics": {
             name: accumulator.means()
             for name, accumulator in source_accumulators.items()

@@ -12,10 +12,13 @@ if [ -z "${SOURCE_REVISION:-}" ]; then
     SOURCE_REVISION="$(git -C "${ROOT}" rev-parse HEAD)"
   fi
 fi
-RUN_ID="${RUN_ID:-v62c_codec_structure_$(date +%Y%m%d_%H%M%S)_$$}"
+E0_RUN="${E0_RUN:-object_transition_v62_e0_seed17_f00082d}"
+E0_CHECKPOINT_STEP="${E0_CHECKPOINT_STEP:-10000}"
+printf -v E0_CHECKPOINT_FILE 'v62_e0_%07d.pt' "${E0_CHECKPOINT_STEP}"
+E0_CHECKPOINT="${E0_CHECKPOINT:-${RUNTIME_ROOT}/outputs/${E0_RUN}/${E0_CHECKPOINT_FILE}}"
+RUN_ID="${RUN_ID:-v62c_codec_structure_step${E0_CHECKPOINT_STEP}_$(date +%Y%m%d_%H%M%S)_$$}"
 OUT_ROOT="${OUT_ROOT:-${RUNTIME_ROOT}/outputs/v62_parallel/c_codec_structure/${RUN_ID}}"
 REPORT="${REPORT:-${OUT_ROOT}/object_codec_structural_eval.json}"
-E0_CHECKPOINT="${E0_CHECKPOINT:-${RUNTIME_ROOT}/outputs/object_transition_v62_e0_seed17_f00082d/v62_e0_0002500.pt}"
 
 export HF_HOME="${HF_HOME:-${RUNTIME_ROOT}/hf_cache}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${RUNTIME_ROOT}/.cache}"
