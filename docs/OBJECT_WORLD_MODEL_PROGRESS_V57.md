@@ -2036,3 +2036,30 @@ support/lifecycle；同时 B 和 D 已分别否定当前 teacher coherence 与 z
 - item 2（旧 E1 长训）保持关闭；
 - 每一级只生成独立 audit/训练产物，不覆盖当前 E0 checkpoint；
 - 完整预训练代码只在 teacher、codec、Dynamics 三个结构门槛分别获得真实六源证据后交付。
+
+### 15.17 C10k 结果与 consensus teacher 实验
+
+**What changed**
+
+1. W&B run `wdpiq9fa` 使用 E0 step 10,000 完成新版 C。normal absolute error 从 step 2,500 的
+   `0.4617` 降至 `0.3397`，normal semantic gap recovery 从 `0.2378` 升至 `0.4938`；但 half-track
+   unseen-query absolute error 从 `0.8401` 升至 `0.9360`。
+2. 在完全相同的 odd track queries 上，half-track encoding 相对 all-track full-context encoding 的总误差、
+   semantic error、support BCE 分别为 `2.86x/3.00x/2.05x`。unseen semantic/support gap recovery
+   分别为 `-0.6819/-0.6716`，六个数据源全部同向失败。
+3. 新 teacher candidate 不再使用旧 relation row 作为 object。它在前半段视频上用 frozen DINO、SigLIP
+   appearance 共识与 CoTracker motion/relative-geometry/covisibility 构建 signed affinity graph，从动态 seed
+   做两跳 soft diffusion；后半段视频只用于独立 coherence audit。
+
+**Why**
+
+C10k 证明继续优化原 objective 会提高输入 track reconstruction，同时恶化未输入位置的 object field；因此下一步
+必须先改变 membership target，而不是增加 E0 steps 或调整 reconstruction loss 权重。
+
+**Impact**
+
+- consensus teacher 在每个来源上与保持 membership 权重分布不变的 half-track roll corruption 比较 DINO、
+  SigLIP、motion 与 relative geometry 四项 held-suffix dispersion；
+- 单来源只有在至少 50% 样本可形成多-track membership 且四项 corruption margin 全为正时才通过；六源至少
+  `5/6` 通过才允许进入新 codec；
+- old same-seed one-hop teacher 同时作为只读对照，但不进入 candidate 构图或 held-suffix target。
