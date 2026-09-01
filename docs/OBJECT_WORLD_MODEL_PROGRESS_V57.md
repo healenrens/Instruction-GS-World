@@ -1942,3 +1942,71 @@ A/E0、B、C、D 的正式入口统一固定为单机 8 卡；B/C 按 rank 切�
   autocast 内仍由 PyTorch 选择 BF16 kernel，autocast 外则使用 FP32，不改变模型参数、checkpoint shape 或 loss；
 - `test_object_transition_v62.py` 增加 BF16 state/effect 离开 autocast 后依次调用 Posterior、Dynamics 和
   Decoder 的回归路径，覆盖 D 本次实际失败方式。
+
+### 15.15 E0/B/C/D 联合结果（2026-09-01）
+
+本节以 W&B 项目 `healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world` 的完整 run
+history/summary 为依据。E0 是在线 train telemetry；B/C/D 是 held structural audit/runtime probe，证据层级不同。
+
+#### E0：继续学习 semantic，但 support 已平台化
+
+- run `24jo2k1m` 在 2026-09-01 12:18 CST 仍有 heartbeat；读取时最新 step 7,640，最新 checkpoint
+  step 7,500，checkpoint 已迁移到提交 `311bc28919ac2ccea620b98d7f1fe4b8c7d7d349`；
+- step 3k--4k 到 7k--7.64k：loss `0.4246 -> 0.3629`，semantic gap recovery
+  `0.3453 -> 0.4642`，DINO cosine error `0.1424 -> 0.1169`，说明 appearance/semantic compression
+  仍在缓慢改善；
+- 同期 support gap recovery 只从 `0.0772` 到 `0.0860`，support soft-IoU 约
+  `0.2824 -> 0.2864`。最近 25 个点的 support gap slope 为每 1k steps `-0.0606`，已经不是持续改善；
+- lifecycle gap recovery 约 `0.49`，identity cosine error 已降到约 `9e-4`；carrier effective count
+  升到约 `15/16`，但这只证明 capacity 被使用，不能证明 carrier 是 semantic object；
+- covariance minimum eigenvalue 从 3k--4k 的 `0.0444` 降到 7k 后的 `0.0131`，condition number
+  从 `6.80` 升到 `9.76`；当前 finite，但 carrier support 正持续变尖，需要继续记录而不能解释为 object quality。
+
+#### B：teacher membership 的 object coherence 很弱
+
+- run `5j5b72qs`，六源各 32 个 held items，全部 object-valid；teacher 选择的 support 平均只占 point
+  queries 的 `5.66%`，effective tracks 为 `14.77`，track persistence 为 `0.9898`；
+- 相比保持 membership 规模不变的 half-track-roll corruption，teacher 的 DINO/SigLIP dispersion margin
+  仅 `0.00153/0.00152`，same-relation margin `0.0165`，motion dispersion margin `0.00057`；
+- 这些总体正 margin 主要由 Bridge 拉动。RoboTwin 的 motion 与 same-relation margin 为负，HY 的
+  DINO/SigLIP margin 为负，RoboMind 的 DINO/SigLIP margin 也接近零或为负；
+- 因而 teacher 具有高 visibility/persistence，但在多数来源上没有稳定证明“选中的 tracks 比同规模错配 tracks
+  更像同一个 object”。E0 当前最多能声称学习 teacher-selected local track group，不能声称 semantic object。
+
+#### C：codec 使用了 object/query，但未形成可靠 continuous object field
+
+- run `1ksunj26` 使用 E0 step 2,500 checkpoint；held normal absolute error `0.4617`，compact baseline
+  `0.6011`，gap recovery `22.4%`；semantic gap recovery `23.8%`，support gap recovery仅 `7.0%`；
+- query swap、all-scene、merge-all、carrier swap 分别使 absolute error 增加
+  `0.6543/1.4772/1.3194/0.7214`；split-by-time 使 identity error 从 `0.0349` 升到 `0.3103`。
+  这证明 codec 没有忽略 teacher query、carrier 或时间 identity；
+- 删除 object-support mass 最大的一个 carrier 后，inside change `0.0674`、outside change `0.00110`，
+  locality ratio `69.5`。这是 compositional locality 的正证据，但单 carrier 删除只使总 error 增加 `0.0191`；
+- 用一半 tracks 编码、在未输入的另一半 tracks 上解码时，error 是 normal 的 `1.85x`，且六个来源均为
+  `1.59x--2.11x`。因此当前 decoder 主要拟合已观察 query/support，尚不能稳定表示连续 object extent。
+
+#### D：runtime 正确，但当前 Dynamics 的结构语义不成立
+
+- run `j4igr1h4` 使用 8 卡、E0 step 2,500 checkpoint 完成 3 次真实 optimizer steps；unused parameters
+  为 `0`，rank parameter sync difference 为 `0`，future swap 使 Posterior RMS 改变 `0.0682`，zero-effect
+  future-swap difference 为 `0`，identity exact-copy difference 为 `0`；
+- effect effective rank `13.31`、batch variance `0.00819`，Posterior 在该 probe 中没有立即 collapse；
+- 但 correct/zero/shuffled/persistence absolute error 分别为
+  `1.7524/1.7495/1.7534/0.5173`。correct 相对 persistence 的 gain 为 `-1.2350`，相对 zero 为
+  `-0.00285`，相对 shuffled 只有 `0.00105`；
+- target change magnitude 只有 `0.1156`，correct 与 zero prediction change magnitude 却分别为
+  `1.0979/1.0945`，约放大 `9.5x`；transport entropy `2.77197` 几乎等于 16-way uniform 的
+  `ln(16)=2.77259`；
+- 这不是“三步没训好”可以完全解释的问题：zero effect 仍触发大幅变化且 transport 初始为近均匀混合，说明
+  当前 Dynamics 没有结构性满足 `zero effect = persistence`。在修复该契约前不得启动 E1 长训。
+
+#### 联合决策
+
+1. E0 只继续到 step 10,000 milestone，用于完成学习曲线和新版 held C；没有证据支持把 20k 当作
+   object-state promotion run。
+2. 第一优先级是重构 teacher membership，使 selected tracks 在至少 5/6 来源上同时优于 corruption 的
+   appearance、motion 与 geometry coherence；否则 student 只能精确拟合错误 target。
+3. E0 objective 必须加入 encode-query/decode-query 分离的 continuous holdout supervision；不能继续只在输入
+   point coordinates 上训练 support field。
+4. E1 Dynamics 改成 identity/persistence base 加 effect-gated residual，并强制 `z=0` 时 transport 为 identity、
+   feature/geometry/lifecycle residual 全为零；完成新的 D probe 前不进行 E1 长训。
