@@ -22,9 +22,9 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export PYTHONPATH="${RUNTIME_ROOT}/third_party/co-tracker:${ROOT}/code:${PYTHONPATH:-}"
 mkdir -p "${OUT_ROOT}" "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}"
 
-echo "[v62b] run_id=${RUN_ID} world=8 report=${REPORT}"
+echo "[v62b] run_id=${RUN_ID} world=4 report=${REPORT}"
 cd "${ROOT}"
-exec "${TORCHRUN}" --standalone --nproc_per_node 8 \
+exec "${TORCHRUN}" --standalone --nproc_per_node 4 \
   "${ROOT}/code/scripts/audit_teacher_target_structure_v62b.py" \
   --data_index "${DATA_INDEX:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json}" \
   --dino_checkpoint "${DINO_CHECKPOINT:-${RUNTIME_ROOT}/models/dinov2_vitl14/model.safetensors}" \

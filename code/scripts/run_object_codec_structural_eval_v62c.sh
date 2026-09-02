@@ -26,9 +26,9 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export PYTHONPATH="${RUNTIME_ROOT}/third_party/co-tracker:${ROOT}/code:${PYTHONPATH:-}"
 mkdir -p "${OUT_ROOT}" "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}"
 
-echo "[v62c] run_id=${RUN_ID} world=8 checkpoint=${E0_CHECKPOINT} report=${REPORT}"
+echo "[v62c] run_id=${RUN_ID} world=4 checkpoint=${E0_CHECKPOINT} report=${REPORT}"
 cd "${ROOT}"
-exec "${TORCHRUN}" --standalone --nproc_per_node 8 \
+exec "${TORCHRUN}" --standalone --nproc_per_node 4 \
   "${ROOT}/code/scripts/evaluate_object_codec_structure_v62c.py" \
   --checkpoint "${E0_CHECKPOINT}" \
   --data_index "${DATA_INDEX:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json}" \
