@@ -68,6 +68,9 @@ def held_motion_field_audit_v66(bundle, sequence_index, config):
     target_coordinates = bundle.evidence.coordinates.index_select(1, target_index)
     target_visibility = bundle.evidence.visibility.index_select(1, target_index)
     coordinates["oracle_track"] = target_coordinates
+    held_membership = (binding.selected_holdout > 0.0) & bundle.evidence.visibility[
+        :, split - 1
+    ]
     dino_identity, dino_identity_valid = _prefix_identity(
         bundle.observation.dino,
         bundle.evidence.visibility,
@@ -95,7 +98,7 @@ def held_motion_field_audit_v66(bundle, sequence_index, config):
             identity_valid,
             dino_prediction,
             siglip_prediction,
-            binding.selected_holdout,
+            held_membership,
             bundle.evidence.reliability,
             config.minimum_holdout_tracks,
         )
@@ -112,7 +115,7 @@ def held_motion_field_audit_v66(bundle, sequence_index, config):
             coordinates[name],
             target_coordinates,
             target_visibility,
-            binding.selected_holdout,
+            held_membership,
             bundle.evidence.reliability,
         )
     base_valid = binding.selected_valid & visual_valid["persistence"]
@@ -133,6 +136,7 @@ def held_motion_field_audit_v66(bundle, sequence_index, config):
         "high_change_score": visual["persistence"],
         "component_effective_track_count": binding.selected_effective_track_count,
         "holdout_track_count": (binding.selected_holdout > 0.0).sum(dim=-1).float(),
+        "source_visible_holdout_track_count": held_membership.sum(dim=-1).float(),
         "component_reliability": reliability_mean,
         "translation_prefix_error": correct_fit.translation_prefix_error,
         "affine_prefix_error": correct_fit.affine_prefix_error,
@@ -179,6 +183,7 @@ def held_motion_field_audit_v66(bundle, sequence_index, config):
         "high_change_score",
         "component_effective_track_count",
         "holdout_track_count",
+        "source_visible_holdout_track_count",
         "component_reliability",
         "persistence_visual_error",
         "persistence_coordinate_error",

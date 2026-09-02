@@ -42,15 +42,25 @@ def synthetic_evidence(device):
     base = torch.stack((radius * torch.cos(angle), radius * torch.sin(angle)), dim=-1)
     base = base[None].expand(batch, -1, -1).clone()
     phase = torch.arange(batch, device=device).float() * 0.55
-    centers = torch.tensor(
-        [[-0.16, 0.00], [0.10, 0.14], [0.10, -0.14]], device=device
-    )
-    distance = (base[:, :, None] - centers[None, None]).square().sum(dim=-1)
-    radial = torch.softmax(-distance / (2.0 * 0.11**2), dim=-1)
+    core_base = base[0, ::2]
+    core_relative = core_base - core_base.mean(dim=0, keepdim=True)
+    selected = [0]
+    minimum_distance = (core_relative - core_relative[0]).square().sum(dim=-1)
+    for _ in range(2):
+        minimum_distance[selected] = -1.0
+        index = int(minimum_distance.argmax().item())
+        selected.append(index)
+        distance = (core_relative - core_relative[index]).square().sum(dim=-1)
+        minimum_distance = torch.minimum(minimum_distance.clamp_min(0.0), distance)
+    centers = core_relative[selected]
+    mode_scale = core_relative.square().sum(dim=-1).mean().sqrt() * 0.75
+    relative = base - base[:, ::2].mean(dim=1, keepdim=True)
+    distance = (relative[:, :, None] - centers[None, None]).square().sum(dim=-1)
+    radial = torch.softmax(-distance / (2.0 * mode_scale**2), dim=-1)
     coefficients = []
     for offset in (0.0, 2.1, 4.2):
         coefficients.append(
-            0.035
+            0.020
             * torch.stack(
                 (
                     torch.cos(phase + offset),
@@ -81,6 +91,7 @@ def synthetic_evidence(device):
 def masked_error(prediction, target, membership):
     weight = membership[:, None].float()
     error = (prediction.float() - target.float()).norm(dim=-1)
+    weight = weight.expand_as(error)
     return (error * weight).sum(dim=(1, 2)) / weight.sum(dim=(1, 2))
 
 
