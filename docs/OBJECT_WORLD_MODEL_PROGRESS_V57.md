@@ -8,7 +8,7 @@
 > V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
 > V62 B/C/D structural audit 实现提交：`2ad1158084ff0e8b4070f43c6721261df1884485`（静态验证，待服务器执行）
 > 上次账本提交：`3f677c5e4cc59b5a1169fcaa8e3611b258952f96`
-> 当前实验：V64 hard object-bound teacher 已拒绝；V65 在 G0 检验 native multi-track transition objective，禁止训练 Student 或 Dynamics
+> 当前实验：V65 native multi-track audit 已拒绝 shared-affine transition；下一项仍在 G0，只比较可组合 object motion-field parameterization
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
 > 远端运行与产物根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/`  
 > W&B：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`
@@ -2222,3 +2222,56 @@ measurement 正确。
   target，不通过放宽阈值、增加 steps 或调 loss weight 补救；
 - 真实四卡 audit 返回前，状态固定为 `implemented, awaiting real-data objective falsification`。下一步仅执行
   structural verifier 与四卡六源 audit；不得启动 Student、codec 或 Dynamics 长训。
+
+### 15.22 V65 四卡六源结果与 shared-affine 判决
+
+**Execution**
+
+- W&B run：`dhfr98xu`，名称
+  `reliable_native_transition_v65_seed17_20260902_120848`；代码提交
+  `ba000d46e8d356bf723fcfcd49e66a43053a7e6d`；run state 为 `finished`，程序状态为 `completed`；
+- 单机 `4` 卡、六个来源、每源 `32` 个 held clips，共 `192` 个样本；没有 checkpoint、训练 step 或历史模型；
+- 最终程序判决：`reject_native_reliable_transition_objective`；通过来源为 AgiBot、RoboMind，共 `2/6`，低于
+  `5/6` 晋级门槛。
+
+**Evidence**
+
+1. V65 明显修复了 V64 的 coverage 问题。总体 audit-valid fraction 从 V64 的 `0.1875` 提高到
+   `0.57292`；AgiBot、Droid、HY、RoboMind 分别达到 `0.75/0.6875/0.78125/0.5`。Bridge 和 RoboTwin
+   仍只有 `0.40625/0.3125`。有效 component 平均包含 `11.95` effective tracks，并保留 `6.32` 条
+   holdout tracks；这证明 native-resolution multi-anchor evidence 和 multi-track core 能在真实数据上形成更广的
+   可审计 component。
+2. Tracker reliability 不是主要失败项：有效 component 的平均 reliability 为 `0.7580`，primary/relay
+   normalized disagreement 为 `0.00233`。这些数字只代表 tracker 内部一致，不代表外部位置 GT。
+3. Component 与 transition 具有 specificity。正确 core 相比 spatially rolled core 的 overall future visual
+   margin 为 `+0.02710`；正确样本 transition 相比 shuffled sample 的 margin 为 `+0.04413`。除 Droid 的
+   rolled-core margin 为 `-0.00023` 外，有 joint coverage 的 source 基本均为正。这说明 multi-track binding 没有
+   完全退化为任意局部点集，且不同 clip 的 transition 不是可互换常数。
+4. 但核心目标失败：correct/persistence/oracle-track future visual error 分别为
+   `0.09117/0.08814/0.07261`。correct 相比 persistence 的 gain 为 `-0.00303`，即 shared affine transition
+   整体不如不移动。AgiBot、RoboMind 和 Bridge 有正 gain `+0.00176/+0.00048/+0.00969`；Droid、HY 和
+   RoboTwin 为 `-0.00850/-0.00358/-0.02323`。
+5. RoboTwin 是最明确的反例：oracle track 相比 persistence 留有 `0.01864` visual headroom，但 affine correct
+   比 persistence 还差 `0.02323`，coordinate gain 也为 `-0.01680`。这不能解释成“视频基本静止”，而是当前
+   shared affine parameterization 对该来源的 object motion 给出了错误外推。
+6. Droid 与 HY 的 oracle headroom 只有 `0.00225/0.00092`，说明它们的大量有效样本在当前 `100--400ms`
+   尺度上几乎没有可由 local semantic feature 观察到的变化。把这些样本与 motion-active transition 混合平均，
+   会让 persistence gate 同时测量动态建模能力和数据中的静态比例；下一轮必须同时报告全量与 image-derived
+   motion-active strata，不能只替换总体均值。
+7. Raw-track oracle 明显优于 correct affine，说明被 reliability 选中的 raw trajectories 含有可用 future visual
+   correspondence；但 oracle 仍受 full-clip appearance reliability 的选择影响，只能作为 model-class ceiling，
+   不能写成 CoTracker 是真实运动 GT。
+
+**Decision**
+
+- 保留：native RGB 数据路径、overlapping tiled DINO/SigLIP、multi-anchor relay reliability、multi-track core、
+  fit/holdout 分离、future-image visual evaluator 和 joint-valid corruption aggregation；
+- 拒绝：一个 object 只用单个 shared 2D affine map 表示 `100/200/400ms` transition。该参数化即使 coverage
+  足够，也不能把 raw trajectory 的视觉对应关系转换为优于 persistence 的 dynamic target；
+- 不启动 Student、codec、latent effect 或 Dynamics 训练，也不通过增加样本、延长训练或调整 loss weight继续
+  V65；
+- 下一项仍属于 G0 model-class audit：在完全相同的 component、prefix/holdout 和 future-image evaluator 下，
+  比较 translation、shared affine 与“global motion + 少量 object-local residual modes”的可组合 motion field。
+  residual modes 必须由 prefix core tracks 共同估计，并在未参与拟合的 holdout tracks 上预测；禁止退化为每条
+  track 独立外推。评测同时报告 all-valid 与 image-derived motion-active strata。只有新的 object-level motion
+  field 在至少 `5/6` 来源上优于 persistence 和两类 corruption，才允许进入可学习 soft binding。
