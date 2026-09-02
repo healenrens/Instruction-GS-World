@@ -2275,3 +2275,58 @@ measurement 正确。
   residual modes 必须由 prefix core tracks 共同估计，并在未参与拟合的 holdout tracks 上预测；禁止退化为每条
   track 独立外推。评测同时报告 all-valid 与 image-derived motion-active strata。只有新的 object-level motion
   field 在至少 `5/6` 来源上优于 persistence 和两类 corruption，才允许进入可学习 soft binding。
+
+### 15.23 V66 G0 大样本 object motion-field 方法审计
+
+**Record**
+
+- 日期：2026-09-02；branch：`codex/object-motion-field-g0-v66`；实现提交：
+  `293482aad349195a642f61d87b909b77d61787ed`；W&B run：待执行；checkpoint：无；
+- 当前仍是 G0 Objective validity，不训练 Student、codec、latent effect 或 Dynamics，也不继承 V62--V65
+  checkpoint；V65 的 native image、reliable multi-track binding 和 core/holdout evaluator 是冻结的实验边界；
+- 单一问题：V65 的失败究竟来自“object motion 根本不能由 prefix tracks 预测”，还是来自“一个 shared affine
+  容量不足”。V66 只改变 transition model class，不改变数据、object candidate 或 primary target。
+
+**Method**
+
+1. 对每个样本和每个 `100/200/400ms` horizon 同时拟合四个有严格包含关系的模型：persistence、shared
+   translation、shared affine、以及 `shared affine + 3 object-local RBF residual modes`。三个 local modes 由
+   prefix core tracks 的 object-relative positions 决定，系数由所有 core tracks 共同估计；不存在 per-track
+   head、track ID embedding 或 future-conditioned parameter。
+2. 拟合只读取 clip 前半段的 core tracks。主评估只使用没有参与拟合、且在预测起点实际可见的 holdout tracks；
+   真实 future tracker coordinates 只计算 auxiliary coordinate error，主判据仍是预测位置处的 future native-image
+   DINO/SigLIP local feature error。
+3. 反事实包含 spatially rolled core 和 same-batch shuffled sample field。每个 margin 都使用 candidate 与
+   corruption 的联合有效集；如果某个 corruption 没有足够有效样本，该项明确判为证据不足和失败，不会以零误差
+   或缺失字段进入平均。
+
+**Sampling and statistics**
+
+- held clips 从每个来源 `32` 提高到 `256`，六源共 `1536` 个样本；固定 `10` 帧、`100ms` temporal step，
+  使用单机 `4` 卡前台执行；这不是训练 batch 或超参数搜索；
+- 每个 source 同时报告 all-valid 与 high-change strata。high-change 定义为该 source 中、在 held future native
+  image 上 persistence visual error 的上半区；选择只依赖 baseline，不读取 proposed motion-field error。该集合
+  表示“图像观测上 persistence 明显失配”，不能被解释成物理运动 GT；
+- translation/affine/field 相对 persistence，以及 field 相对 translation/affine/rolled/shuffled 的 paired
+  difference 均使用 `2000` 次 bootstrap 给出 95% CI。每个 high-change 判据至少需要 `32` 个 joint-valid
+  observations；总样本增加与 CI 同时用于降低 V65 每源 32 条可能造成的方差和 source 偏差。
+
+**Pre-registered decision**
+
+- 单个 source 必须满足：audit-valid fraction 至少 `0.5`；high-change joint-valid 样本至少 `32`；all-valid
+  motion field 不差于 persistence；high-change 上 field 相对 persistence、affine、rolled core 和 shuffled
+  sample 的 95% CI 下界全部大于零；
+- 六源至少 `5/6` 通过才晋级 `object_motion_field_g0`。失败后不通过增加 mode 数、调 ridge、改变 strata 或延长
+  运行补救；结果将直接决定是进入可学习 soft object binding，还是拒绝当前 tracker-derived object-transition
+  objective；
+- translation 与 affine 保留为解释性 nested baselines。只有 field 同时超过它们和错误 object/sample
+  corruption，才能说明增益来自 object-local dynamic structure，而不是更大的坐标回归器。
+
+**Implementation and current evidence**
+
+- 新增独立 V66 config、compact motion-field fitter、held audit、分层 bootstrap 汇总、synthetic structural
+  verifier、immutable deploy 和四卡前台 launcher；runtime release 不访问 Git/GitHub，不产生训练 checkpoint；
+- `python3 -m py_compile`、Ruff、shell syntax 与 `git diff --check` 已通过；本机没有安装 PyTorch，且本轮到
+  `10.66.0.39:8600` 的连接在认证前被远端关闭，因此 synthetic numerical verifier 与真实四卡 audit 尚未执行；
+- 当前状态固定为 `implemented, statically verified, awaiting four-GPU structural and real-data audit`。服务器
+  返回 synthetic verifier 与 W&B 六源结果前，不声称 motion field 有效，也不启动任何下游训练。
