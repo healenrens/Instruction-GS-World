@@ -2063,3 +2063,32 @@ C10k 证明继续优化原 objective 会提高输入 track reconstruction，同�
 - 单来源只有在至少 50% 样本可形成多-track membership 且四项 corruption margin 全为正时才通过；六源至少
   `5/6` 通过才允许进入新 codec；
 - old same-seed one-hop teacher 同时作为只读对照，但不进入 candidate 构图或 held-suffix target。
+
+### 15.18 V63 consensus teacher 审计结果
+
+**What changed**
+
+1. W&B run `jssoxex6` 在 8 卡上正常完成六源 held audit，运行状态为 `finished`，程序报告状态为
+   `completed`；这不是启动失败或运行时崩溃。
+2. candidate 在六个来源上都能构造有效 membership，总体 `candidate_valid=1.0`，audit valid fraction 为
+   `0.9583`；prefix/suffix membership cosine error 为 `0.00446`，说明两段独立时间窗口生成的 membership
+   数值上稳定。
+3. 但 candidate 相比 old same-seed one-hop teacher 的 DINO、SigLIP、motion、relative geometry error
+   improvement 分别为 `-0.04775/-0.01889/-0.00326/-0.00100`。四项全部为负，说明两跳 consensus
+   diffusion 扩张后的 component 比旧 target 更不一致。
+4. 对 half-track roll corruption，candidate 的总体 DINO、SigLIP、geometry margin 为正，但 motion margin 为
+   `-0.000134`；按单来源严格判据，只有 RoboTwin 四项 margin 全为正，最终 `passing_source_count=1/6`，低于
+   要求的 `5/6`。
+
+**Why**
+
+低 prefix/suffix disagreement 只证明 membership 构造可重复，不证明它对应 object。两跳 diffusion 把 seed
+邻域稳定地扩张到了 appearance 或共见相似、但 motion/geometry 不属于同一 persistent object 的 tracks；Droid
+甚至在四项 corruption margin 上全部失败。由于 audit coverage 充足，失败不能归因于样本不足或 tracker 无输出。
+
+**Impact**
+
+- V63 决策固定为 `reject_consensus_teacher`，不重跑、不延长、不通过放宽阈值进入 codec；
+- 第 3 项 teacher membership 继续保持进行中，第 4 项 codec 与第 5 项 Dynamics 保持关闭；
+- 下一版 teacher 必须避免无约束 graph diffusion，以可证伪的 object-bound transition consistency 作为 component
+  合并依据，并继续使用六源 held corruption audit 决定是否晋级。
