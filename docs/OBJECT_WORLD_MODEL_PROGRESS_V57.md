@@ -2092,3 +2092,28 @@ C10k 证明继续优化原 objective 会提高输入 track reconstruction，同�
 - 第 3 项 teacher membership 继续保持进行中，第 4 项 codec 与第 5 项 Dynamics 保持关闭；
 - 下一版 teacher 必须避免无约束 graph diffusion，以可证伪的 object-bound transition consistency 作为 component
   合并依据，并继续使用六源 held corruption audit 决定是否晋级。
+
+### 15.19 V64 object-bound transition teacher 实现契约
+
+**What changed**
+
+1. V64 删除 pairwise graph diffusion。每个 component 从 persistent motion-active seed 出发，其他 track 必须与
+   seed 存在直接 DINO、SigLIP、covisibility、locality、rigidity 和 motion 一致性，不能通过中间 track 传递加入。
+2. Membership 在前半段视频上分别拟合 `100/200/400ms` 的 component-level affine residual-flow model，并只保留
+   在所有可用 horizon 上共同成立、且至少包含四个可见 tracks 的 components；object components、scene 与
+   unknown 显式分流，单个 track 最多属于一个 object component。
+3. 后半段独立报告 absolute shared-transition residual、persistence gain、DINO/SigLIP/motion/geometry dispersion，
+   并执行 half-track roll、same-source sample swap、alternate-component merge 和 old one-hop 对照。
+
+**Why**
+
+V63 已证明两跳 affinity 可以生成跨时间稳定但 motion/geometry 错误的 membership；V64 改为要求一个 component
+能够被同一个紧凑 transition model 联合解释，使 teacher 的定义与后续 object Dynamics 使用的变化单位一致。
+
+**Impact**
+
+- V64 是六源 teacher 晋级审计，不训练 codec、Student 或 Dynamics，也不读取历史模型 checkpoint；
+- 只有至少 `5/6` source 同时通过 corruption、persistence 和 old one-hop 对照才进入 cross-query compositional
+  codec；
+- 若 V64 失败，停止继续设计 hard pseudo-object teacher，转向由 held-track prediction 决定 assignment 的 latent
+  cross-fitted binding。
