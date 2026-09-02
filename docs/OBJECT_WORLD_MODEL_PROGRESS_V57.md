@@ -2118,3 +2118,41 @@ V63 已证明两跳 affinity 可以生成跨时间稳定但 motion/geometry 错�
   codec；
 - 若 V64 失败，停止继续设计 hard pseudo-object teacher，转向由 held-track prediction 决定 assignment 的 latent
   cross-fitted binding。
+
+### 15.20 V64 四卡 held audit 结果
+
+**Execution**
+
+- W&B run `2sa91010` 使用提交 `f052fed17c6f50d285c7b088368eb735fb8ababe`、单机 4 卡和每源 32 个
+  held clips 正常完成；run state 为 `finished`，程序状态为 `completed`，实际 `world_size=4`；
+- 最终决策为 `reject_object_bound_teacher`，`passing_source_count=0/6`，不得进入 codec 或 Dynamics 训练。
+
+**Evidence**
+
+1. 在 audit-valid 子集上，component-level shared transition 确实包含变化信号：总体 residual 为 `0.20764`，
+   persistence error 为 `0.66593`，即 residual 相对 persistence 降低约 `68.8%`；old one-hop residual 为
+   `0.35922`，V64 相对降低约 `42.2%`。DINO、SigLIP、motion 和 relative-geometry dispersion 也都优于
+   old one-hop。
+2. 该信号覆盖面不足：总体 candidate-valid fraction 只有 `0.25`，最终 audit-valid fraction 只有 `0.1875`，
+   低于 `0.5` 门槛。各 source audit-valid fraction 为 RoboTwin `0.375`、Bridge `0.34375`、AgiBot
+   `0.1875`、RoboMind `0.15625`、Droid `0.0625`、HY `0`；HY 的 32 个样本均未形成有效 component。
+3. 有效 component 平均约 `5.41` 个 tracks，但总体 unknown fraction 为 `0.4661`。这说明 direct affinity 与
+   三个 horizon 的共同 affine consistency 只保留了少量容易解释的局部轨迹，尚不能形成广泛 object state。
+4. half-track roll corruption 基本没有被稳定区分：总体 shared-transition residual margin 为 `-0.00064`，
+   SigLIP margin 为 `-0.00005`；RoboTwin、Droid 等 source 也出现负 margin。因此即使在有效子集上，当前
+   membership 仍未证明是 object-specific，而可能只是易于同一局部 affine model 拟合的小轨迹集合。
+5. same-source sample-swap 指标存在独立实现缺陷：swap 可能把另一个样本的 invalid/zero membership 移入当前
+   audit-valid 样本，但 accumulator 只使用原 candidate 的 valid mask，导致 zero residual 被当作更好结果。
+   所以总体 swap residual margin `-0.07069` 不能解释为错误 sample 的 transition 更准确；后续 evaluator 必须
+   对 candidate 与 corruption 的联合有效集聚合，并单独报告 corruption coverage。
+
+**Decision**
+
+- V64 证明“shared transition residual 可以作为 object binding 的训练信号”，但否定了“先用 hard direct-seed
+  规则产生通用 pseudo-object teacher”的路线；不能通过降低最少 track 数、放宽 `0.5` coverage gate 或增加
+  样本数来晋级；
+- 下一主线是 latent cross-fitted binding：prefix-only encoder 产生 soft assignment，prefix transition 拟合与
+  held-suffix prediction 直接优化 assignment；scene/unknown 保留独立出口，hard V64 membership 只作为诊断，
+  不再作为训练 GT；
+- 在实现新 binding 前，先修正 corruption 的 joint-valid aggregation。该修正只保证评测语义正确，不改变 V64
+  的低 coverage 与 roll falsification 失败结论。
