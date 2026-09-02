@@ -1,13 +1,14 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-08-31
+> 更新日期：2026-09-02
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/v62-structural-audits`
+> 当前开发分支：`codex/reliable-native-object-transition-v65`
+> 当前实现提交：`a1375111e44f4edf63a1839581f4b47c4b8b7dce`（V65 native reliable transition audit；待真实四卡审计）
 > 当前已验证代码提交：`f00082d7678f24dd7323ebcb789ef40fca7c0654`（E0 real-teacher GPU verifier）
 > V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
 > V62 B/C/D structural audit 实现提交：`2ad1158084ff0e8b4070f43c6721261df1884485`（静态验证，待服务器执行）
 > 上次账本提交：`3f677c5e4cc59b5a1169fcaa8e3611b258952f96`
-> 当前实验：V61 统一表征充分性复评已完成且未通过 G2；下一项为第 15 节 V62 dynamic-objective 实验方案
+> 当前实验：V64 hard object-bound teacher 已拒绝；V65 在 G0 检验 native multi-track transition objective，禁止训练 Student 或 Dynamics
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
 > 远端运行与产物根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/`  
 > W&B：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`
@@ -2156,3 +2157,68 @@ V63 已证明两跳 affinity 可以生成跨时间稳定但 motion/geometry 错�
   不再作为训练 GT；
 - 在实现新 binding 前，先修正 corruption 的 joint-valid aggregation。该修正只保证评测语义正确，不改变 V64
   的低 coverage 与 roll falsification 失败结论。
+
+### 15.21 V65 native reliable multi-track transition objective
+
+**Record**
+
+- 日期：2026-09-02；branch：`codex/reliable-native-object-transition-v65`；实现 commit：
+  `a1375111e44f4edf63a1839581f4b47c4b8b7dce`；W&B run：待执行；checkpoint：无；
+- 当前 Gate：G0 Objective validity。V65 是冻结 teacher/runtime 的六源 held audit，不训练 Student、codec、
+  latent effect 或 Dynamics，不读取任何历史模型 checkpoint；
+- 单一假设：一个 object transition 必须由多条可靠 track 在 prefix 中共同支持，并且只用这些 core tracks 拟合的
+  transition 应在未参与拟合的 tracks 上，命中 future native image 中更相符的局部视觉内容。若它不能优于
+  persistence、错误 core 和其他样本 transition，则该 dynamic target 不成立。
+
+**What changed**
+
+1. 数据增加 `preserve_native_rgb` 路径。原始 RGB 不再进入旧的整帧 `224/518` square resize；异分辨率样本只在
+   batch 中做右侧和底部 zero padding，并保留每个样本自己的 `native_image_hw`。tracker、tile token 和 local
+   pooling 均在每个样本自己的 native 坐标系内计算，padding 不改变运动尺度。
+2. Frozen DINOv2-L 与 SigLIP 不再对整张高分辨率图像做一次大压缩，而是在原图上使用 `224` pixel overlapping
+   tiles、`168` pixel stride。point observation 使用半径 `14/28/56` pixel 的离散近邻 token attention；不使用
+   单点 bilinear feature sampling，也不把 patch index 当作 object GT。
+3. CoTracker 只提供 noisy geometry measurement。每张图使用 `16x16` grid，并从 clip 起点和中点分别发出 queries；
+   每条 primary track 又在后续 relay frame 重新查询。primary/relay disagreement、joint visibility 与跨时
+   DINO/SigLIP appearance consistency 共同形成 reliability。低 reliability track 不能进入 component。
+4. V64 的 single-seed direct component 被替换为 multi-track core：proposal 只用于找到候选邻域，最终 core 由候选
+   tracks 间的 mutual affinity 共同选择。默认 candidate pool 为 `12`、core 为 `6`；component membership 必须
+   同时通过 absolute affinity floor 和 core consensus，不能因为所有 affinity 同样接近零而被相对阈值误收。
+5. `100/200/400ms` transition 使用 reliability-weighted Huber IRLS 拟合完整 2D affine map。fit 只读取 prefix
+   core tracks；每个 component 至少保留 `2` 条非 core holdout tracks，不能把参与拟合的点重新作为验证点。
+6. 主要 evaluator 不再把 CoTracker future flow 当 GT。prefix identity 与预测坐标处的 future native-image
+   DINO/SigLIP local features 比较；future tracker coordinate error 只保留为 tracker-dependent auxiliary
+   diagnostic。persistence、spatially rolled core 和 same-batch shuffled transition 都在各自 joint-valid 子集上
+   聚合，修复 V64 invalid corruption 被当作零误差的问题。
+
+**Execution contract**
+
+- 数据：`/mnt/pfs/public/xuhaoming/instruct_gs_world/data/multisource_real_robot_video_v53/index.json`，六个来源，
+  held group partition，默认每源 `32` clips、每 clip `10` 帧、固定 `100ms` temporal step；
+- 资源：所有审计固定单机 `4` 卡；本版本没有训练任务，因此不存在 8 卡 launcher；
+- 运行：代码先部署到
+  `/mnt/pfs/public/xuhaoming/instruct_gs_world/runtime/native_reliable_transition_v65/releases/<commit>/`，之后 audit
+  在该 immutable release 前台运行，不使用 `nohup`、`&`、Git 或 GitHub；
+- 产物：独立 report、W&B run 和 output directory，不覆盖 V62--V64 任何结果。
+
+**Local structural evidence**
+
+- `python3 -m py_compile`、Ruff、shell syntax 与 `git diff --check` 已通过；
+- synthetic verifier 检查了 heterogeneous native padding、relay corruption、multi-track core、fit/holdout 分离、
+  component purity 和 future visual falsification，状态为 `passed`；
+- 合成样本中 good/bad relay reliability 为 `1.0/0.13137`，selected core count 为 `4/4`，holdout count 为
+  `3/4`，object purity 为 `1.0/1.0`；correct transition 相对 persistence 的 future visual gain 为
+  `0.23564/0.39859`，相对错误 core 的 margin 为 `0.24895/0.42133`。
+
+这些数字只证明实现可以在已知构造数据上识别预期反事实，不是 Robot data 上的方法结果，也不证明 CoTracker
+measurement 正确。
+
+**Promotion / rejection rule**
+
+- 每个 source 必须同时满足：audit-valid fraction 至少 `0.5`、rolled/shuffled corruption joint coverage 至少
+  `0.25`、component reliability 达标、correct future visual error 分别优于 persistence、rolled core 与 shuffled
+  sample transition；
+- 六源至少 `5/6` 同时通过，才允许把 V65 objective 晋级为下一轮可学习 soft binding 的监督；否则直接拒绝该
+  target，不通过放宽阈值、增加 steps 或调 loss weight 补救；
+- 真实四卡 audit 返回前，状态固定为 `implemented, awaiting real-data objective falsification`。下一步仅执行
+  structural verifier 与四卡六源 audit；不得启动 Student、codec 或 Dynamics 长训。
