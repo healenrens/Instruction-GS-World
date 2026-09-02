@@ -61,6 +61,7 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         seed: int = 17,
         group_partition: str = "all",
         held_group_stride: int = 20,
+        preserve_native_rgb: bool = False,
     ):
         self.index_path = os.path.abspath(index_path)
         self.sources, episodes, payload = load_multisource_index(
@@ -75,6 +76,7 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
         if self.start_step_seconds <= 0.0 or self.samples_per_task < 1:
             raise ValueError("multisource sampling configuration is invalid")
         self.seed = int(seed)
+        self.preserve_native_rgb = bool(preserve_native_rgb)
         self.group_partition = group_partition
         self.held_group_stride = int(held_group_stride)
         self.balance_sampling = True
@@ -398,6 +400,12 @@ class MultiSourcePointTrackObjectVideoDataset(Dataset):
             frames = self._decode_cache(record.path, absolute).permute(0, 2, 3, 1)
         else:
             frames = decode_video_frames(record.path, absolute, record.fps)
+        if self.preserve_native_rgb:
+            rgb = frames.permute(0, 3, 1, 2).contiguous()
+            valid = torch.ones(
+                len(frames), frames.shape[1], frames.shape[2], dtype=torch.bool
+            )
+            return rgb, valid
         return square_dino_rgb(frames, self.rgb_height)
 
     def _sample_record(
