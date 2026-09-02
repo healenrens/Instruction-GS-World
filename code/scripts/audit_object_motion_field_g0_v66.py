@@ -127,7 +127,7 @@ def metric_values(rows, name, mask):
     )
 
 
-def bootstrap_mean(values, samples, seed):
+def bootstrap_mean(values, samples, seed, minimum_count):
     if len(values) == 0:
         return {
             "count": 0,
@@ -147,7 +147,7 @@ def bootstrap_mean(values, samples, seed):
         "mean": float(values.mean()),
         "ci95_low": float(interval[0]),
         "ci95_high": float(interval[1]),
-        "evidence_sufficient": True,
+        "evidence_sufficient": len(values) >= minimum_count,
     }
 
 
@@ -164,6 +164,7 @@ def summarize_stratum(rows, mask, config, seed):
             values_by_metric[name],
             config.bootstrap_samples,
             seed + offset,
+            config.minimum_high_change_samples,
         )
         for offset, name in enumerate(BOOTSTRAP_METRICS)
     }
@@ -179,8 +180,7 @@ def source_summary(rows, config, seed):
         else 0.0
     )
     high_change_mask = [
-        row["metrics"]["audit_valid"] > 0.5
-        and row["valid"]["high_change_score"]
+        row["valid"]["high_change_score"]
         and row["metrics"]["high_change_score"] >= threshold
         for row in rows
     ]
