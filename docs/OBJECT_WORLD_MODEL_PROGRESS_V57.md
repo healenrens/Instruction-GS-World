@@ -2389,3 +2389,80 @@ measurement 正确。
   已发生的 semantic state change，tracker 只提供对应关系与可见性权重；不得再要求 prefix-only kinematic
   extrapolation 直接预测 future，也不得在新 target 通过 persistence、swap 和 held-future falsification 前启动
   Student、codec、latent-effect 或 Dynamics 长训。
+
+### 15.25 V67 continuous predictive object field 预注册
+
+**What changed**
+
+1. 世界状态从固定数量的 slot、carrier 或 tracker component 改成连续可查询函数。给定只来自历史的锚点
+   $q=(t_q,x_q,\sigma_q)$，模型输出
+   $S_t^q(x,\sigma)=[\Pi_t^q(x,\sigma),A_t^q(x,\sigma),R_t^q(x,\sigma),V_t^q(x,\sigma),U_t^q(x,\sigma)]$。
+   其中 $\Pi$ 是与锚点属于同一 persistent entity 的软概率，$A$ 是语义/appearance，$R$ 是可变化的
+   response state，$V$ 是 visibility，$U$ 是 uncertainty。对象不再由 slot index、hard mask、patch index、
+   Gaussian center/covariance 或 tracker 聚类定义。
+2. dynamic target 从 prefix tracker geometry extrapolation 改成真实 current/future observations 之间已经发生的
+   transition。连续 posterior $Q_\phi$ 解释 source field 与 target field 的差异，连续 operator
+   $\mathcal T_\xi$ 用该 effect 预测 target field；tracker 只给 correspondence、visibility 和 reliability 权重，
+   DINO/SigLIP 只给 semantic projection target，二者都不是 object truth。
+3. 压缩标准从 RGB reconstruction 或固定 latent 容量改成 predictive rate-distortion：共享一个 object code/effect
+   必须在未参与编码的坐标和未来时刻上，以更低 rate 达到不差于 separate encoding 的 distortion。训练和评测
+   明确拆分 context coordinates 与 held-out coordinates，避免用模型自己的 support 证明自己是 object。
+
+**Why**
+
+V61--V66 已反复表明，固定 slot/carrier 的自洽 reconstruction 和 tracker prefix kinematic target 都不能可靠产生
+跨来源的 dynamic object state；V67 只保留纯视频、连续表征和 object-level dynamics 目标，改用 future observation
+可证伪的 predictive sufficiency 来定义对象和变化。
+
+**Block contract**
+
+1. `NativeContinuousSampler`：输入原生分辨率 RGB clip、任意归一化坐标与连续 scale，输出局部多尺度 RGB
+   observations。坐标采样只是数值积分点，不是 object token；同一坐标的小扰动必须得到连续变化的 feature。
+2. `ContinuousScaleFieldEncoder`：用共享高分辨率 local encoder 和历史 temporal mixer 将 observations 映射为
+   $F_t(x,\sigma)$。small scale 保留局部细节，large scale 提供 context；输出不是 patch grid，也没有固定 object
+   count。它的目标是预测 frozen DINO/SigLIP 的连续局部投影，并保留可被 future objective 使用的 response feature。
+3. `QueryRelationField`：从历史 anchor descriptor 与任意 target descriptor 计算 $\Pi,A,R,V,U$。同一 track 的
+   correspondence 是正 evidence，可靠的跨轨迹 negatives 是负 evidence；reflexivity、symmetry 和 soft
+   transitivity 是函数约束。unknown/occluded 通过 uncertainty 与 visibility 表示，不被误写成 absent。
+4. `PredictiveObjectCode`：只使用 context coordinates，将 query-conditioned field 压缩为连续 stochastic code
+   $c_t^q$；KL 是 rate，held-out object observables 的预测误差是 distortion。code 不是 object ID，而是当前历史
+   对这个 query object 的最小 predictive sufficient state。
+5. `ContinuousEffectPosterior`：训练期读取 source code 与真实 target code，输出每个 query 的连续 stochastic
+   effect $e_{t\to t'}^q$。它解释实际发生的变化，不拼接真实 center delta、RGB change、机器人 action，也不承担
+   deployment-time effect selection。
+6. `ObjectFieldOperator`：输入 source code、effect、$\Delta t$ 和任意 output coordinate/scale，预测 future
+   $\Pi,A,R,V,U$。它采用 branch/trunk operator 结构，使参数不依赖采样分辨率，并同时训练 direct prediction 与
+   two-step rollout consistency。
+7. `PredictiveRateDistortionObjective`：在 held-out coordinates/times 上计算 semantic、relation、visibility、
+   response 和 uncertainty-calibrated distortion；比较 shared-object 与 separate-object coding。若错误合并两个
+   entity 不能提高 rate 或 distortion，$\Pi$ 就没有 object semantics。
+8. `IndependentEvaluator`：只在未参与编码的坐标、future frames 和 query swaps 上评分；分别报告 absolute target
+   error、persistence error、correct-vs-zero/shuffled effect、shared-vs-separate rate-distortion 和 coordinate/scale
+   continuity。RGB 只作为可视化 probe，不进入晋级判据。
+
+**Training contract**
+
+- E0 `predictive_state`：训练连续 local field、query relation 和 stochastic predictive code；不训练
+  action-free future regression，不训练 language/Prior，不继承历史 checkpoint。
+- E1 `posterior_dynamics`：从通过 E0 held-out predictive sufficiency 的 checkpoint 初始化，训练
+  future-conditioned effect posterior 与 object field operator。正确 effect 必须同时优于 zero effect、batch-shuffled
+  effect 和 persistence；否则不能进入 Prior、语言或控制。
+- 数据继续使用六源原生 RGB index；训练只读取过去/当前 frame，target encoder、future observations 和 tracker
+  future correspondence 只进入 training target/posterior。deployment student 只需要 RGB history、query 和 scale。
+
+**Falsification**
+
+- Future swap 后 history encoder、source code 和任何 deployment path 的最大差异必须小于 $10^{-6}$；posterior
+  与 target 必须变化。
+- held-out semantic/visibility/relation absolute error 必须随训练下降，且不能只通过增大 uncertainty 改善 NLL；
+  standardized residual 应接近单位尺度。
+- 同一 query 的坐标/scale 小扰动应产生连续输出；交换 query 或打乱 track correspondence 必须显著恶化
+  relation 与 held-future prediction。
+- shared code 相比 separate code 只有在 rate 明显更低且 held-out distortion 不升高时才算形成 object；all-scene、
+  all-same 和 one-coordinate-per-object 都必须被 rate-distortion 反事实拒绝。
+- E1 在 motion-active held samples 上 correct posterior effect 相比 persistence、zero 和 shuffled effect 至少改善
+  `10%`，并在六个来源至少 `5/6` 成立，才允许继续学习 History/Language Prior。
+
+理论依据是 predictive state representation、predictive rate-distortion、conditional neural process 与 neural
+operator；其共同点是用 future observables 定义 state、用 context/target split 验证压缩、并让函数映射独立于数值
+采样网格。DINO/SigLIP alignment 仅提供 semantic observables，不能替代上述 object 与 dynamics 判据。
