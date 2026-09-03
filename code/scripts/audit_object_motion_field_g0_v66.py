@@ -406,9 +406,9 @@ def main():
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, sort_keys=True)
         handle.write("\n")
+    finish_distributed_audit_v62()
     write_wandb(args, report)
     print(json.dumps(report, sort_keys=True))
-    finish_distributed_audit_v62()
 
 
 if __name__ == "__main__":

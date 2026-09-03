@@ -38,7 +38,7 @@ exec "${VENV_ROOT}/.venv/bin/torchrun" --standalone --nproc_per_node 4 \
   --amp "${AMP:-bf16}" \
   --wandb_mode "${WANDB_MODE:-online}" \
   --wandb_project "${WANDB_PROJECT:-instruct-gs-world}" \
-  --wandb_entity "${WANDB_ENTITY:-healenrenss-university-of-chinese-acadmic-and-science}" \
+  --wandb_entity "${WANDB_ENTITY:-}" \
   --wandb_name "${WANDB_NAME:-${RUN_ID}}" \
   --wandb_group "${WANDB_GROUP:-object-motion-field-g0-v66}" \
   --wandb_dir "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}"
