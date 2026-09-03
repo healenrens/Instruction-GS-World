@@ -53,6 +53,7 @@ def parse_args():
     parser.add_argument("--state_checkpoint", default="")
     parser.add_argument("--source_revision", required=True)
     parser.add_argument("--held_group_stride", type=int, default=20)
+    parser.add_argument("--expected_world_size", type=int, default=4)
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--dino_frame_batch", type=int, default=64)
     parser.add_argument("--siglip_frame_batch", type=int, default=64)
@@ -160,7 +161,10 @@ def causal_contract(model, batch, target, config, stage):
 def main() -> None:
     args = parse_args()
     context = init_torchrun()
-    require(context.world_size == 4, "v67 admission must run on four visible GPUs")
+    require(
+        context.world_size == args.expected_world_size,
+        "v67 admission world size differs from the explicit contract",
+    )
     config = ContinuousPredictiveObjectFieldConfigV67()
     config.validate()
     if args.stage == DYNAMICS_STAGE:
@@ -200,11 +204,15 @@ def main() -> None:
         model.load_state_dict(checkpoint["model"], strict=True)
         model.configure_stage(DYNAMICS_STAGE)
     model = model.to(device).train()
-    wrapped = DistributedDataParallel(
-        model,
-        device_ids=[context.local_rank],
-        broadcast_buffers=False,
-        find_unused_parameters=False,
+    wrapped = (
+        DistributedDataParallel(
+            model,
+            device_ids=[context.local_rank],
+            broadcast_buffers=False,
+            find_unused_parameters=False,
+        )
+        if context.distributed
+        else model
     )
     amp_context = (
         (lambda: torch.autocast("cuda", dtype=torch.bfloat16))
@@ -236,8 +244,10 @@ def main() -> None:
         "native_height": int(batch["native_image_hw"][:, 0].max()),
         "native_width": int(batch["native_image_hw"][:, 1].max()),
     }
-    reports = [None] * context.world_size
-    dist.all_gather_object(reports, local)
+    reports = [local]
+    if context.distributed:
+        reports = [None] * context.world_size
+        dist.all_gather_object(reports, local)
     if context.is_main:
         report = {
             "status": "passed",
@@ -255,8 +265,9 @@ def main() -> None:
             "per_rank": reports,
         }
         print(json.dumps(report, sort_keys=True), flush=True)
-    dist.barrier()
-    dist.destroy_process_group()
+    if context.distributed:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

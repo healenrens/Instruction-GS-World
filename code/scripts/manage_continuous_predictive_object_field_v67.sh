@@ -46,6 +46,7 @@ verify_stage() {
       --siglip_checkpoint "${SIGLIP_CHECKPOINT}" \
       --tracker_checkpoint "${TRACKER_CHECKPOINT}" \
       --source_revision "${SOURCE_REVISION}" \
+      --expected_world_size 4 \
       --amp "${AMP:-bf16}" \
       "${state_args[@]}"
 }
