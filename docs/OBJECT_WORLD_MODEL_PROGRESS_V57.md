@@ -1,14 +1,14 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-09-02
+> 更新日期：2026-09-04
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/reliable-native-object-transition-v65`
-> 当前实现提交：`a1375111e44f4edf63a1839581f4b47c4b8b7dce`（V65 native reliable transition audit；待真实四卡审计）
-> 当前已验证代码提交：`f00082d7678f24dd7323ebcb789ef40fca7c0654`（E0 real-teacher GPU verifier）
+> 当前开发分支：`codex/object-motion-field-g0-v66`
+> 当前实现提交：`225cf5dd6007f28677f2034a50addf43f9b51b8a`（V66 audit、独立 report upload 与 W&B entity 修正）
+> 当前已验证代码提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`（V66 四卡、六源、1536 held clips G0 audit）
 > V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
 > V62 B/C/D structural audit 实现提交：`2ad1158084ff0e8b4070f43c6721261df1884485`（静态验证，待服务器执行）
-> 上次账本提交：`3f677c5e4cc59b5a1169fcaa8e3611b258952f96`
-> 当前实验：V65 native multi-track audit 已拒绝 shared-affine transition；下一项仍在 G0，只比较可组合 object motion-field parameterization
+> 上次账本提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`
+> 当前实验：V66 已以 `1/6` 来源通过否决 prefix-fitted object motion field；下一项仍停留在 G0，重做 dynamic target，而非继续调 motion-field 容量
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
 > 远端运行与产物根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/`  
 > W&B：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`
@@ -2330,3 +2330,62 @@ measurement 正确。
   `10.66.0.39:8600` 的连接在认证前被远端关闭，因此 synthetic numerical verifier 与真实四卡 audit 尚未执行；
 - 当前状态固定为 `implemented, statically verified, awaiting four-GPU structural and real-data audit`。服务器
   返回 synthetic verifier 与 W&B 六源结果前，不声称 motion field 有效，也不启动任何下游训练。
+
+### 15.24 V66 四卡六源结果与 G0 判决
+
+**Execution**
+
+- 正式结果使用 W&B run `39byxraf`，名称
+  `object_motion_field_g0_v66_seed17_2e513d9_256ps`；run state 为 `finished`，程序状态为
+  `completed`，代码 revision 为 `2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`；
+- W&B run `b739j6qn` 与 `39byxraf` 的 config、六源数值和最终判决完全相同，是同一份 report 的重复上传，
+  不能计作第二个 seed 或独立重复实验；
+- 单机 `4` 卡、每源 `256` 个 held clips、六源共 `1536` 个样本、每 clip `10` 帧、固定 `100ms`
+  temporal step；本轮没有训练、optimizer step 或 checkpoint；
+- 高变化集合只按各来源 held future native-image persistence error 的上半区选取，共 `467` 个有效样本；
+  每个 paired comparison 使用 `2000` 次 bootstrap 估计 95% CI。
+
+**Aggregate evidence**
+
+1. all-valid 上 persistence、translation、shared affine、motion field 与 raw-track oracle 的 visual error 分别为
+   `0.085442/0.085973/0.085319/0.085121/0.073020`。motion field 相比 persistence 的平均 gain 只有
+   `+0.000260`，95% CI 为 `[-0.001349,+0.001900]`，不能确认优于不移动。
+2. high-change 上对应误差为 `0.126789/0.123662/0.122058/0.122043/0.101313`。motion field 相比
+   persistence 的 gain 为 `+0.004802`，95% CI `[+0.001837,+0.008109]`；但相比 shared affine 只改善
+   `+0.000063`，95% CI `[-0.000219,+0.000355]`。因此 high-change 的主要收益已经由 shared affine
+   提供，三个 object-local RBF residual modes 没有得到统计支持。
+3. high-change motion field 相比 rolled core 和 shuffled sample 的 margin 分别为 `+0.023395`
+   `[+0.018632,+0.028444]` 与 `+0.053212` `[+0.043151,+0.064425]`。这说明 component 与 sample
+   specificity 确实存在；失败不能简化为“所有 track target 都是随机的”。但是 specificity 不等于可预测性：
+   正确 object/sample field 仍未稳定超过 persistence 或较简单的 affine。
+4. high-change raw-track oracle 相比 persistence 留有 `0.025476` 的平均 visual headroom。future-image
+   evaluator 能检测到真实轨迹位置与静止位置的差异，但 prefix-fitted field 没有恢复这部分 headroom。
+   raw-track oracle 仍依赖 tracker，只是 model-class ceiling，不是独立运动真值。
+
+**Per-source decision**
+
+| Source | audit coverage | high-change N | all-valid field gain vs persistence | high-change field gain vs persistence, 95% CI | high-change field margin vs affine, 95% CI | 判决 |
+|---|---:|---:|---:|---:|---:|---|
+| RoboTwin | `0.426` | `55` | `-0.00632` | `-0.01077 [-0.02070,-0.00140]` | `-0.00003 [-0.00073,+0.00067]` | fail：coverage 不足，且在 high-change 上显著差于 persistence |
+| AgiBot | `0.734` | `94` | `+0.00786` | `+0.01975 [+0.01192,+0.02828]` | `+0.00002 [-0.00068,+0.00071]` | fail：有效运动来自 affine，local modes 无可靠增益 |
+| Droid | `0.773` | `100` | `-0.00179` | `-0.00178 [-0.00570,+0.00170]` | `-0.00004 [-0.00043,+0.00037]` | fail：不优于 persistence、affine，rolled margin 也不确定 |
+| RoboMind | `0.555` | `71` | `+0.00201` | `+0.00875 [+0.00046,+0.01949]` | `+0.00063 [+0.00010,+0.00131]` | pass：唯一满足全部预注册条件的来源 |
+| Bridge | `0.395` | `51` | `-0.00212` | `+0.00117 [-0.00700,+0.01045]` | `+0.00038 [-0.00046,+0.00123]` | fail：coverage 不足；persistence、affine、shuffled 证据均不足 |
+| HY-Embodied | `0.746` | `96` | `-0.00138` | `+0.00489 [+0.00005,+0.01060]` | `-0.00033 [-0.00130,+0.00056]` | fail：all-valid 退化，local modes 不优于 affine |
+
+**Decision**
+
+- 最终程序判决为 `reject_object_motion_field_g0`：仅 RoboMind 通过 `1/6`，远低于预注册的 `5/6`；
+- V65 到 V66 已依次检验 shared affine 与 affine 加 object-local residual modes。大样本结果排除了“只是每源
+  32 条方差太大”以及“只需给 affine 增加少量局部容量”这两个解释；不再增加 mode 数、调整 ridge、降低
+  coverage gate 或继续运行同类 audit；
+- 保留 native-resolution visual evaluator、DINO/SigLIP local features、multi-anchor reliability、multi-track
+  core、fit/holdout 分离、all-valid/high-change 分层以及 rolled/shuffled 反事实。这些组件证明了可观测的
+  correspondence specificity，但不能继续把 prefix track 的几何外推当作通用 dynamic target；
+- 明确拒绝的是“从 prefix tracker geometry 拟合确定性 kinematic field，并把它作为六源通用 object transition
+  监督”的目标，不是否决 tracker 作为 correspondence/visibility measurement，也不否决 future-conditioned
+  latent effect 或 object-level world model；
+- 下一项仍是 G0 objective redesign：dynamic target 必须由成对的 current/future object observations 解释
+  已发生的 semantic state change，tracker 只提供对应关系与可见性权重；不得再要求 prefix-only kinematic
+  extrapolation 直接预测 future，也不得在新 target 通过 persistence、swap 和 held-future falsification 前启动
+  Student、codec、latent-effect 或 Dynamics 长训。
