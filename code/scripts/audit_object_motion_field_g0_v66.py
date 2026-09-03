@@ -274,15 +274,20 @@ def flatten_wandb(report):
     return payload
 
 
+def resolve_wandb_entity(wandb, requested_entity):
+    return requested_entity or wandb.Api(timeout=120).default_entity
+
+
 def write_wandb(args, report):
     if args.wandb_mode == "disabled":
         return
     import wandb
 
     os.makedirs(args.wandb_dir, exist_ok=True)
+    entity = resolve_wandb_entity(wandb, args.wandb_entity)
     run = wandb.init(
         project=args.wandb_project,
-        entity=args.wandb_entity or None,
+        entity=entity,
         name=args.wandb_name,
         group=args.wandb_group,
         mode=args.wandb_mode,

@@ -11,7 +11,10 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
-from audit_object_motion_field_g0_v66 import flatten_wandb  # noqa: E402
+from audit_object_motion_field_g0_v66 import (  # noqa: E402
+    flatten_wandb,
+    resolve_wandb_entity,
+)
 
 
 def parse_args():
@@ -33,9 +36,11 @@ def main():
     import wandb
 
     os.makedirs(args.wandb_dir, exist_ok=True)
+    entity = resolve_wandb_entity(wandb, args.wandb_entity)
+    print(f"resolved_wandb_entity={entity}")
     run = wandb.init(
         project=args.wandb_project,
-        entity=args.wandb_entity or None,
+        entity=entity,
         name=args.wandb_name,
         group=args.wandb_group,
         dir=args.wandb_dir,
