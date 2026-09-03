@@ -2466,3 +2466,85 @@ V61--V66 已反复表明，固定 slot/carrier 的自洽 reconstruction 和 trac
 理论依据是 predictive state representation、predictive rate-distortion、conditional neural process 与 neural
 operator；其共同点是用 future observables 定义 state、用 context/target split 验证压缩、并让函数映射独立于数值
 采样网格。DINO/SigLIP alignment 仅提供 semantic observables，不能替代上述 object 与 dynamics 判据。
+
+### 15.26 V67 实现落地与第一轮工程验证
+
+**实现边界**
+
+- 权威代码根为 `/Users/hela/Instruct-GS-World-recovered-20260725/`，交付分支为
+  `codex/continuous-predictive-object-field-v67`。V67 不读取 V61--V66 的 model/optimizer checkpoint；六源
+  RGB index、冻结视觉 teacher 和 CoTracker 权重是允许复用的数据资产。
+- 架构固定为 `continuous_predictive_object_field_v1`，checkpoint version 为 `67`。实现没有固定 object
+  count、hard instance mask、Gaussian carrier 或 patch-grid object state，也没有 RGB reconstruction、显式
+  robot action、language 和 History Prior。
+- 当前数值配置使用每段 `8` 帧、source/midpoint/goal 索引 `3/5/7`；先从 $16\times16=256$ 个候选连续坐标中
+  选择 `32` 个 query anchor，并把其余坐标分成 context/held-out quadrature points。`32` 和 `256` 只控制一次
+  Monte Carlo 估计的成本，不定义图像中必须存在多少对象，也不是部署状态的固定空间网格。
+
+**逐 block 的实际输入、输出和唯一职责**
+
+1. `continuous_field_sampling_v67.py` 接收原生 RGB $[B,T,3,H,W]$、像素有效区、归一化坐标
+   $X\in[-1,1]^{B\times T\times P\times2}$ 和连续尺度 $\sigma\in\mathbb R^{B\times T\times P}$，在原始图像
+   上采集多尺度 local crops。它只负责把任意坐标处的视觉邻域变成可微 observation，不进行 object grouping。
+2. `continuous_scale_field_v67.py` 将每个 crop 编码成 `field_dim=256` 的 local feature，并用 `4` 层、`8` 头
+   causal temporal mixer 聚合 source 以前的历史。它输出 $F_t(x,\sigma)\in\mathbb R^{256}$；目标是保留局部
+   细节、尺度 context 和历史变化，同时严格不读 target frame。
+3. `continuous_predictive_teacher_v67.py` 在训练期提取冻结 DINOv2-L `1024D`、SigLIP `768D` 和 CoTracker
+   relation/visibility/reliability，再投影为两个 `256D` semantic observables。DINO/SigLIP 描述“这里看起来是
+   什么”，CoTracker 只描述“哪些观测可对应以及是否可信”；它们都不直接生成 dynamic state。
+4. `QueryRelationFieldNetworkV67` 对每个 query 与每个 quadrature point 计算 soft support
+   $\Pi\in[0,1]^{B\times Q\times P}$、`192D` response、visibility logit 和 uncertainty。其职责是学习
+   query-conditioned persistent entity relation，而不是给 point 分配永久 slot ID。
+5. `PredictiveObjectCodeNetworkV67` 只在 context points 上按 $\Pi$ 加权汇聚 field，产生每个 query 的 Gaussian
+   code $c\in\mathbb R^{320}$：前 `128D` 是 normalized identity，后 `192D` 是 dynamic state。mean/log-variance
+   定义 stochastic code 与 KL rate；同时存在逐 point code 作为 separate-encoding rate/distortion 对照，它不被
+   当作 object representation。
+6. `PredictiveObjectFieldDecoderV67` 是 branch/trunk continuous decoder。branch 接收 query code
+   $[B,Q,320]$，trunk 接收任意相对坐标、距离和 log-scale，输出该 query 在 $P$ 个位置上的 support、DINO/
+   SigLIP semantic、response、visibility 和 uncertainty。它的职责是检验一个共享 code 能否解释未参与编码的
+   空间，而不是还原整张 RGB 图。
+7. `ContinuousEffectPosteriorV67` 在 E1 中读取 source/target object codes 及 $\Delta t$，经 query interaction
+   Transformer 输出每个 query 的 `256D` stochastic effect。effect 只解释真实观测到的 object-field transition；
+   它不是离散 codebook，也不包含 tracker flow、center delta 或 robot action。
+8. `ObjectFieldOperatorV67` 把 source code、effect 和 log-time 送入 `4` 层、`8` 头 interaction operator，分别
+   更新 identity、dynamic state 和 uncertainty，再调用同一个 continuous decoder 预测 future field。identity
+   更新被限制为较小 residual，而 dynamic state 可以完整更新；同一个 operator 同时承担 short、direct 和
+   rollout 路径，避免为每个 horizon 学独立捷径。
+9. `predictive_rate_distortion_v67.py` 是唯一训练判据集合。E0 比较 held-out semantic/relation/visibility/
+   response distortion、共享 object-code rate、逐 point rate、continuity、symmetry/transitivity 和 anti-collapse；
+   E1 比较 correct posterior、zero、shuffled、persistence、short、direct 和 rollout。任何单项 reconstruction
+   下降都不能替代 correct-effect intervention 和 held-out target error。
+10. `v67_checkpointing.py`、`v67_training_loop.py` 和 `/Users/hela/Instruct-GS-World-recovered-20260725/code/scripts/`
+    下的 V67 entrypoints 负责 strict stage/checkpoint、EMA、DDP、W&B 和独立 evaluation。E1 必须从 E0
+    checkpoint 初始化，且冻结 E0 state decoder；它只学习 transition，不允许重写 object semantics。
+
+**已完成的验证层级**
+
+1. 本地静态检查已通过：V67 Python compilation、Ruff、所有 V67 shell 的 `bash -n` 以及 `git diff --check`。
+2. 服务器 synthetic CUDA forward/backward 已通过。E0 loss 为 `5.17696`，E1 loss 为 `11.14788`；E0/E1
+   分别有 `126/82` 个 trainable gradient tensors。future swap 时 source path 最大差为 `0`，target 最大差为
+   `0.31970`，synthetic effect intervention difference 为 `0.09154`。该结果证明 tensor、gradient、stage freeze
+   和 causal wiring 可运行，不证明方法效果。
+3. 六源真实 index 上的单 GPU E0 admission 已通过，实际样本包含 `518x640` 原生 RGB。loss 为 `5.46875`，
+   finite gradient norm 为 `8.55056`；future swap 时 source path 最大差为 `0`，target path 最大差为
+   `0.37771`。这证明 native-resolution data/teacher/student 路径和 causal boundary 可执行。
+4. 完整训练入口真实执行 `1` step 并生成
+   `/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/v67_e0_code_validation_c65f5e5/v67_state_0000001.pt`；manifest
+   记录 architecture/version/stage/world-size，checkpoint 大小为 `134766351` bytes。该 checkpoint 只用于验证
+   save/load/E0-to-E1 contract，绝不能作为训练质量证据。
+5. 使用上述 E0 checkpoint 的真实 E1 admission 已通过：loss 为 `13.32370`，finite gradient norm 为
+   `55.45940`；source future-swap 差为 `0`，posterior 和 target 差分别为 `0.37996`、`0.24129`。这证明 E1
+   确实读取 future 来解释 transition，而 deployment source path 没有 future leakage。
+6. 正式四 GPU admission 尚未执行：测试时服务器只有物理 GPU 2 空闲，GPU 0/1/3 被其他任务占用。单 GPU
+   admission 的 `world_size=1` 不能替代 DDP=4 结论；本轮也没有启动任何长训。
+
+**当前判决与下一证据**
+
+- 工程判决是 `ready_for_four_gpu_admission`，不是 `object_state_validated`。V67 已把错误问题从“能否从 prefix
+  tracker 外推运动”改成“shared continuous object state 是否以更低 rate 预测 held-out future observables”。
+- 下一步只能先运行正式四 GPU admission，再运行 E0 长训与 held-out evaluator。只有 E0 同时满足 absolute
+  target error 下降、shared-vs-separate rate-distortion 优势、query/correspondence falsification 和 uncertainty
+  calibration，才允许开始 E1 长训。
+- E1 的核心判决仍是 motion-active held samples 上 correct posterior 相比 persistence、zero、shuffled 至少
+  改善 `10%`，并覆盖六源至少 `5/6`。若失败，优先否决/修改 state 与 dynamic objective，不进入 Prior、语言、
+  控制或更多容量调参。
