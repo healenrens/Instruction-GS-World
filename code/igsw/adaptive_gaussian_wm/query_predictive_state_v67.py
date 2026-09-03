@@ -278,6 +278,7 @@ class PredictiveObjectFieldDecoderV67(nn.Module):
         relative = output_coordinates[:, None].float() - anchor_coordinates[:, :, None].float()
         distance = relative.square().sum(dim=-1, keepdim=True).sqrt()
         log_scale = output_scales[:, None, :, None].float().clamp_min(1e-6).log()
+        log_scale = log_scale.expand(-1, code.shape[1], -1, -1)
         geometry = torch.cat((relative, distance, log_scale), dim=-1)
         trunk_input = fourier_features_v67(geometry, self.config.fourier_bands)
         trunk = self.trunk(trunk_input.to(dtype=self.trunk[0].weight.dtype))
