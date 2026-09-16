@@ -67,6 +67,11 @@ evaluate_stage() {
   bash "${ROOT}/code/scripts/evaluate_continuous_predictive_object_field_v67.sh"
 }
 
+audit_contracts() {
+  export CHECKPOINT="${CHECKPOINT:-${STATE_CHECKPOINT}}"
+  bash "${ROOT}/code/scripts/audit_continuous_predictive_contracts_v67.sh"
+}
+
 status() {
   echo "[continuous-object-field-v67-manager] launch_mode=foreground revision=${SOURCE_REVISION}"
   echo "[continuous-object-field-v67-manager] state_out=${STATE_OUT} dynamics_out=${DYNAMICS_OUT}"
@@ -85,6 +90,7 @@ case "${COMMAND}" in
     evaluate_stage predictive_state "${CHECKPOINT:-${STATE_CHECKPOINT}}" \
       "${EVAL_RUN_NAME:-${STATE_RUN}_held_eval}"
     ;;
+  audit-contracts) audit_contracts ;;
   verify-dynamics) verify_stage posterior_dynamics ;;
   train-dynamics) train_stage posterior_dynamics "${DYNAMICS_RUN}" "${DYNAMICS_OUT}" ;;
   resume-dynamics)
@@ -97,5 +103,5 @@ case "${COMMAND}" in
       "${EVAL_RUN_NAME:-${DYNAMICS_RUN}_held_eval}"
     ;;
   status) status ;;
-  *) echo "usage: $0 {verify-state|train-state|resume-state|evaluate-state|verify-dynamics|train-dynamics|resume-dynamics|evaluate-dynamics|status}" ;;
+  *) echo "usage: $0 {verify-state|train-state|resume-state|evaluate-state|audit-contracts|verify-dynamics|train-dynamics|resume-dynamics|evaluate-dynamics|status}" ;;
 esac

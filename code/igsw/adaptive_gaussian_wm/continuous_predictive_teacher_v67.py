@@ -25,6 +25,11 @@ class ContinuousQueryTrackEvidenceV67:
     anchor_coordinates: torch.Tensor
     coordinates: torch.Tensor
     visibility: torch.Tensor
+    model_visibility: torch.Tensor
+    in_bounds: torch.Tensor
+    relay_coordinates: torch.Tensor
+    relay_visibility: torch.Tensor
+    joint_visibility_fraction: torch.Tensor
     tracker_reliability: torch.Tensor
     appearance_reliability: torch.Tensor
     reliability: torch.Tensor
@@ -40,8 +45,31 @@ class ContinuousPredictiveTeacherBatchV67:
     siglip: torch.Tensor
     visibility: torch.Tensor
     reliability: torch.Tensor
+    tracker_visibility: torch.Tensor
+    in_bounds: torch.Tensor
+    dino_valid: torch.Tensor
+    siglip_valid: torch.Tensor
+    relay_visibility: torch.Tensor
+    tracker_reliability: torch.Tensor
+    appearance_reliability: torch.Tensor
+    relay_error: torch.Tensor
+    joint_visibility_fraction: torch.Tensor
     query_indices: torch.Tensor
     context_mask: torch.Tensor
+
+
+@dataclass(frozen=True)
+class TeacherRelationComponentsV67:
+    dino_affinity: torch.Tensor
+    siglip_affinity: torch.Tensor
+    semantic_affinity: torch.Tensor
+    displacement: torch.Tensor
+    motion_difference: torch.Tensor
+    motion_affinity: torch.Tensor
+    relation: torch.Tensor
+    pair_visible: torch.Tensor
+    pair_reliability: torch.Tensor
+    weight: torch.Tensor
 
 
 def _normalize_tracks_v67(tracks: torch.Tensor, native_hw: torch.Tensor) -> torch.Tensor:
@@ -120,7 +148,9 @@ class ContinuousQueryTrackerRuntimeV67:
         relay_px, relay_visible = self._predict(rgb, relay_queries, native_hw)
         primary = _normalize_tracks_v67(primary_px, native_hw)
         relay = _normalize_tracks_v67(relay_px, native_hw)
-        primary_visible = primary_visible & (primary.abs().amax(dim=-1) <= 1.0)
+        model_visibility = primary_visible
+        in_bounds = primary.abs().amax(dim=-1) <= 1.0
+        primary_visible = model_visibility & in_bounds
         relay_visible = relay_visible & (relay.abs().amax(dim=-1) <= 1.0)
         relay_error, joint_fraction, tracker_reliability = relay_track_reliability_v65(
             primary,
@@ -136,6 +166,11 @@ class ContinuousQueryTrackerRuntimeV67:
             anchor_coordinates=anchor_coordinates.detach(),
             coordinates=primary.detach(),
             visibility=primary_visible.detach(),
+            model_visibility=model_visibility.detach(),
+            in_bounds=in_bounds.detach(),
+            relay_coordinates=relay.detach(),
+            relay_visibility=relay_visible.detach(),
+            joint_visibility_fraction=joint_fraction.detach(),
             tracker_reliability=tracker_reliability.detach(),
             appearance_reliability=torch.ones_like(tracker_reliability),
             reliability=tracker_reliability.detach(),
@@ -213,7 +248,7 @@ class ContinuousPredictiveTeacherRuntimeV67:
             self.config.local_radii_pixels,
             self.config.local_tokens_per_scale,
         )
-        visibility, _, reliability = _appearance_reliability_v67(
+        visibility, appearance_reliability, reliability = _appearance_reliability_v67(
             evidence, dino, siglip, self.config
         )
         query_indices = evenly_spaced_query_indices_v67(
@@ -229,6 +264,15 @@ class ContinuousPredictiveTeacherRuntimeV67:
             siglip=siglip.features.detach(),
             visibility=visibility.detach(),
             reliability=reliability.detach(),
+            tracker_visibility=evidence.model_visibility.detach(),
+            in_bounds=evidence.in_bounds.detach(),
+            dino_valid=dino.valid.detach(),
+            siglip_valid=siglip.valid.detach(),
+            relay_visibility=evidence.relay_visibility.detach(),
+            tracker_reliability=evidence.tracker_reliability.detach(),
+            appearance_reliability=appearance_reliability.detach(),
+            relay_error=evidence.relay_error.detach(),
+            joint_visibility_fraction=evidence.joint_visibility_fraction.detach(),
             query_indices=query_indices,
             context_mask=context_coordinate_mask_v67(
                 self.config.candidate_count,
@@ -238,8 +282,13 @@ class ContinuousPredictiveTeacherRuntimeV67:
         )
 
 
-def teacher_relation_evidence_v67(target, frame: int, config):
-    """Soft evidence only; it is not promoted to a hard object label."""
+def teacher_relation_components_v67(
+    target,
+    frame: int,
+    config,
+    motion_sigma: float | None = None,
+) -> TeacherRelationComponentsV67:
+    """Expose every proxy term used to build the soft relation target."""
     query = target.query_indices
     dino = F.normalize(target.dino[:, frame].float(), dim=-1, eps=1e-6)
     siglip = F.normalize(target.siglip[:, frame].float(), dim=-1, eps=1e-6)
@@ -263,7 +312,8 @@ def teacher_relation_evidence_v67(target, frame: int, config):
         )
     query_displacement = displacement.index_select(1, query)
     motion_difference = (query_displacement[:, :, None] - displacement[:, None]).norm(dim=-1)
-    motion = torch.exp(-motion_difference / config.relation_motion_sigma)
+    sigma = config.relation_motion_sigma if motion_sigma is None else motion_sigma
+    motion = torch.exp(-motion_difference / sigma)
     relation = (semantic * motion).sqrt().clamp(0.0, 1.0)
     visible = target.visibility[:, frame]
     pair_visible = visible.index_select(1, query)[:, :, None] & visible[:, None]
@@ -277,4 +327,21 @@ def teacher_relation_evidence_v67(target, frame: int, config):
     )[None, None]
     relation = torch.where(diagonal, torch.ones_like(relation), relation)
     weight = torch.where(diagonal, pair_reliability, weight)
-    return relation.detach(), weight.detach()
+    return TeacherRelationComponentsV67(
+        dino_affinity=dino_affinity.detach(),
+        siglip_affinity=siglip_affinity.detach(),
+        semantic_affinity=semantic.detach(),
+        displacement=displacement.detach(),
+        motion_difference=motion_difference.detach(),
+        motion_affinity=motion.detach(),
+        relation=relation.detach(),
+        pair_visible=pair_visible.detach(),
+        pair_reliability=pair_reliability.detach(),
+        weight=weight.detach(),
+    )
+
+
+def teacher_relation_evidence_v67(target, frame: int, config):
+    """Soft proxy evidence only; it is not an object-identity ground truth."""
+    components = teacher_relation_components_v67(target, frame, config)
+    return components.relation, components.weight

@@ -117,6 +117,21 @@ def synthetic_batch(config, device: torch.device):
         siglip=siglip,
         visibility=visibility,
         reliability=torch.ones(batch, config.candidate_count, device=device),
+        tracker_visibility=visibility,
+        in_bounds=torch.ones_like(visibility),
+        dino_valid=torch.ones_like(visibility),
+        siglip_valid=torch.ones_like(visibility),
+        relay_visibility=visibility,
+        tracker_reliability=torch.ones(
+            batch, config.candidate_count, device=device
+        ),
+        appearance_reliability=torch.ones(
+            batch, config.candidate_count, device=device
+        ),
+        relay_error=torch.zeros(batch, config.candidate_count, device=device),
+        joint_visibility_fraction=torch.ones(
+            batch, config.candidate_count, device=device
+        ),
         query_indices=query_indices,
         context_mask=context_coordinate_mask_v67(
             config.candidate_count, config.context_fraction, sequence

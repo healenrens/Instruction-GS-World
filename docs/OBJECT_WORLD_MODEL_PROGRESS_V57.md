@@ -2548,3 +2548,45 @@ operator；其共同点是用 future observables 定义 state、用 context/targ
 - E1 的核心判决仍是 motion-active held samples 上 correct posterior 相比 persistence、zero、shuffled 至少
   改善 `10%`，并覆盖六源至少 `5/6`。若失败，优先否决/修改 state 与 dynamic objective，不进入 Prior、语言、
   控制或更多容量调参。
+
+### 15.27 V67 指标与 teacher contract 重新审查
+
+此前文档把 `320D` Gaussian code 的前 `128D` 直接称为 `identity`、后 `192D` 称为 `dynamic`，并用
+`object_code_std`、同 query 的 future cosine、teacher relation 均值等指标解释其语义。代码审查确认，这些名称和
+指标只能描述实现切片、数值健康或模型内部一致性，不能证明 object identity、dynamic state、same-object relation
+或真实视觉 visibility。`response` 同样只是 relation MLP feature，而现有 reconstruction target 是该 feature 自身的
+stop-gradient 副本，并不是外部 dynamic supervision。此前所有依赖这种语义升级得到的结论均降级为待验证，不再
+作为架构晋级依据。
+
+从本节开始执行以下永久准则：
+
+1. **名称不是语义。** 任意 latent partition 在获得可证伪定义、监督来源和独立 held evidence 前，只能按张量位置或
+   计算来源命名；MLP 输出的一个切片不能因为变量名而成为 identity/dynamic/object state。
+2. **proxy 不是 correctness。** variance、effective rank、reconstruction、同 query cosine、query-shuffle margin
+   只能回答各自的数值问题；不得代替 object identity、motion semantics、visibility correctness 或 world-model
+   capability。
+3. **contract 必须先校准再入 loss。** CoTracker visibility、relay reliability、DINO/SigLIP validity、motion
+   coherence 和 relation weighting 必须拆开报告，并与独立人工/外部标签对照；未经验证时只能标为 teacher proxy。
+4. **先保留 case/query，再聚合。** 每个样本、query、候选点和 failure mode 必须可追溯；均值只能在完整分布、分位数
+   和失败样本之后报告，不能用一个均值替代异质来源与局部对象分析。
+5. **禁止循环论证。** 用 teacher 训练出的 student 与同一个 teacher 更一致，只能证明 teacher imitation；用模型
+   自己的 support/mask 定义 object 再评估 object 不构成独立证据。
+
+新增 `audit_continuous_predictive_contracts_v67.py`，在六源 held partition 上执行以下审计而不修改训练目标：
+
+- 输出每个 case/query 的 code、response、relation、motion、visibility 和 reliability 分布，不再只保存均值；
+- 对 `identity`、`dynamic` 和完整 code 分别做 held-task-group motion/position probe 与 fixed-query leakage probe；
+- 将进入 code 的 `aggregated_response_192` 作为第四个匿名 partition 做同样 probe，并对 code 前 128/后 192 维执行
+  zero/query-roll decoder intervention，判断每个切片实际控制哪些输出，而不是根据变量名推断；
+- 将 shared/separate distortion、KL rate、effective point count 和 saving 保留到每个 query；现有 separate rate 是
+  relation-weighted point KL 之和再除以最大 support weight，不是真实 bitrate，因此均值 saving 不再被解释为已经形成
+  object compression；
+- 把 raw CoTracker visibility、in-bounds、DINO valid、SigLIP valid、relay agreement 和最终 teacher visibility 分开；
+- 对 motion sigma `0.02/0.04/0.08/0.16/0.32` 报告 relation 密度敏感性及对应像素尺度，不从 proxy 数据中反向挑选
+  “最佳”超参数；
+- 生成八帧可视化和 `human_review_manifest.jsonl`。只有补充独立 visibility/same-object 标签后，才计算 teacher
+  confusion、Brier 和 AUROC；无标注时结果必须明确写为 `unverified_no_independent_annotations`；
+- W&B 同步分布、分位数、held probes、case table 和 review images，但程序不输出 promote/reject 决策。
+
+在该 audit 完成并解释 teacher/object contract 之前，暂停根据 V67 的 latent 命名、relation 均值或 visibility proxy
+设计新 Dynamics，也不以调 loss weight、latent size 或训练步数作为修复手段。
