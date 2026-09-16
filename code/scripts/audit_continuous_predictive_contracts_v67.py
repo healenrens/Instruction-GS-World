@@ -1171,7 +1171,7 @@ def write_wandb(args, report, cases, queries, review_images, checkpoint_step):
         entity=args.wandb_entity or None,
         name=args.wandb_name,
         group=args.wandb_group,
-        tags=("v67", "contract-validity", "held", "no-promotion-decision"),
+        tags=["v67", "contract-validity", "held", "no-promotion-decision"],
         mode=args.wandb_mode,
         dir=args.wandb_dir,
         config={
@@ -1251,7 +1251,7 @@ def write_wandb(args, report, cases, queries, review_images, checkpoint_step):
     for row in cases[: min(len(cases), 512)]:
         case_table.add_data(*(row.get(name) for name in case_columns))
     review_table = wandb.Table(
-        columns=("type", "source", "dataset_index", "description", "image")
+        columns=["type", "source", "dataset_index", "description", "image"]
     )
     for item in review_images:
         review_table.add_data(
