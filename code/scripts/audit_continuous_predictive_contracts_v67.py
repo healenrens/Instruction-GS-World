@@ -1151,6 +1151,15 @@ def flatten_numeric(prefix, value, output):
         output[prefix] = value
 
 
+def defined_metric_values(rows, name):
+    values = []
+    for row in rows:
+        value = row.get(name)
+        if value is not None:
+            values.append(float(value))
+    return values
+
+
 def write_wandb(args, report, cases, queries, review_images, checkpoint_step):
     if args.wandb_mode == "disabled":
         return ""
@@ -1214,7 +1223,11 @@ def write_wandb(args, report, cases, queries, review_images, checkpoint_step):
     )
     for name in selected_histograms:
         rows = cases if any(name in row for row in cases) else queries
-        values = [float(row[name]) for row in rows if name in row]
+        values = defined_metric_values(rows, name)
+        scalars[f"audit/histogram_support/{name}/defined_count"] = len(values)
+        scalars[f"audit/histogram_support/{name}/undefined_count"] = (
+            len(rows) - len(values)
+        )
         if values:
             scalars[f"histogram/{name}"] = wandb.Histogram(values)
     case_columns = (
