@@ -28,7 +28,9 @@ export PYTHONPATH="${RUNTIME_ROOT}/third_party/co-tracker:${ROOT}/code:${PYTHONP
 mkdir -p "$(dirname "${OUTPUT}")" "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}"
 cd "${ROOT}"
 
-exec "${VENV_ROOT}/.venv/bin/torchrun" --standalone --nproc_per_node 4 \
+EVAL_NPROC_PER_NODE="${EVAL_NPROC_PER_NODE:-8}"
+
+exec "${VENV_ROOT}/.venv/bin/torchrun" --standalone --nproc_per_node "${EVAL_NPROC_PER_NODE}" \
   "${ROOT}/code/scripts/evaluate_continuous_predictive_object_field_v67.py" \
   --stage "${STAGE}" \
   --checkpoint "${CHECKPOINT}" \
@@ -41,6 +43,7 @@ exec "${VENV_ROOT}/.venv/bin/torchrun" --standalone --nproc_per_node 4 \
   --held_group_stride "${HELD_GROUP_STRIDE:-20}" \
   --items_per_source "${ITEMS_PER_SOURCE:-128}" \
   --batch "${EVAL_BATCH_PER_GPU:-4}" \
+  --expected_world_size "${EVAL_NPROC_PER_NODE}" \
   --dino_frame_batch "${DINO_FRAME_BATCH:-96}" \
   --siglip_frame_batch "${SIGLIP_FRAME_BATCH:-96}" \
   --amp "${AMP:-bf16}" \

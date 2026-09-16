@@ -53,6 +53,7 @@ def parse_args():
     parser.add_argument("--held_group_stride", type=int, default=20)
     parser.add_argument("--items_per_source", type=int, default=128)
     parser.add_argument("--batch", type=int, default=4)
+    parser.add_argument("--expected_world_size", type=int, default=8)
     parser.add_argument("--dino_frame_batch", type=int, default=96)
     parser.add_argument("--siglip_frame_batch", type=int, default=96)
     parser.add_argument("--amp", choices=("bf16", "fp32"), default="bf16")
@@ -263,7 +264,10 @@ def write_wandb(args, report, global_step):
 def main() -> None:
     args = parse_args()
     context = init_torchrun()
-    require(context.world_size == 4, "v67 held evaluator must run on four GPUs")
+    require(
+        context.world_size == args.expected_world_size,
+        "v67 held evaluator world size differs from explicit contract",
+    )
     config = ContinuousPredictiveObjectFieldConfigV67()
     dataset = MultiSourcePointTrackObjectVideoDataset(
         args.data_index,
@@ -322,6 +326,7 @@ def main() -> None:
             "evaluation_source_revision": args.source_revision,
             "data": os.path.abspath(args.data_index),
             "items_per_source": args.items_per_source,
+            "world_size": context.world_size,
             "passed_sources": passed,
             "required_sources": required,
             "fixed_object_count": False,
