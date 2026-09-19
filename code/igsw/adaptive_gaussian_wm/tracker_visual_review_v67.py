@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import csv
 import inspect
 import json
@@ -10,8 +9,8 @@ from pathlib import Path
 
 import torch
 
-from .continuous_field_sampling_v67 import stratified_query_coordinates_v67
 from .multisource_point_track_dataset import MultiSourcePointTrackObjectVideoDataset
+from .tracker_review_cases_v67 import select_long_cases
 from .video_file_decoder import decode_video_frames
 
 
@@ -32,55 +31,29 @@ def write_json(path, payload):
 def select_cases(args):
     if args.queries_json:
         manual = read_json(args.queries_json)
-        return [
-            case for case in manual["cases"] if manual["points"].get(case["case_id"])
+        cases = [
+            case
+            for case in manual["cases"]
+            if manual["points"].get(case["case_id"])
+            and case.get("clip_seconds", 0) >= max(10.0, args.clip_seconds)
+            and case.get("camera_evidence", "").startswith("external")
         ]
-    dataset = MultiSourcePointTrackObjectVideoDataset(
-        args.data_index,
-        "train",
-        "8",
-        str(max(args.steps_ms)),
-        seed=args.seed,
-        group_partition="held",
-        held_group_stride=args.held_group_stride,
-        preserve_native_rgb=True,
-    )
-    records = {record.sequence_index: record for record in dataset._records}
-    cases = []
-    for source_index, source in enumerate(dataset.source_names):
-        indices = dataset.balanced_source_evaluation_indices(
-            source_index, args.cases_per_source
-        )
-        for index in indices:
-            print(
-                f"[tracker-review] selecting source={source} sample={index}", flush=True
-            )
-            sample = dataset[(index, 8)]
-            record = records[int(sample["sequence_index"])]
-            actual_source = dataset.source_names[record.source_index]
-            case_id = f"{actual_source}_seq{record.sequence_index}_item{index}"
-            case = {
-                "case_id": case_id,
-                "source": actual_source,
-                "requested_source": source,
-                "requested_index": index,
-                "decode_replaced": bool(sample["decode_replaced"]),
-                "record": asdict(record),
-                "group": dataset.sampling_group_names[record.group_index],
-                "anchor_frame": int(sample["control_indices"][3]),
-                "height": sample["video_rgb"].shape[-2],
-                "width": sample["video_rgb"].shape[-1],
-            }
-            cases.append(case)
-    return cases
+        return cases, {
+            "mode": "manual queries from long non-wrist review",
+            "selected": len(cases),
+        }
+    return select_long_cases(args)
 
 
-def window_indices(case, step_ms):
+def window_indices(case, step_ms, query_frames=()):
     record = case["record"]
     stride = max(1, round(step_ms * record["fps"] / 1000.0))
-    first = case["anchor_frame"] - 3 * stride
-    sampled = first + torch.arange(8) * stride
-    native = torch.arange(first, int(sampled[-1]) + 1)
+    first, last = case["first_frame"], case["last_frame"]
+    sampled = torch.arange(first, last + 1, stride)
+    # Multi-time queries and the final frame are shared exactly between both runs.
+    supplied = torch.as_tensor(query_frames, dtype=torch.long)
+    sampled = torch.cat((sampled, supplied, torch.tensor([last]))).unique(sorted=True)
+    native = torch.arange(first, last + 1)
     return native, sampled, stride
 
 
@@ -96,24 +69,15 @@ def decode_case(case, indices):
     )
 
 
-def query_points(case, args, device):
-    if args.queries_json:
-        points = read_json(args.queries_json)["points"][case["case_id"]]
-        xy = torch.tensor([[point["x"], point["y"]] for point in points], device=device)
-        xy = xy.float() * torch.tensor(
-            [case["width"] - 1, case["height"] - 1], device=device
-        )
-        labels = [point.get("label", "manual") for point in points]
-    else:
-        normalized = stratified_query_coordinates_v67(
-            torch.tensor([case["record"]["sequence_index"]], device=device),
-            args.grid_side,
-            0.35,
-        )[0]
-        xy = (normalized + 1.0) * 0.5
-        xy = xy * torch.tensor([case["width"] - 1, case["height"] - 1], device=device)
-        labels = ["unlabelled_grid_point"] * len(xy)
-    return xy, labels
+def manual_query_points(case, args):
+    points = read_json(args.queries_json)["points"][case["case_id"]]
+    xy = torch.tensor([[point["x"], point["y"]] for point in points]).float()
+    xy *= torch.tensor([case["width"] - 1, case["height"] - 1])
+    return {
+        "xy": xy,
+        "labels": [point.get("label", "manual") for point in points],
+        "frames": torch.full((len(xy),), case["anchor_frame"], dtype=torch.long),
+    }
 
 
 def load_tracker(args, device):
@@ -139,7 +103,7 @@ def load_tracker(args, device):
         "backward_tracking": True,
         "precision": "float32",
         "visibility": "predictor_returned_boolean_not_calibrated_probability",
-        "anchor_frame": "supplied_query; official predictor overwrites it, exclude from accuracy",
+        "query_frames": "per-point supplied positions; exclude each point's own query frame from differences",
         "confidence_filter": "none",
         "world_model_used": False,
         "appearance_teacher_used": False,
@@ -150,17 +114,26 @@ def load_tracker(args, device):
 
 
 @torch.no_grad()
-def predict(model, rgb, indices, anchor_frame, xy, device):
-    local_anchor = int((indices == anchor_frame).nonzero()[0, 0])
-    times = torch.full((len(xy), 1), float(local_anchor), device=device)
-    queries = torch.cat((times, xy), dim=-1)[None]
-    tracks, visible = model(
-        rgb[None].to(device=device, dtype=torch.float32),
-        queries=queries,
-        backward_tracking=True,
-    )
-    tracks = tracks[0].float().cpu()
-    visible = visible[0].bool().cpu().reshape(len(indices), len(xy))
+def predict(model, rgb, indices, points, device, points_per_pass):
+    local_anchors = torch.searchsorted(indices, points["frames"])
+    tracks_parts, visibility_parts = [], []
+    video = rgb[None].to(device=device, dtype=torch.float32)
+    for first in range(0, len(points["xy"]), points_per_pass):
+        last = first + points_per_pass
+        queries = torch.cat(
+            (local_anchors[first:last, None].float(), points["xy"][first:last]), -1
+        )
+        print(
+            f"[tracker-review] point_batch={first}:{min(last, len(points['xy']))} frames={len(indices)}",
+            flush=True,
+        )
+        tracks, visible = model(
+            video, queries=queries[None].to(device), backward_tracking=True
+        )
+        tracks_parts.append(tracks[0].float().cpu())
+        visibility_parts.append(visible[0].bool().cpu().reshape(len(indices), -1))
+    tracks = torch.cat(tracks_parts, 1)
+    visible = torch.cat(visibility_parts, 1)
     height, width = rgb.shape[-2:]
     in_bounds = (
         (tracks[..., 0] >= 0)
@@ -173,7 +146,7 @@ def predict(model, rgb, indices, anchor_frame, xy, device):
         "visibility": visible,
         "in_bounds": in_bounds,
         "frame_indices": indices.cpu(),
-        "anchor_local_frame": local_anchor,
+        "query_local_frames": local_anchors,
     }
 
 
@@ -182,7 +155,7 @@ def export_point_rows(path, native, sampled, labels, fps):
     difference = (native["tracks"][common] - sampled["tracks"]).norm(dim=-1)
     paired_visible = native["visibility"][common] & sampled["visibility"]
     selected = paired_visible & torch.isfinite(difference)
-    selected[sampled["anchor_local_frame"]] = False
+    selected[sampled["query_local_frames"], torch.arange(len(labels))] = False
     with Path(path).open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(
@@ -212,7 +185,7 @@ def export_point_rows(path, native, sampled, labels, fps):
                         original / fps,
                         point,
                         label,
-                        frame == sampled["anchor_local_frame"],
+                        frame == int(sampled["query_local_frames"][point]),
                         *native["tracks"][continuous_index, point].tolist(),
                         bool(native["visibility"][continuous_index, point]),
                         bool(native["in_bounds"][continuous_index, point]),

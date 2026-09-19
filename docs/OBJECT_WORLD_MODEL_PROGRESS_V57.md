@@ -1,9 +1,9 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-09-19
+> 更新日期：2026-09-20
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
 > 当前开发分支：`codex/tracker-visual-review-v67`
-> 当前实现：第 15.28 节原始 CoTracker 可视化评估，待用户服务器执行；不修改训练目标
+> 当前实现：第 15.29 节十秒非腕部片段与 motion-mask 密集采点，待用户服务器执行；不修改训练目标
 > 历史 V66 验证提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`（V66 四卡、六源、1536 held clips G0 audit）
 > V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
 > V62 B/C/D structural audit 实现提交：`2ad1158084ff0e8b4070f43c6721261df1884485`（静态验证，待服务器执行）
@@ -2618,3 +2618,30 @@ stop-gradient 副本，并不是外部 dynamic supervision。此前所有依赖�
 下一证据是逐 case 人工观看及必要的独立点/visibility 标记，不是新一轮 Dynamics 长训。
 完整操作和输出说明在
 `/Users/hela/Instruct-GS-World-recovered-20260725/docs/POINT_TRACKER_VISUAL_REVIEW_V67.md`。
+
+### 15.29 2026-09-20 十秒非腕部片段与变化区域密集采点
+
+**What changed**
+
+1. 用户观看上一批结果后反馈：点追踪看起来较准确，但八帧/400 ms 只覆盖约三秒，移动区域上的点不足。
+   这是用户的逐例视觉反馈，不是已标注的总体 accuracy。新 review 固定至少十秒连续区间，抽帧数量由区间和
+   fps 决定；30 Hz 时 native=301 帧、400 ms=26 帧。排除 wrist/未知相机与过短 episode，不重建原 index。
+2. 全图 jitter queries 改为多时刻 motion-region masks 内的确定性密集采点。先估计 dense flow、扣除 robust
+   partial-affine 相机运动、阈值分割连通区域，再按区域面积平方根分配采点；每段最多 1024 点，每次 tracker
+   处理 256 点且看完整十秒。mask 与 raw query 坐标/时间公开展示，不将 connected component 宣称为 object。
+3. 保留所有已选 case，包括空 mask；分别记录选样排除原因、相机依据、mask 阈值/面积、point query 帧和全部
+   visibility/轨迹。HTML 和 W&B 增加 mask+采点视图与人工误选/漏选记录。多时刻 query 属于 offline review，
+   使用了未来视频信息，不接入部署 student，不修改当前任何 loss、模型或训练采样。
+
+**Why**
+
+先区分短时间窗口与移动区域覆盖不足造成的观测缺口，再评价 tracker 的长时漂移、遮挡和重现，不能把缺少动态
+证据直接解释为追踪能力或学习目标已经正确。
+
+**Impact**
+
+继承六源 index、原视频 decoder、原 CoTracker 权重和可视化入口；拒绝旧八帧时长与全图随机点作为本轮默认值。
+Motion mask 不是 instance segmentation/GT，阴影、机械臂、视差、低纹理/静止小物体和前景主导相机拟合仍可能
+误选或漏选。0.75 px、3 MAD、9 px 最小面积是显式记录的 proposal 参数，未获得语义校准。旧 cache 的预处理及
+CoTracker 内部 resize 不会被本修改消除。本轮只完成本地代码与静态核对，未运行服务器推理，尚无新质量结论。
+下一证据仍是用户生成样本后的逐 case/mask/point 复查；G0 未晋级，不启动 Dynamics 或长训。

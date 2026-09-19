@@ -19,7 +19,7 @@ from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import (
     export_point_rows,
     load_tracker,
     predict,
-    query_points,
+    manual_query_points,
     read_json,
     select_cases,
     window_indices,
@@ -31,6 +31,7 @@ from igsw.adaptive_gaussian_wm.tracker_visual_review_media_v67 import (
     write_video,
 )
 from igsw.adaptive_gaussian_wm.tracker_visual_review_gallery_v67 import write_gallery
+from igsw.adaptive_gaussian_wm.tracker_motion_masks_v67 import build_motion_queries
 
 
 def parse_args():
@@ -42,10 +43,16 @@ def parse_args():
     parser.add_argument("--tracker_version", choices=("2", "3"), default="3")
     parser.add_argument("--source_revision", default="local-unversioned")
     parser.add_argument("--cases_per_source", type=int, default=5)
-    parser.add_argument("--steps_ms", default="100,200,400")
+    parser.add_argument("--steps_ms", default="400")
     parser.add_argument("--held_group_stride", type=int, default=20)
     parser.add_argument("--seed", type=int, default=17)
-    parser.add_argument("--grid_side", type=int, default=16)
+    parser.add_argument("--clip_seconds", type=float, default=10.0)
+    parser.add_argument("--point_budget", type=int, default=1024)
+    parser.add_argument("--points_per_pass", type=int, default=256)
+    parser.add_argument("--query_every_seconds", type=float, default=2.0)
+    parser.add_argument("--motion_pair_seconds", type=float, default=0.2)
+    parser.add_argument("--motion_min_px", type=float, default=0.75)
+    parser.add_argument("--mask_min_area", type=int, default=9)
     parser.add_argument("--queries_json", default="")
     parser.add_argument("--display_width", type=int, default=640)
     parser.add_argument("--reuse_completed", type=int, choices=(0, 1), default=1)
@@ -68,7 +75,7 @@ def pack_review(out):
         path
         for path in out.rglob("*")
         if path.is_file()
-        and path.suffix in (".html", ".mp4", ".png", ".csv", ".json", ".pt")
+        and path.suffix in (".html", ".mp4", ".png", ".csv", ".json", ".pt", ".npz")
     ]
     with zipfile.ZipFile(
         out / "review_bundle.zip", "w", compression=zipfile.ZIP_STORED
@@ -103,12 +110,15 @@ def upload(args):
             "source",
             "group",
             "step_ms",
+            "clip_seconds",
+            "query_points",
+            "camera",
             "native_hw",
             "model_hw",
             "native_video",
             "sampled_video",
             "comparison_video",
-            "query_frame",
+            "manual_query_reference_frame",
             "paired_visible_nonquery_count",
             "distance_p50_px_not_accuracy",
             "distance_p95_px_not_accuracy",
@@ -122,6 +132,9 @@ def upload(args):
             row["source"],
             row["group"],
             row["actual_step_ms"],
+            row["clip_seconds"],
+            row["point_count"],
+            row["parameters"]["case"]["camera"],
             row["native_resolution_hw"],
             summary["tracker"]["internal_resolution_hw"],
             wandb.Video(str(directory / "native.mp4"), format="mp4"),
@@ -133,6 +146,29 @@ def upload(args):
             diagnostic["paired_distance_px_p95"],
         )
     run.log({"tracker_review/cases": table})
+    masks = wandb.Table(
+        columns=[
+            "case",
+            "source",
+            "frame",
+            "mask_fraction",
+            "points",
+            "motion_mask_and_queries",
+        ]
+    )
+    for case in summary["cases"]:
+        directory = out / case["case_id"]
+        proposals = read_json(directory / "sampling.json")
+        for view in proposals["views"]:
+            masks.add_data(
+                case["case_id"],
+                case["source"],
+                view["frame"],
+                view["mask_fraction"],
+                view["point_count"],
+                wandb.Image(str(directory / view["overlay"])),
+            )
+    run.log({"tracker_review/motion_masks": masks})
     artifact = wandb.Artifact(
         name=f"tracker-visual-review-{run.id}", type="tracker-review"
     )
@@ -143,6 +179,9 @@ def upload(args):
         {
             "review/case_count": len(summary["cases"]),
             "review/comparison_count": len(summary["results"]),
+            "review/empty_motion_cases": sum(
+                case.get("point_count", 0) == 0 for case in summary["cases"]
+            ),
             "review/independent_accuracy": "not_measured",
             "review/local_gallery": str(out / "index.html"),
         }
@@ -165,6 +204,7 @@ def run_review(args):
             "held_group_stride",
             "seed",
             "queries_json",
+            "clip_seconds",
         )
     }
     plan_path = out / "cases.json"
@@ -174,26 +214,115 @@ def run_review(args):
         and plan_path.is_file()
         and read_json(plan_path)["selection"] == selection
     ):
-        cases = read_json(plan_path)["cases"]
+        plan = read_json(plan_path)
+        cases, selection_report = plan["cases"], plan["selection_report"]
     else:
-        cases = select_cases(args)
-        write_json(plan_path, {"selection": selection, "cases": cases})
+        cases, selection_report = select_cases(args)
+        write_json(
+            plan_path,
+            {
+                "selection": selection,
+                "cases": cases,
+                "selection_report": selection_report,
+            },
+        )
+    print(f"[tracker-review] selection={selection_report}", flush=True)
     print(
         f"[tracker-review] selected={len(cases)} cases; native/sampled pairs={len(cases) * len(args.steps_ms)}",
         flush=True,
     )
     device = torch.device("cuda:0")
     model, tracker = load_tracker(args, device)
+    tracker["points_per_pass"] = args.points_per_pass
+    tracker["temporal_chunking"] = "none; each point batch sees the entire >=10s clip"
+    tracker["query_batching_note"] = (
+        "joint attention is within each point batch plus official support queries"
+    )
     results = []
     for case in cases:
         case_id = case["case_id"]
-        xy, labels = query_points(case, args, device)
         all_indices, _, _ = window_indices(case, max(args.steps_ms))
         case_dir = out / case_id
         case_dir.mkdir(parents=True, exist_ok=True)
-        video = None
+        print(
+            f"[tracker-review] decode={case_id} path={case['record']['path']} seconds={case['clip_seconds']:.3f}",
+            flush=True,
+        )
+        video = decode_case(case, all_indices)
+        case["height"], case["width"] = list(video.shape[-2:])
+        source_video = case_dir / "source.mp4"
+        if not args.reuse_completed or not source_video.is_file():
+            write_video(
+                source_video,
+                (rgb_image(frame) for frame in video),
+                case["record"]["fps"],
+            )
+        sampling_config = {
+            key: configuration[key]
+            for key in (
+                "point_budget",
+                "query_every_seconds",
+                "motion_pair_seconds",
+                "motion_min_px",
+                "mask_min_area",
+                "seed",
+                "source_revision",
+                "queries_json",
+            )
+        }
+        sampling_path, points_path = case_dir / "sampling.json", case_dir / "queries.pt"
+        if args.queries_json:
+            points = manual_query_points(case, args)
+            proposal = {
+                "kind": "manual",
+                "views": [],
+                "actual_points": len(points["xy"]),
+            }
+        elif (
+            args.reuse_completed
+            and points_path.is_file()
+            and sampling_path.is_file()
+            and read_json(sampling_path)["configuration"] == sampling_config
+        ):
+            points = torch.load(points_path, map_location="cpu", weights_only=False)
+            proposal = read_json(sampling_path)
+        else:
+            print(
+                f"[tracker-review] motion_masks={case_id} budget={args.point_budget}",
+                flush=True,
+            )
+            points, proposal = build_motion_queries(video, case, args, case_dir)
+        proposal["configuration"] = sampling_config
+        write_json(sampling_path, proposal)
+        temporary_points = points_path.with_suffix(".pt.tmp")
+        torch.save(points, temporary_points)
+        temporary_points.replace(points_path)
+        xy, labels = points["xy"], points["labels"]
+        case["point_count"] = len(labels)
+        case["motion_views"] = proposal["views"]
+        rgb_image(video[case["anchor_frame"] - case["first_frame"]]).save(
+            case_dir / "anchor.png"
+        )
+        write_json(
+            plan_path,
+            {
+                "selection": selection,
+                "cases": cases,
+                "selection_report": selection_report,
+            },
+        )
+        if len(labels) == 0:
+            print(
+                f"[tracker-review] no_motion_queries={case_id}; raw video and empty masks retained",
+                flush=True,
+            )
+            write_gallery(out, cases, results, args.source_revision)
+            continue
+        native = None
         for step_ms in args.steps_ms:
-            native_indices, sampled_indices, stride = window_indices(case, step_ms)
+            native_indices, sampled_indices, stride = window_indices(
+                case, step_ms, points["frames"]
+            )
             directory = case_dir / f"step_{step_ms}ms"
             directory.mkdir(parents=True, exist_ok=True)
             parameters = {
@@ -202,6 +331,9 @@ def run_review(args):
                 "step_ms": step_ms,
                 "xy": xy.cpu().tolist(),
                 "labels": labels,
+                "query_frames": points["frames"].tolist(),
+                "sampled_frame_indices": sampled_indices.tolist(),
+                "sampling_configuration": sampling_config,
                 "source_revision": args.source_revision,
                 "display_width": args.display_width,
             }
@@ -214,18 +346,7 @@ def run_review(args):
                 print(f"[tracker-review] reuse={case_id}/{step_ms}ms", flush=True)
                 results.append(read_json(result_path))
                 continue
-            if video is None:
-                print(
-                    f"[tracker-review] decode={case_id} path={case['record']['path']}",
-                    flush=True,
-                )
-                video = decode_case(case, all_indices)
-                write_video(
-                    case_dir / "source.mp4",
-                    (rgb_image(frame) for frame in video),
-                    case["record"]["fps"],
-                )
-            native_rgb = video[native_indices - all_indices[0]]
+            native_rgb = video
             sampled_rgb = video[sampled_indices - all_indices[0]]
             raw_path = directory / "tracks.pt"
             cached = (
@@ -237,20 +358,26 @@ def run_review(args):
                 native, sampled = cached["native"], cached["sampled"]
             else:
                 print(
-                    f"[tracker-review] inference={case_id} step_ms={step_ms} native_frames={len(native_rgb)} sampled_frames=8 points={len(xy)}",
+                    f"[tracker-review] inference={case_id} step_ms={step_ms} native_frames={len(native_rgb)} sampled_frames={len(sampled_rgb)} points={len(xy)}",
                     flush=True,
                 )
                 started = time.monotonic()
-                native = predict(
-                    model, native_rgb, native_indices, case["anchor_frame"], xy, device
-                )
+                if native is None:
+                    native = predict(
+                        model,
+                        native_rgb,
+                        native_indices,
+                        points,
+                        device,
+                        args.points_per_pass,
+                    )
                 sampled = predict(
                     model,
                     sampled_rgb,
                     sampled_indices,
-                    case["anchor_frame"],
-                    xy,
+                    points,
                     device,
+                    args.points_per_pass,
                 )
                 cached = {
                     "parameters": parameters,
@@ -286,6 +413,15 @@ def run_review(args):
                 "directory": str(directory.relative_to(out)),
                 "step_ms": step_ms,
                 "actual_step_ms": stride / case["record"]["fps"] * 1000.0,
+                "clip_seconds": case["clip_seconds"],
+                "point_count": len(labels),
+                "sampled_frame_count": len(sampled_indices),
+                "native_frame_count": len(native_indices),
+                "sampled_intervals_ms": (
+                    (sampled_indices[1:] - sampled_indices[:-1])
+                    / case["record"]["fps"]
+                    * 1000
+                ).tolist(),
                 "native_resolution_hw": [case["height"], case["width"]],
                 "sampling_consistency": diagnostic,
                 "parameters": parameters,
@@ -305,6 +441,7 @@ def run_review(args):
     summary = {
         "configuration": configuration,
         "tracker": tracker,
+        "selection_report": selection_report,
         "cases": cases,
         "results": results,
         "status": "ready_for_human_review",

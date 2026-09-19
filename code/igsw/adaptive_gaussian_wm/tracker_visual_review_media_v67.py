@@ -20,10 +20,12 @@ def rgb_image(frame):
     return Image.fromarray(frame.permute(1, 2, 0).numpy())
 
 
-def write_video(path, frames, fps):
-    with av.open(str(path), mode="w") as container:
+def write_video(path, frames, fps, frame_times=None):
+    path = Path(path)
+    temporary = path.with_name(path.stem + ".tmp.mp4")
+    with av.open(str(temporary), mode="w") as container:
         stream = None
-        for image in frames:
+        for index, image in enumerate(frames):
             if stream is None:
                 width, height = image.size
                 stream = container.add_stream(
@@ -32,13 +34,20 @@ def write_video(path, frames, fps):
                 stream.width, stream.height = width + width % 2, height + height % 2
                 stream.pix_fmt = "yuv420p"
                 stream.options = {"crf": "20", "preset": "fast"}
+                if frame_times is not None:
+                    stream.time_base = Fraction(1, 90000)
+                    stream.codec_context.time_base = Fraction(1, 90000)
             padded = Image.new("RGB", (stream.width, stream.height))
             padded.paste(image, (0, 0))
             frame = av.VideoFrame.from_ndarray(np.asarray(padded), format="rgb24")
+            if frame_times is not None:
+                frame.time_base = Fraction(1, 90000)
+                frame.pts = round(float(frame_times[index]) * 90000)
             for packet in stream.encode(frame):
                 container.mux(packet)
         for packet in stream.encode():
             container.mux(packet)
+    temporary.replace(path)
 
 
 def draw_points(image, prediction, frame, fps, labels, title, trails_seconds=0.25):
@@ -48,7 +57,7 @@ def draw_points(image, prediction, frame, fps, labels, title, trails_seconds=0.2
     coordinates = prediction["tracks"]
     visible = prediction["visibility"]
     indices = prediction["frame_indices"]
-    local_anchor = prediction["anchor_local_frame"]
+    supplied = int((prediction["query_local_frames"] == frame).sum())
     current_frame = int(indices[frame])
     earlier = [
         i
@@ -61,7 +70,7 @@ def draw_points(image, prediction, frame, fps, labels, title, trails_seconds=0.2
         f"{title} | frame={current_frame} t={current_frame / fps:.3f}s",
         fill="white",
     )
-    suffix = " | QUERY FRAME (given, not predicted)" if frame == local_anchor else ""
+    suffix = f" | {supplied} supplied query points" if supplied else ""
     draw.text(
         (7, 20),
         "filled=visible; ring=not visible; border X=offscreen" + suffix,
@@ -106,7 +115,9 @@ def draw_points(image, prediction, frame, fps, labels, title, trails_seconds=0.2
 def crop_boxes(case, xy, labels):
     width, height = case["width"], case["height"]
     if labels and labels[0] != "unlabelled_grid_point":
-        groups = list(dict.fromkeys(labels))[:3]
+        groups = sorted(set(labels), key=lambda label: (-labels.count(label), label))[
+            :3
+        ]
         centers = [
             xy[[i for i, label in enumerate(labels) if label == group]]
             .mean(dim=0)
@@ -147,8 +158,12 @@ def panel(image, boxes, width, prediction, frame):
         crop = image.crop(spec["box"]).resize((crop_width, crop_width))
         crop_draw = ImageDraw.Draw(crop)
         left, top, right, bottom = spec["box"]
-        for point, (x, y) in enumerate(prediction["tracks"][frame].tolist()):
-            if left <= x < right and top <= y < bottom:
+        point_rows = prediction["tracks"][frame].tolist()
+        inside_count = sum(
+            left <= x < right and top <= y < bottom for x, y in point_rows
+        )
+        for point, (x, y) in enumerate(point_rows):
+            if inside_count <= 64 and left <= x < right and top <= y < bottom:
                 crop_draw.text(
                     (
                         (x - left) * crop_width / (right - left) + 4,
@@ -186,10 +201,12 @@ def render_pair(directory, rgb, native, sampled, case, xy, labels, display_width
 
     write_video(paths["native"], annotated(native, "NATIVE consecutive input"), fps)
     stride = int(sampled["frame_indices"][1] - sampled["frame_indices"][0])
+    times = (sampled["frame_indices"] - first).float() / fps
     write_video(
         paths["sampled"],
         annotated(sampled, f"SAMPLED input stride={stride}"),
         fps / stride,
+        frame_times=times,
     )
 
     def comparison_frames():
@@ -213,7 +230,9 @@ def render_pair(directory, rgb, native, sampled, case, xy, labels, display_width
             combined.paste(right, (display_width, 0))
             yield combined
 
-    write_video(paths["comparison"], comparison_frames(), fps / stride)
+    write_video(
+        paths["comparison"], comparison_frames(), fps / stride, frame_times=times
+    )
     preview = rgb_image(rgb[case["anchor_frame"] - first])
     preview.save(directory / "anchor.png")
     return {key: str(path.name) for key, path in paths.items()}, boxes

@@ -12,19 +12,39 @@
 
 默认权重：`/mnt/pfs/public/xuhaoming/instruct_gs_world/checkpoints/cotracker/scaled_offline.pth`，CoTracker3 offline。不下载模型，不加载 DINO、SigLIP 或历史 world-model checkpoint。默认只使用一个可见 GPU，没有 torchrun、DDP 或后台进程。联网只用于最后的 W&B 上传。
 
-## 比较方式
+## 2026-09-20 更新：长片段与变化区域密集采点
 
-- 默认六源各 5 个 held-group clips。按现有 sampler 选择，不按 motion/teacher confidence 筛选；这 30 个 case 是探索样本，不是总体准确率估计，也不保证涵盖全部遮挡/小物体场景。
-- 复用现有 native RGB decoder 与 HY packed-video frame offset，保存实际 source、episode、group、文件路径和 replacement 信息。已有 DataLoader 对坏文件的替换会明确记录；连续帧解码的错误不被新代码吞掉。
-- 请求 100/200/400 ms 三组间隔，实际 frame stride 按每个来源的 fps 四舍五入。每组恰好 8 个 sampled frames；native 分支读取这 8 帧首尾之间的全部连续帧。两个分支共享同一物理 anchor、同一批 query points、相同起止时刻。不同间隔也共享物理 anchor。
-- 默认 16×16 个 query points，复用 V67 jitter sampler；颜色只表示 point ID，不表示 object。输入 RGB 不预先缩小，但 CoTracker 自身的 internal resolution 会记录在 report/W&B 中。
-- 使用原始 predictor 返回的 visibility，不叠加 DINO valid、relay confidence、relation score 或剔除低置信轨迹。visibility 不等同于存在状态，也不是标定概率；query frame 是给定值，不计入两种采样的差异统计。
-- 原视频、连续帧叠加、抽帧叠加、共同时间戳左右对比，以及固定原图坐标的三个 crop 放大。crop 不跟随预测移动，避免自动追随漂移而隐藏错误；crop 内显示 point ID。
-- 对比视频只显示两种输入共有的 8 个时刻，不插值生成抽帧分支不存在的中间轨迹。各视频按对应真实时间间隔播放。
+旧版八帧、全图 jitter queries 只适合初步检查，不能覆盖完整物体变化。新版不改训练，只替换这一独立 review 的取样方式。
+
+- 默认六源各最多 5 个 held-group clips；按 held group、episode 确定性轮换，不按 tracker 成功率选例。不足时报告实际数量，不重复补齐；这些探索样本不用于总体准确率估计。
+- 每段首尾时间差至少 **10 秒**。30 Hz 时 native 输入为 **301 帧**；默认 400 ms 分支为 **26 帧**，而非原来的 8 帧。`CLIP_SECONDS` 可以增大，低于 10 时仍按 10 秒选样。短 episode 不 padding、不拼接。
+- 排除腕部相机；视频路径上的 head/high/exterior/front/top 可以进入，DROID wrist 回退不能进入。Bridge 的 image_0 按其 source convention 处理；RobotWin RGB cache 按既有 cam_high builder contract 处理；未知相机不猜测为外部相机，排除数量见 selection report。
+- 不重建 index。复用原 decoder 和 HY frame offset，但不再调用会跨 source 替换样本的训练 sampler。缺失 payload 由现有 index loader 跳过并计数；选中视频解码失败会暴露原路径，不悄悄换样本。
+
+### Mask 与采点方法
+
+1. 默认在片段的 0、2、4、6、8、10 秒附近生成提案；每个提案与前后约 0.2 秒的图像比较。图像按 decoder 返回尺寸处理，不预先缩小。
+2. 使用 [OpenCV Farneback dense optical flow](https://docs.opencv.org/4.x/dc/d6b/group__video__track.html)，再用 [robust partial-affine fitting](https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html) 估计全局相机运动。扣除该运动后，用残差位移分割 **motion-region masks**。拟合用的规则网格不送给 CoTracker。
+3. 阈值为原图残差位移 `max(0.75 px, median + 3 × 1.4826 × MAD)`；MAD 是残差与中位数之差的绝对值的中位数。3×3 closing 填小孔，保留至少 9 像素的连通区域。这些是可视化提案参数，不是经过校准的 object 标准；每例保存实际阈值、面积和相机拟合参数。
+4. 默认每段总预算 **1024 点**，在非空提案时刻之间分配。每个选中连通区域先给一个点，剩余预算按面积平方根分配；区域内做确定性 farthest-point coverage。没有全图均匀/random queries。极端多碎片时预算可能不足，完整 component map 仍保存。
+5. 每个点保留自己的原视频 query frame 与像素坐标。native/抽帧分支用完全相同的查询；会补入 query 帧和最终帧，因此某些来源不是严格等间距，实际 frame IDs 与间隔逐项保存，视频用原时间戳播放。
+6. 每次 CoTracker 最多处理 **256 query points**，每批都看完整十秒，未在时间上切短片段。不同批次的联合 attention 不共享，官方 support queries 仍存在；预算与 points-per-pass 记录在 metadata 中。
+
+**Mask 是变化提案，不是 SAM/实例分割，也不作为 object GT 或训练 loss。** 它可能漏掉暂时静止/低纹理的小物体，或选到机械臂、阴影、光照、相机视差；主导前景运动也可能污染相机拟合。相机拟合无结果的配对只记为 unavailable，不用未补偿全图运动替代。空 mask 仍保存原视频与可视化，不回退到全图网格，也不从报告中删掉。
+
+这一步利用整段视频和不同时间的变化选 query，只是 **offline teacher review**，不能作为部署 student 的因果输入。原有训练采样和 checkpoint 不变。
+
+### 比较与展示
+
+- 原 RGB、native 轨迹、400 ms 轨迹、同时间戳左右对比、每个提案时刻的 mask+点位图、独立二值 mask 和 component map 都保留。
+- 不插值生成抽帧分支不存在的轨迹；各分支共享起止时间，不再通过减少总时长控制计算量。
+- 不额外过滤 tracker visibility，in-bounds 独立记录。每个点自己的 query 帧是给定值，从差异统计排除；visibility 不是 existence 或经过校准的置信概率。
+- 固定坐标 crop 从采点区域选择，不追随轨迹；crop 内点过密时不叠加全部数字，完整 point ID 可从 CSV/PT 查看。
+- decoder 输入不额外降采样不等于权重在原生分辨率推理：官方 CoTracker internal resize 仍存在，并明确写入 metadata。历史 RGB cache 已经发生的预处理也不会被本工具恢复。
 
 ## 结果入口
 
-默认运行名称为 `tracker_visual_review_v67_seed17_<revision前7位>`。
+默认运行名称为 `tracker_motion_review_v67_10s_seed17_<revision前7位>`。
 
 结果目录：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/tracker_visual_reviews/<运行名称>/`。
 
@@ -33,18 +53,23 @@
 | `index.html` | 离线视频浏览、source 过滤、人工问题记录、manual query 点选 |
 | `review_bundle.zip` | 可下载的完整浏览包，解压后打开 `index.html` |
 | `review.log` | 前台运行日志，含每个 case 的 decode/inference/render 进度 |
-| `cases.json` | 实际样本选择，含 episode 内物理 anchor frame |
+| `cases.json` | 实际样本选择、相机证据、首尾帧、短片段/腕部/未知相机排除计数 |
 | `summary.json` | 运行配置、实际模型类和内部分辨率、每一组结果 |
 | `wandb_run.json` | 成功上传后的 W&B run URL |
 | `<case>/source.mp4` | 原始 RGB 连续片段，无轨迹叠加 |
+| `<case>/sampling.json` | 各时刻 mask 阈值、相机运动拟合、连通区域面积、采点数量 |
+| `<case>/queries.pt` | 每个 query 的像素坐标、原视频帧和 proposal component 标签 |
+| `<case>/motion_masks/frame_<frame>_queries.png` | 原图上的橙色变化 mask 与青色实际查询点 |
+| `<case>/motion_masks/frame_<frame>_mask.png` | 原尺寸二值提案 mask |
+| `<case>/motion_masks/frame_<frame>_components.npz` | 无损压缩的原尺寸连通区域编号，非 object ID |
 | `<case>/step_<ms>ms/native.mp4` | 连续帧推理结果和局部放大 |
-| `<case>/step_<ms>ms/sampled.mp4` | 8 帧抽样推理结果和局部放大 |
+| `<case>/step_<ms>ms/sampled.mp4` | 覆盖完整十秒的抽帧推理和局部放大 |
 | `<case>/step_<ms>ms/comparison.mp4` | 同时间戳左右对比 |
 | `<case>/step_<ms>ms/tracks.pt` | 未过滤轨迹、visibility、in-bounds、frame IDs 和查询点 |
 | `<case>/step_<ms>ms/point_rows.csv` | 每个共同时间戳、每个点的两个预测和差异 |
 
 W&B 项目：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`。
-Group：`point-tracker-visual-review-v67`；视频表：`tracker_review/cases`；Artifacts 中的 `tracker-review` 包含完整 ZIP。
+Group：`point-tracker-visual-review-v67`；视频表：`tracker_review/cases`，mask 表：`tracker_review/motion_masks`；Artifacts 中的 `tracker-review` 包含完整 ZIP。
 
 native/sampled 距离是两次预测之间的分歧，不是相对 GT 的 tracking error。两者一致仍可能一起追错；不输出 accuracy 或 promote/reject。
 
@@ -74,9 +99,11 @@ export VENV_ROOT="${RUNTIME_ROOT}"
 export DATA_INDEX="${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json"
 export TRACKER_CHECKPOINT="${RUNTIME_ROOT}/checkpoints/cotracker/scaled_offline.pth"
 export TRACKER_VERSION=3 CUDA_VISIBLE_DEVICES=0
-export RUN_NAME="tracker_visual_review_v67_seed17_${SOURCE_REVISION:0:7}"
+export RUN_NAME="tracker_motion_review_v67_10s_seed17_${SOURCE_REVISION:0:7}"
 export OUT="${RUNTIME_ROOT}/outputs/tracker_visual_reviews/${RUN_NAME}"
-export CASES_PER_SOURCE=5 TEMPORAL_STEP_MS=100,200,400 GRID_SIDE=16
+export CASES_PER_SOURCE=5 CLIP_SECONDS=10 TEMPORAL_STEP_MS=400
+export POINT_BUDGET=1024 POINTS_PER_PASS=256 QUERY_EVERY_SECONDS=2
+export MOTION_PAIR_SECONDS=0.2 MOTION_MIN_PX=0.75 MASK_MIN_AREA=9
 export SEED=17 HELD_GROUP_STRIDE=20 DISPLAY_WIDTH=640 REUSE_COMPLETED=1
 export WANDB_MODE=online WANDB_PROJECT=instruct-gs-world
 export WANDB_ENTITY=healenrenss-university-of-chinese-acadmic-and-science
@@ -87,7 +114,7 @@ bash "${ROOT}/code/scripts/review_point_tracker_v67.sh"
 echo "REVIEW_RC=$?"
 ```
 
-同一配置原样重跑会复用已完成结果；中途退出不会清理产物。预测已保存但视频渲染中断时，重用预测重新渲染。修改查询点、模型配置或 revision 会重新计算相应结果；不是严格训练 checkpoint resume。需要全部重算时设置 `REUSE_COMPLETED=0`。
+同一配置原样重跑会复用已完成的 mask/queries/预测结果；中途退出不会清理产物。预测已保存但视频渲染中断时，重用预测重新渲染。修改查询点、模型配置或 revision 会重新计算相应结果；不是严格训练 checkpoint resume。需要全部重算时设置 `REUSE_COMPLETED=0`。`TEMPORAL_STEP_MS=100,200,400` 仍支持三组比较，各组都看同一个十秒片段。
 
 若视频已生成但 W&B 上传失败，复用上面的完整环境、仅将 `REVIEW_STAGE=upload` 后再次执行同一 shell。它只读已有 summary/媒体，不加载 tracker、不跑 GPU 推理。结果 ZIP 在 W&B 上传之前就已落盘。
 
@@ -98,4 +125,6 @@ echo "REVIEW_RC=$?"
 3. `Export manual queries` 导出归一化坐标和原 case 元数据。把文件放到服务器 `/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/tracker_visual_reviews/manual_queries.json`。
 4. 复用上面的完整前台环境，设 `QUERIES_JSON=/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/tracker_visual_reviews/manual_queries.json`，将 `RUN_NAME`、`WANDB_NAME`、`OUT` 改成独立的 `_manual` 运行后执行同一入口。只处理真正点选过的 cases；不需要重新选择视频。
 
-浏览页的人工问题记录通过 `Export observations` 导出。先记录哪个视频、哪一帧、哪个 point 漂移或 visibility 错误，再做分来源和失败类型汇总。若点轨迹可靠而 grouping 不成立，应归因于 object 推导问题；若只有抽帧版本失效，先修采样；不能由视觉上好看的少数 case 声称所有 teacher targets 正确。
+浏览页新增 Region selection 的人工判断：移动物体覆盖、小物体漏选、主要是机械臂、相机运动、阴影/噪声、空 mask。先判断有没有选对区域，再记录哪个视频、哪一帧、哪个 point 漂移或 visibility 错误。人工点选只复用新版十秒、非腕部 cases，旧版八帧短片段 manual JSON 不作为新版输入。
+
+人工问题记录通过 `Export observations` 导出。若点轨迹可靠而 grouping 不成立，应归因于 object 推导问题；若只有抽帧版本失效，先修采样；不能由视觉上好看的少数 case 声称所有 teacher targets 正确。本地只做静态检查；本版真实长片段推理与 mask 质量仍待用户在服务器运行、观看。
