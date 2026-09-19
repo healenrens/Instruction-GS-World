@@ -1,14 +1,14 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-09-04
+> 更新日期：2026-09-19
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/object-motion-field-g0-v66`
-> 当前实现提交：`225cf5dd6007f28677f2034a50addf43f9b51b8a`（V66 audit、独立 report upload 与 W&B entity 修正）
-> 当前已验证代码提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`（V66 四卡、六源、1536 held clips G0 audit）
+> 当前开发分支：`codex/tracker-visual-review-v67`
+> 当前实现：第 15.28 节原始 CoTracker 可视化评估，待用户服务器执行；不修改训练目标
+> 历史 V66 验证提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`（V66 四卡、六源、1536 held clips G0 audit）
 > V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
 > V62 B/C/D structural audit 实现提交：`2ad1158084ff0e8b4070f43c6721261df1884485`（静态验证，待服务器执行）
 > 上次账本提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`
-> 当前实验：V66 已以 `1/6` 来源通过否决 prefix-fitted object motion field；下一项仍停留在 G0，重做 dynamic target，而非继续调 motion-field 容量
+> 当前实验：V67 的 latent 语义与 teacher contract 尚未获得独立证明；下一项是原始 tracker 逐例观看与抽帧对照，仍停留在 G0
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
 > 远端运行与产物根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/`  
 > W&B：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`
@@ -2590,3 +2590,31 @@ stop-gradient 副本，并不是外部 dynamic supervision。此前所有依赖�
 
 在该 audit 完成并解释 teacher/object contract 之前，暂停根据 V67 的 latent 命名、relation 均值或 visibility proxy
 设计新 Dynamics，也不以调 loss weight、latent size 或训练步数作为修复手段。
+
+### 15.28 2026-09-19 原始 CoTracker 可视化与抽帧对照
+
+**What changed**
+
+1. 当前最早未解决的问题仍是 G0 的 target/measurement validity。本轮独立查看 point tracking，而不是增加
+   world-model loss：六源各 5 个 held clips，比较相同物理 anchor、query points、起止时刻下的连续帧与
+   8 帧输入；请求间隔为 100/200/400 ms，实际间隔由各 source 原生 fps 决定。不将这 30 个探索样本作为
+   总体准确率统计，也不声称已经覆盖所有小物体/遮挡/快速运动场景。
+2. 原样保留 predictor 输出的轨迹和 visibility，独立记录 in-bounds、实际模型类、内部 resize 尺寸和数据
+   replacement。颜色只表示 point ID，不是 object；query 帧是给定位置，不是预测成功。冻结现有训练代码、
+   数据和权重，不加载 DINO、SigLIP、world-model checkpoint，不增加 relation 公式。
+3. 新入口 `review_point_tracker_v67.py` / `review_point_tracker_v67.sh` 提供单 GPU 前台执行、逐 case 复用、
+   原视频/轨迹视频/固定原图 crop/同时间戳对照、逐点 CSV、离线 gallery 的人工点选及 W&B 视频表/ZIP。
+   原始 tracker 默认是 CoTracker3 offline，不是 CoTracker2。native/sampled 分歧不作为 GT error。
+
+**Why**
+
+必须先区分“没有采到目标”“时间抽样过稀”“点追错或 visibility 错”“点正确但 object grouping 错”，才能决定
+哪些 teacher 证据可以进入后续学习目标；不能继续用 teacher 与 student 的一致性证明真实 object semantics。
+
+**Impact**
+
+继承六源 native RGB index、既有 decoder 和 CoTracker 权重；拒绝把旧 object-code/response 的命名与内部指标
+当作正确性依据。当前结果状态为实现交付、待用户服务器执行，没有新的真实 tracking 结果或晋级判决。
+下一证据是逐 case 人工观看及必要的独立点/visibility 标记，不是新一轮 Dynamics 长训。
+完整操作和输出说明在
+`/Users/hela/Instruct-GS-World-recovered-20260725/docs/POINT_TRACKER_VISUAL_REVIEW_V67.md`。
