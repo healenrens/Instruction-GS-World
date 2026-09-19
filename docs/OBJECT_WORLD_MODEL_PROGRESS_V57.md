@@ -3,7 +3,7 @@
 > 更新日期：2026-09-20
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
 > 当前开发分支：`codex/tracker-visual-review-v67`
-> 当前实现：第 15.29 节十秒非腕部片段与 motion-mask 密集采点，待用户服务器执行；不修改训练目标
+> 当前实现：第 15.30 节已有轨迹的 CPU 移动点筛选与完整轨迹重绘；区域过大问题尚未解决，不修改训练目标
 > 历史 V66 验证提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`（V66 四卡、六源、1536 held clips G0 audit）
 > V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
 > V62 B/C/D structural audit 实现提交：`2ad1158084ff0e8b4070f43c6721261df1884485`（静态验证，待服务器执行）
@@ -2645,3 +2645,33 @@ Motion mask 不是 instance segmentation/GT，阴影、机械臂、视差、低�
 误选或漏选。0.75 px、3 MAD、9 px 最小面积是显式记录的 proposal 参数，未获得语义校准。旧 cache 的预处理及
 CoTracker 内部 resize 不会被本修改消除。本轮只完成本地代码与静态核对，未运行服务器推理，尚无新质量结论。
 下一证据仍是用户生成样本后的逐 case/mask/point 复查；G0 未晋级，不启动 Dynamics 或长训。
+
+### 15.30 2026-09-20 明显移动点与完整轨迹的独立显示
+
+**What changed**
+
+1. 用户反馈原 mask 区域大于实际运动区域，并要求只看明显移动的点且画出轨迹。代码中的 Farneback 局部窗口、
+   前后两次残差取最大值以及 3x3 closing 都可能扩大变化响应；尚未逐例确认各因素的贡献。该 mask 仍只是采点
+   proposal，不是运动物体的准确边界。本轮不通过提高 mask 阈值或强行收缩区域宣称解决 segmentation。
+2. 新 CPU 入口读取已完成 review 的 `source.mp4` 与 `tracks.pt`，不重新解码训练原数据、不加载 CoTracker，
+   不改变 query 或轨迹。每点排除自身 query 帧，只使用 tracker 判为 visible、in-bounds 且坐标有限的位置。
+   至少 6 帧有效位置后，以 x/y 的 5%-95% 分位范围构成的包围盒对角线作为移动幅度，默认超过
+   `max(12 px, 原图短边的 2%)` 才显示。这是显示阈值，不是已标定的 tracking/object 判据。
+3. native 结果选出的同一组原始 point IDs 同时用于两个分支，避免分别选出更好看的样本。完整 raw tracks、
+   CSV、mask 与 proposal 点保留；每点选择原因和阈值单独写入 `motion_filter.json`。原有 sampling consistency
+   统计仍覆盖所有原始点，不能解释成已筛选子集的 accuracy。全部未入选时保留该 case，显示无点视频。
+4. 原 0.25 秒 trail 在 400 ms 抽帧下几乎无法画线，改为显示截至当前帧的完整历史轨迹；可见性、越界或非有限
+   坐标处断开，不插值跨遮挡。另保存最终帧上的完整轨迹 PNG。主视图只展示点与线，旧橙色 proposal 默认折叠，
+   人工反馈增加 oversized-region/background-spill 选项。重绘使用有损归档 RGB 仅作背景，不用于计算新误差。
+
+**Why**
+
+先分离“宽 proposal 选入静止背景点”和“点确实移动但 tracker 漂移/相机整体运动”，同时让长时轨迹可以被人直接
+检查。删掉显示上的静止点不等于确认真实物体边界，也不能推导出有效的训练目标。
+
+**Impact**
+
+复用已生成的十秒 review，输出独立目录并前台 CPU 重绘；原输入目录、训练代码、数据和权重均不变。图像空间移动
+仍可能来自相机、机械臂、阴影或 tracker 漂移；缓慢微小运动可能被隐藏，须通过保存的逐点记录检查。新阈值未做
+独立校准。本轮只做静态语法/接口核对，未在本地或服务器执行推理/重绘。下一证据是用户观看重绘结果并定位区域
+过大样本，再决定 proposal 边界应如何改进；G0 仍未晋级。

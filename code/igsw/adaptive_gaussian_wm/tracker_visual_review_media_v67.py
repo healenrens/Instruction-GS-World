@@ -1,4 +1,4 @@
-"""Videos with stable point IDs, unfiltered visibility, and fixed native crops."""
+"""Videos with original point IDs, visible trajectory segments, and fixed crops."""
 
 from __future__ import annotations
 
@@ -50,20 +50,22 @@ def write_video(path, frames, fps, frame_times=None):
     temporary.replace(path)
 
 
-def draw_points(image, prediction, frame, fps, labels, title, trails_seconds=0.25):
+def draw_points(image, prediction, frame, fps, labels, title, trails_seconds=0):
     image = image.copy()
     draw = ImageDraw.Draw(image)
     width, height = image.size
-    coordinates = prediction["tracks"]
-    visible = prediction["visibility"]
-    indices = prediction["frame_indices"]
+    coordinates = prediction["tracks"].numpy()
+    visible = prediction["visibility"].numpy()
+    indices = prediction["frame_indices"].numpy()
+    point_ids = prediction.get("point_ids", range(len(labels)))
     supplied = int((prediction["query_local_frames"] == frame).sum())
     current_frame = int(indices[frame])
-    earlier = [
-        i
-        for i in range(frame + 1)
-        if current_frame - int(indices[i]) <= trails_seconds * fps
-    ]
+    first = (
+        int(np.searchsorted(indices, current_frame - trails_seconds * fps))
+        if trails_seconds > 0
+        else 0
+    )
+    valid = visible & prediction["in_bounds"].numpy() & np.isfinite(coordinates).all(-1)
     draw.rectangle((0, 0, width, 37), fill=(12, 12, 12))
     draw.text(
         (7, 4),
@@ -77,17 +79,25 @@ def draw_points(image, prediction, frame, fps, labels, title, trails_seconds=0.2
         fill="white",
     )
     for point, xy in enumerate(coordinates[frame]):
+        point_id = int(point_ids[point])
+        tint = color(point_id)
+        # Draw each visible run separately; never bridge an occlusion/offscreen gap.
+        run_mask = valid[first : frame + 1, point]
+        boundaries = np.flatnonzero(
+            np.diff(np.r_[False, run_mask, False].astype(np.int8))
+        )
+        for start, stop in boundaries.reshape(-1, 2):
+            if stop - start >= 2:
+                line = [
+                    tuple(value)
+                    for value in coordinates[
+                        first + start : first + stop, point
+                    ].tolist()
+                ]
+                draw.line(line, fill=tint, width=2)
         x, y = xy.tolist()
         if not np.isfinite([x, y]).all():
             continue
-        tint = color(point)
-        for previous, following in zip(earlier, earlier[1:]):
-            if bool(visible[previous, point] & visible[following, point]):
-                line = [
-                    tuple(coordinates[t, point].tolist()) for t in (previous, following)
-                ]
-                if np.isfinite(line).all():
-                    draw.line(line, fill=tint, width=2)
         inside = 0 <= x < width and 0 <= y < height
         if inside:
             box = (x - 3, y - 3, x + 3, y + 3)
@@ -104,7 +114,7 @@ def draw_points(image, prediction, frame, fps, labels, title, trails_seconds=0.2
         if len(labels) <= 32:
             draw.text(
                 (x + 4, y + 3),
-                str(point),
+                str(point_id),
                 fill=tint,
                 stroke_width=1,
                 stroke_fill="black",
@@ -140,7 +150,7 @@ def crop_boxes(case, xy, labels):
             {
                 "box": [left, top, left + side, top + side],
                 "label": f"group {group_index + 1}"
-                if labels[0] != "unlabelled_grid_point"
+                if labels and labels[0] != "unlabelled_grid_point"
                 else label,
                 "annotation_label": label,
             }
@@ -164,13 +174,16 @@ def panel(image, boxes, width, prediction, frame):
         )
         for point, (x, y) in enumerate(point_rows):
             if inside_count <= 64 and left <= x < right and top <= y < bottom:
+                point_id = int(
+                    prediction.get("point_ids", range(len(point_rows)))[point]
+                )
                 crop_draw.text(
                     (
                         (x - left) * crop_width / (right - left) + 4,
                         (y - top) * crop_width / (bottom - top) + 3,
                     ),
-                    str(point),
-                    fill=color(point),
+                    str(point_id),
+                    fill=color(point_id),
                     stroke_width=1,
                     stroke_fill="black",
                 )
@@ -183,7 +196,9 @@ def panel(image, boxes, width, prediction, frame):
     return canvas
 
 
-def render_pair(directory, rgb, native, sampled, case, xy, labels, display_width):
+def render_pair(
+    directory, rgb, native, sampled, case, xy, labels, display_width, trails_seconds=0
+):
     directory = Path(directory)
     fps = case["record"]["fps"]
     first = int(native["frame_indices"][0])
@@ -195,7 +210,13 @@ def render_pair(directory, rgb, native, sampled, case, xy, labels, display_width
     def annotated(prediction, title):
         for frame, original in enumerate(prediction["frame_indices"].tolist()):
             overlay = draw_points(
-                rgb_image(rgb[original - first]), prediction, frame, fps, labels, title
+                rgb_image(rgb[original - first]),
+                prediction,
+                frame,
+                fps,
+                labels,
+                title,
+                trails_seconds,
             )
             yield panel(overlay, boxes, display_width, prediction, frame)
 
@@ -219,9 +240,16 @@ def render_pair(directory, rgb, native, sampled, case, xy, labels, display_width
                 fps,
                 labels,
                 "NATIVE at shared timestamp",
+                trails_seconds,
             )
             sampled_overlay = draw_points(
-                source_image, sampled, frame, fps, labels, "SAMPLED at shared timestamp"
+                source_image,
+                sampled,
+                frame,
+                fps,
+                labels,
+                "SAMPLED at shared timestamp",
+                trails_seconds,
             )
             left = panel(native_overlay, boxes, display_width, native, original - first)
             right = panel(sampled_overlay, boxes, display_width, sampled, frame)
@@ -235,4 +263,15 @@ def render_pair(directory, rgb, native, sampled, case, xy, labels, display_width
     )
     preview = rgb_image(rgb[case["anchor_frame"] - first])
     preview.save(directory / "anchor.png")
+    trajectory_image = draw_points(
+        rgb_image(rgb[-1]),
+        native,
+        len(rgb) - 1,
+        fps,
+        labels,
+        "NATIVE full-clip trajectories",
+        0,
+    )
+    trajectory_image.save(directory / "trajectories.png")
+    paths["trajectories"] = directory / "trajectories.png"
     return {key: str(path.name) for key, path in paths.items()}, boxes

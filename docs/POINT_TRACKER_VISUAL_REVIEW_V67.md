@@ -128,3 +128,56 @@ echo "REVIEW_RC=$?"
 浏览页新增 Region selection 的人工判断：移动物体覆盖、小物体漏选、主要是机械臂、相机运动、阴影/噪声、空 mask。先判断有没有选对区域，再记录哪个视频、哪一帧、哪个 point 漂移或 visibility 错误。人工点选只复用新版十秒、非腕部 cases，旧版八帧短片段 manual JSON 不作为新版输入。
 
 人工问题记录通过 `Export observations` 导出。若点轨迹可靠而 grouping 不成立，应归因于 object 推导问题；若只有抽帧版本失效，先修采样；不能由视觉上好看的少数 case 声称所有 teacher targets 正确。本地只做静态检查；本版真实长片段推理与 mask 质量仍待用户在服务器运行、观看。
+
+## 仅重绘明显移动点与完整轨迹
+
+新增 `/Users/hela/Instruct-GS-World-recovered-20260725/code/scripts/render_moving_tracker_review_v67.sh`。
+它在 CPU 上读已完成 review 的 `source.mp4` 和 `tracks.pt`，不跑 CoTracker、不重新采点、不加载训练模型或权重。
+原输入目录不修改，新目录保留所有原始轨迹和 masks，视频仅显示筛选后的点。中断后同参数重跑会复用已完成 case/分支。
+
+筛选定义：排除该点自身给定的 query 帧；仅取 visible、in-bounds、有限坐标，至少 6 帧。分别计算 x/y 位置的
+5% 和 95% 分位值，两轴跨度形成的包围盒对角线至少达到 `max(12 px, 短边的 2%)` 才显示。它不是首尾净位移，
+因此往返运动不因回到原点而被排除；也不是累计路程，避免静止点的细微抖动累加成大移动。每点数值与选择写入
+各分支的 `motion_filter.json`。例如短边 480px 时阈值为 12px，短边 1080px 时为 21.6px。
+
+同一组 native-selected point IDs 用于 native/抽帧对照，颜色保留原始 ID。默认 `TRAILS_SECONDS=0` 表示从片段
+开始至当前帧的完整轨迹；遮挡/越界时断线。`trajectories.png` 是最后一帧背景上的完整轨迹图。改成正数可缩短
+可视化 trail，但不改变移动筛选和 raw tracks。旧 0.25s trail 对 400ms 抽帧几乎不连线的问题由此消除。
+
+**这不是 mask 边界修复。** 宽区域内未明显移动的点会在主视频中消失，但相机运动/漂移仍可能通过，微小真实运动
+也可能被隐藏。原橙色 proposal 图折叠在对照区，人工反馈可选 `oversized_region_background_spill`。归档 RGB 经
+H264 压缩，只用于重绘背景；不计算像素 GT error。原 CSV 和 sampling consistency 仍属于全部原始点。
+
+先按前面的同步步骤部署交付 commit。下面是独立的前台 CPU 重绘命令（无需 GPU）：
+
+```bash
+export SOURCE_REVISION=<交付的完整commit>
+export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export ROOT="${RUNTIME_ROOT}/runtime/continuous_predictive_object_field_v67/releases/${SOURCE_REVISION}"
+export VENV_ROOT="${RUNTIME_ROOT}"
+export INPUT_REVIEW="${RUNTIME_ROOT}/outputs/tracker_visual_reviews/tracker_motion_review_v67_10s_seed17_5d82a59"
+export RUN_NAME="tracker_motion_review_v67_moving_${SOURCE_REVISION:0:7}"
+export OUT="${RUNTIME_ROOT}/outputs/tracker_visual_reviews/${RUN_NAME}"
+export MINIMUM_MOTION_PIXELS=12 MINIMUM_MOTION_FRACTION=0.02 MINIMUM_VISIBLE_FRAMES=6
+export TRAILS_SECONDS=0 DISPLAY_WIDTH=640 REUSE_COMPLETED=1
+export WANDB_MODE=online WANDB_PROJECT=instruct-gs-world
+export WANDB_ENTITY=healenrenss-university-of-chinese-acadmic-and-science
+export WANDB_NAME="${RUN_NAME}" WANDB_DIR="${RUNTIME_ROOT}/wandb"
+bash "${ROOT}/code/scripts/render_moving_tracker_review_v67.sh"
+echo "RENDER_RC=$?"
+```
+
+输出为 `${OUT}/index.html`、`${OUT}/review_bundle.zip`、`${OUT}/render.log`，完整根目录是
+`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/tracker_visual_reviews/tracker_motion_review_v67_moving_<revision前7位>/`。
+上传失败可同命令重跑，视频复用后重新上传，不重新跑追踪。
+
+在下载使用的 Mac 上执行，不使用另一台机器的 `/Users/hela` 作为当前用户名：
+
+```bash
+RUN_NAME=tracker_motion_review_v67_moving_<交付commit前7位>
+LOCAL_DIR="${HOME}/Downloads/${RUN_NAME}"
+mkdir -p "${LOCAL_DIR}" &&
+scp -P 8600 "root@10.66.0.39:/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/tracker_visual_reviews/${RUN_NAME}/review_bundle.zip" "${LOCAL_DIR}/review_bundle.zip" &&
+unzip -o "${LOCAL_DIR}/review_bundle.zip" -d "${LOCAL_DIR}" &&
+open "${LOCAL_DIR}/index.html"
+```
