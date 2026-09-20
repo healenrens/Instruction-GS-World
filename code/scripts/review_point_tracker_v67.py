@@ -163,6 +163,7 @@ def upload(args):
                 "object_motion_targets",
                 "robot_queries",
                 "unknown_queries",
+                "uncertain_moving_candidates",
                 "scene_queries",
                 "raw_queries",
                 "all_queries_video",
@@ -177,6 +178,7 @@ def upload(args):
                 selection["object_motion_target_count"],
                 counts.get("robot_context", 0),
                 counts.get("unknown", 0),
+                selection.get("uncertain_motion_candidate_count"),
                 counts.get("scene_context", 0),
                 selection["raw_point_count"],
                 wandb.Video(
@@ -184,6 +186,31 @@ def upload(args):
                 ),
             )
         run.log({"tracker_review/grounded_roles": roles})
+    source_rows = [case for case in summary["cases"] if "source_review" in case]
+    if source_rows:
+        sources = wandb.Table(
+            columns=[
+                "case",
+                "source",
+                "indexed_path",
+                "episode_file_frames",
+                "tracked_file_frames",
+                "original_provenance",
+                "whole_episode_overview",
+            ]
+        )
+        for case in source_rows:
+            source = case["source_review"]
+            sources.add_data(
+                case["case_id"],
+                case["source"],
+                source["indexed_record"]["path"],
+                source["episode_file_frame_range"],
+                source["selected_file_frames"],
+                source["raw_original_provenance"],
+                wandb.Image(str(out / case["case_id"] / "episode_overview.png")),
+            )
+        run.log({"tracker_review/indexed_sources": sources})
     masks = wandb.Table(
         columns=[
             "case",

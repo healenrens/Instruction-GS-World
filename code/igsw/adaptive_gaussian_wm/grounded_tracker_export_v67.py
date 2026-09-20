@@ -16,7 +16,7 @@ def select_training_points(native, queries, args):
         coordinates
     ).all(-1)
     valid[native["query_local_frames"].numpy(), np.arange(coordinates.shape[1])] = False
-    rows, target, context = [], [], []
+    rows, target, uncertain, context = [], [], [], []
     for index, metadata in enumerate(queries["metadata"]):
         positions = coordinates[:, index][valid[:, index]]
         span, jitter = None, None
@@ -42,8 +42,10 @@ def select_training_points(native, queries, args):
             span = float(np.linalg.norm(high - low))
         moving = enough and span >= threshold
         use_target = metadata["role"] == "object_candidate" and moving
+        use_uncertain = metadata["role"] == "unknown" and moving
         use_context = metadata["role"] != "object_candidate"
         target.append(use_target)
+        uncertain.append(use_uncertain)
         context.append(use_context)
         rows.append(
             {
@@ -54,18 +56,21 @@ def select_training_points(native, queries, args):
                 "motion_threshold_px": threshold,
                 "moving": bool(moving),
                 "object_motion_target": bool(use_target),
+                "uncertain_motion_candidate": bool(use_uncertain),
                 "context": bool(use_context),
                 "displayed": bool(use_target or use_context),
             }
         )
     target = torch.tensor(target, dtype=torch.bool)
+    uncertain = torch.tensor(uncertain, dtype=torch.bool)
     context = torch.tensor(context, dtype=torch.bool)
     display_ids = torch.where(target | context)[0]
     report = {
-        "contract": "grounded_object_motion_selection_v1",
+        "contract": "grounded_object_motion_selection_v2",
         "raw_point_count": len(rows),
         "shown_point_count": len(display_ids),
         "object_motion_target_count": int(target.sum()),
+        "uncertain_motion_candidate_count": int(uncertain.sum()),
         "context_count": int(context.sum()),
         "role_counts": dict(Counter(row["role"] for row in rows)),
         "minimum_visible_frames": args.minimum_visible_frames,
@@ -77,7 +82,9 @@ def select_training_points(native, queries, args):
         "points": rows,
         "motion_coordinate_system": "image pixels, not camera compensated or metric motion",
         "comparison": "same native-selected IDs in both panels and training candidate export",
-        "role_scope": "query-frame pseudo role, not a per-frame segmentation or verified identity",
+        "role_scope": "cross-anchor robot evidence, not a per-frame segmentation or verified identity",
+        "uncertain_motion_candidate_ids": torch.where(uncertain)[0].tolist(),
+        "uncertain_is_not_robot_or_background_gt": True,
     }
     return target, context, display_ids, report
 
@@ -92,18 +99,30 @@ def styled_tracks(prediction, queries, ids):
 
 
 def export_training_candidates(
-    directory, case, queries, native, sampled, args, parameters
+    directory, case, queries, native, sampled, args, parameters, role_evidence
 ):
     target, context, ids, report = select_training_points(native, queries, args)
     write_json(directory / "motion_filter.json", report)
     payload = {
-        "contract": "grounded_object_motion_teacher_v1",
+        "contract": "grounded_object_motion_teacher_v2",
         "source_revision": args.source_revision,
         "case": case,
         "queries": queries,
         "native": native,
         "sampled": sampled,
         "object_motion_target_mask": target,
+        "uncertain_motion_candidate_mask": torch.tensor(
+            [row["uncertain_motion_candidate"] for row in report["points"]],
+            dtype=torch.bool,
+        ),
+        "role_evidence": role_evidence,
+        "role_evidence_codes": {
+            "query_anchor_excluded": -2,
+            "unobserved": -1,
+            "outside_robot_mask": 0,
+            "robot_boundary": 1,
+            "robot_core": 2,
+        },
         "context_mask": context,
         "robot_context_mask": torch.tensor(
             [row["role"] == "robot_context" for row in queries["metadata"]]

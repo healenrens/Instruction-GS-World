@@ -1,9 +1,10 @@
 """Frozen GroundingDINO + SAM2 proposals at query frames, not object ground truth."""
 
-import cv2
 import numpy as np
 from PIL import Image
 import torch
+
+from .grounded_region_coverage_v67 import select_scale_coverage
 
 
 def mask_box(mask):
@@ -100,7 +101,7 @@ class GroundedTrackerMasks:
         ]
 
     @torch.no_grad()
-    def masks(self, image, points=None, boxes=None):
+    def masks(self, image, points=None, boxes=None, keep_alternatives=False):
         prompts = points if points is not None else boxes
         embeddings = None
         for first in range(0, len(prompts), self.args.sam_prompt_batch):
@@ -122,12 +123,19 @@ class GroundedTrackerMasks:
                 inputs["image_embeddings"] = embeddings
             outputs = self.sam_model(**inputs, multimask_output=True)
             embeddings = outputs.image_embeddings
-            # Select one mask per prompt by SAM's own score, not by motion strength.
             scores = outputs.iou_scores[0].float()
-            best = scores.argmax(-1)
-            low_res = outputs.pred_masks[
-                0, torch.arange(len(part), device=self.device), best
-            ]
+            if keep_alternatives:
+                # Point prompts can describe a part or its enclosing object. Keep both.
+                low_res = outputs.pred_masks[0].flatten(0, 1)
+                selected_scores = scores.flatten()
+            else:
+                best = scores.argmax(-1)
+                low_res = outputs.pred_masks[
+                    0, torch.arange(len(part), device=self.device), best
+                ]
+                selected_scores = scores[
+                    torch.arange(len(part), device=self.device), best
+                ]
             stable = (low_res > 1.0).sum((-1, -2)).float() / (low_res > -1.0).sum(
                 (-1, -2)
             ).clamp_min(1)
@@ -139,7 +147,7 @@ class GroundedTrackerMasks:
                 .numpy()
             )
             for index, mask in enumerate(masks):
-                yield mask, float(scores[index, best[index]]), float(stable[index])
+                yield mask, float(selected_scores[index]), float(stable[index])
 
     def frame(self, rgb, progress):
         args = self.args
@@ -192,7 +200,9 @@ class GroundedTrackerMasks:
                 f"[grounded-tracker] {progress} crop={crop_index} sam_prompts={len(seeds)}",
                 flush=True,
             )
-            for local, quality, stability in self.masks(crop, points=seeds):
+            for local, quality, stability in self.masks(
+                crop, points=seeds, keep_alternatives=True
+            ):
                 area = int(local.sum())
                 if (
                     area < args.sam_min_area
@@ -213,15 +223,9 @@ class GroundedTrackerMasks:
                 region = mask_region(local, left, top)
                 x, y, xr, yb = region["box"]
                 overlap = float((region["mask"] & robot_union[y:yb, x:xr]).sum() / area)
-                if any(
-                    mask_iou(region, robot) >= args.mask_dedup_iou
-                    for robot in robot_regions
-                ):
-                    continue
+                # Robot overlap is recorded, never subtracted from object proposals.
                 role = (
-                    "unknown"
-                    if overlap > args.robot_overlap_threshold
-                    else "scene_context"
+                    "scene_context"
                     if area / (height * width) > args.scene_area_fraction
                     else "object_candidate"
                 )
@@ -237,21 +241,20 @@ class GroundedTrackerMasks:
                 )
 
         kept = []
-        # Quality decides duplicates. Capacity selection below explicitly retains small regions.
+        # Deduplicate near-identical masks without removing part/whole alternatives.
         for item in sorted(proposals, key=lambda value: -value["sam_score"]):
             if not any(mask_iou(item, other) >= args.mask_dedup_iou for other in kept):
                 kept.append(item)
-        objects = sorted(
+        objects = select_scale_coverage(
             [item for item in kept if item["role"] == "object_candidate"],
-            key=lambda item: item["area"],
+            args.max_masks_per_frame,
+            (height, width),
         )
         context = sorted(
             [item for item in kept if item["role"] != "object_candidate"],
             key=lambda item: -item["sam_score"],
         )
-        selected = (
-            objects[: args.max_masks_per_frame] + context[: args.max_context_masks]
-        )
+        selected = objects + context[: args.max_context_masks]
         masks, records = [], []
         for item in robot_regions + selected:
             mask = np.zeros((height, width), bool)
@@ -273,20 +276,7 @@ class GroundedTrackerMasks:
                 "proposal_count_before_capacity": len(kept),
                 "retained_region_count": len(masks),
                 "unselected_region_count": len(kept) - len(selected),
+                "robot_role_status": "single_frame_hypotheses_only",
+                "selection": "all_multimask_scales_then_scale_balanced_new_support",
             },
         )
-
-
-def inside_points(mask, count):
-    distance = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 3)
-    interior = distance >= min(2.0, float(distance.max()) * 0.5)
-    yy, xx = np.where(mask & interior)
-    xy = np.stack([xx, yy], -1).astype(np.float32)
-    selected, nearest = [], np.full(len(xy), np.inf, np.float32)
-    next_index = int(distance[yy, xx].argmax())
-    for _ in range(min(count, len(xy))):
-        selected.append(next_index)
-        nearest = np.minimum(nearest, ((xy - xy[next_index]) ** 2).sum(-1))
-        nearest[selected] = -1
-        next_index = int(nearest.argmax())
-    return xy[selected]

@@ -30,11 +30,18 @@ def write_gallery(out, cases, results, revision):
             )
             grounded = row.get("grounded_selection")
             if grounded:
+                role_note = (
+                    "Roles combine native tracks with robot masks at multiple anchors. "
+                    "They are uncalibrated hypotheses, not verified identities. "
+                    f"Uncertain moving candidates: {grounded['uncertain_motion_candidate_count']}. "
+                    if grounded.get("contract") == "grounded_object_motion_selection_v2"
+                    else "Query-frame pseudo roles, not verified object labels. "
+                )
                 display_note = (
                     f"<p>Object-motion targets: {grounded['object_motion_target_count']}; "
                     f"context points: {grounded['context_count']}; total raw queries: {grounded['raw_point_count']}. "
                     "Green = object-motion candidate; orange = robot; purple = unknown; blue = scene. "
-                    "Query-frame pseudo roles, not verified object labels. Main display uses exactly the exported selection.</p>"
+                    f"{role_note}Main display uses exactly the exported selection.</p>"
                     f'<p><a href="{path}/motion_filter.json">Per-point selection and thresholds</a> · '
                     f'<a href="{path}/training_candidates.pt">Training candidate export</a></p>'
                     f'<details><summary>All tracked points, BEFORE motion filtering</summary><video controls preload="none" src="{path}/all_queries.mp4"></video></details>'
@@ -70,14 +77,34 @@ def write_gallery(out, cases, results, revision):
         )
         mask_open = "" if any("display_filter" in row for row in pairs) else " open"
         mask_title = (
-            "Grounded-SAM-2 masks and query roles (before motion selection)"
-            if case.get("sampling_kind") == "grounding_dino_sam2_region_queries_v1"
+            "Grounded-SAM-2 proposals: orange is a single-frame robot hypothesis, not a confirmed role"
+            if case.get("sampling_kind", "").startswith("grounding_dino_sam2_")
             else "Original proposal masks and queries, BEFORE track filtering (not object labels)"
         )
+        provenance = case.get("source_review")
+        source_note = ""
+        if provenance:
+            role_links = (
+                f' · <a href="{esc(case_id)}/role_resolution.json">Per-point cross-anchor role evidence</a>'
+                f' · <a href="{esc(case_id)}/resolved_queries.pt">Resolved queries</a>'
+                if "resolved_role_counts" in case
+                else ""
+            )
+            source_note = (
+                f"<p>Indexed file: <code>{esc(provenance['indexed_record']['path'])}</code><br>"
+                f"Episode file frames: {provenance['episode_file_frame_range']}; "
+                f"tracked file frames: {provenance['selected_file_frames']}. "
+                "Original/unedited provenance is NOT established.</p>"
+                f'<p><a href="{esc(case_id)}/source_review.json">File and episode mapping</a>{role_links}</p>'
+                "<details><summary>Whole indexed episode overview (inspection only, NOT tracker input)</summary>"
+                f'<figure><img loading="lazy" src="{esc(case_id)}/episode_overview.png" alt="Frames sampled across the entire indexed episode, annotated with frame numbers and times"></figure></details>'
+                f'<div class="review" data-review="{esc(case_id)}/source"><label>Indexed episode <select data-field="provenance"><option>unreviewed</option><option>continuous_episode</option><option>edited_or_cut</option><option>wrong_episode_range</option><option>wrong_camera</option><option>unclear</option></select></label><label class="notes">Cuts / timestamps / correct path if known <input data-field="notes"></label></div>'
+            )
         blocks.append(f"""
 <section data-source="{esc(case["source"])}"><h2>{esc(case_id)}</h2>
 <p>{esc(case["group"])} · {case["width"]} × {case["height"]} · {case["record"]["fps"]:g} Hz · {case["clip_seconds"]:.2f} seconds · {esc(case["camera"])} · {case["point_count"]} queries</p>
-<details><summary>Native source video</summary><video class="wide" controls loop preload="none" src="{esc(case_id)}/source.mp4"></video></details>
+{source_note}
+<details><summary>Consecutive selected frames from indexed video</summary><video class="wide" controls loop preload="none" src="{esc(case_id)}/source.mp4"></video></details>
 <details{mask_open}><summary>{mask_title}</summary><div class="videos">{proposals}</div></details>{empty}
 <p><a href="{esc(case_id)}/sampling.json">Mask method, thresholds and sampling metadata</a> · <a href="{esc(case_id)}/queries.pt">Query positions and times</a></p>
 <div class="review" data-review="{esc(case_id)}/masks"><label>Region selection <select data-field="mask"><option>unreviewed</option><option>moving_object_covered</option><option>oversized_region_background_spill</option><option>small_object_missed</option><option>object_mislabelled_robot</option><option>robot_mislabelled_object</option><option>mostly_arm</option><option>camera_motion</option><option>shadow_or_noise</option><option>empty</option><option>mixed</option></select></label><label class="notes">Incorrect regions / frames <input data-field="notes"></label></div>
@@ -131,7 +158,7 @@ picker.querySelector('.undo').onclick=()=>{saved.points[id].pop();persist();redr
         .replace("__PAYLOAD__", payload)
     )
     if any(
-        case.get("sampling_kind") == "grounding_dino_sam2_region_queries_v1"
+        case.get("sampling_kind", "").startswith("grounding_dino_sam2_")
         for case in cases
     ):
         document = document.replace(
@@ -141,5 +168,13 @@ picker.querySelector('.undo').onclick=()=>{saved.points[id].pop();persist();redr
         document = document.replace(
             "Motion masks select queries at multiple times, not object labels. Orange = raw proposal; cyan = query before filtering. Stable trajectory color = original point ID.",
             "SAM masks select queries at multiple times. Green = object candidate, orange = robot context, purple = unknown/contact overlap, blue = scene context. These are query-frame pseudo roles, not per-frame verified identities. Main videos use the exported training selection; all-query videos retain filtered points.",
+        )
+    if any(
+        case.get("sampling_kind") == "grounding_dino_sam2_coverage_queries_v2"
+        for case in cases
+    ):
+        document = document.replace(
+            "SAM masks select queries at multiple times. Green = object candidate, orange = robot context, purple = unknown/contact overlap, blue = scene context. These are query-frame pseudo roles, not per-frame verified identities.",
+            "SAM masks sample multiple support scales. In proposal images orange is a single-frame robot hypothesis. In tracked videos: green = object candidate, orange = repeated robot-core evidence, purple = unresolved role, blue = scene candidate. Track roles use multiple anchor masks; colors are NOT object IDs or verified labels. Uniform whole-episode overviews are for source inspection only.",
         )
     (out / "index.html").write_text(document, encoding="utf-8")

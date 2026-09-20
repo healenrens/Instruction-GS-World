@@ -2,8 +2,9 @@
 
 > 更新日期：2026-09-20
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/grounded-object-tracker-v67`
-> 当前实现：第 15.31 节 GroundingDINO + SAM2 区域采点、CoTracker、角色可视化与同源训练候选导出；保留上一版 baseline
+> 当前开发分支：`codex/grounded-object-coverage-v67`
+> 当前实现：第 15.33 节多尺度 mask 覆盖、跨时刻机械臂证据与源视频映射导出；保留第 15.31 节 baseline
+> 最新人工反馈：第 15.32 节记录物体覆盖不足、跨数据集机械臂混淆和 RoboMIND 视频来源疑问；尚未证明 teacher 可用于物体级监督
 > 历史 V66 验证提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`（V66 四卡、六源、1536 held clips G0 audit）
 > V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
 > V62 B/C/D structural audit 实现提交：`2ad1158084ff0e8b4070f43c6721261df1884485`（静态验证，待服务器执行）
@@ -2716,3 +2717,74 @@ CoTracker 内部 resize 不会被本修改消除。本轮只完成本地代码�
   下一步只运行这批可视化与数据生成，人工检查 held-object 被误归机械臂、DROID 小物体、阴影和遮挡轨迹。
 - 完整执行/下载说明在 `/Users/hela/Instruct-GS-World-recovered-20260725/docs/POINT_TRACKER_VISUAL_REVIEW_V67.md`
   的 Grounded-SAM-2 小节；旧 moving baseline 入口和产物保持不变。
+
+### 15.32 2026-09-20 Grounded 采样人工复查：覆盖、角色与来源分开判断
+
+**What changed**
+
+1. 用户观看新结果后的逐源反馈如下。未提供具体 case ID/逐点标注，本轮未重新读取服务器视频，因此只记录用户观察，
+   不把它们写成总体准确率或已定位的根因。
+
+   | 数据源 | 用户观察 |
+   |---|---|
+   | AgiBot | 整体较好，但操作物体覆盖不完整；例如瓶盖有点、瓶身无点 |
+   | DROID | 操作物体标记错误较多，物体与机械臂混淆；分辨率/数据质量为待确认假设 |
+   | RoboMIND | 疑似使用剪辑版而非原版视频；开头无机械臂时，操作物体被误标为机械臂 |
+   | Bridge | 与 DROID 类似的操作物体标记和角色混淆问题 |
+   | HY | 多例操作物与机械臂混在一起 |
+
+2. 本地代码核对发现，SAM 每个 prompt 只取最高分 mask，容量截断前又按面积从小到大排序；这不保证整个物体覆盖。
+   瓶身缺点也可能发生在后续运动/visibility 筛选，未查看具体 raw/mask case 前不能归因于单一环节。
+   机械臂 detector 的输出直接生成 robot_context；与其重叠的候选归 unknown，近重复候选被去重，二者均不进入
+   object_motion_target。该规则会放大机械臂误检对操作物体目标的影响，尤其需要检查抓取接触区域。
+3. RoboMIND 本地默认来源为 `/mnt/pfs/public/RoboMINDv2_LeRobot`，index builder 从 LeRobot episode metadata
+   读取 camera、from_timestamp 和 length，review 再截取连续十秒。尚未确认用户看到的是源视频剪辑/拼接、转换问题、
+   episode 边界问题，还是预期内的十秒截取；未猜测替换原始数据路径。后续按“来源连续性 -> 物体覆盖 -> 角色分离”
+   顺序推进，保留现有 baseline 和原始未筛选轨迹；不先通过降低 DROID/Bridge 配比解释或掩盖共有的 teacher 问题。
+
+**Why**
+
+可跟踪的局部点不等于完整 object-level target；错误角色可能系统性排除真正被操作的物体，而剪辑/错误时间边界
+不能作为连续物理变化监督。这三类问题应分别归因，不能合并成一个数据集平均质量或追踪成功指标。
+
+**Impact**
+
+本次只更新证据与优先级，不修改训练权重、采样参数、模型或数据路径。RoboMIND 修正需要具体 case 的源文件和帧范围；
+角色修正应允许“机械臂未出现/证据不足”，物体覆盖修正不能通过简单膨胀 mask 或只增加瓶盖上的点数冒充完成。
+
+### 15.33 2026-09-20 覆盖优先采点与跨时刻角色证据
+
+**What changed**
+
+1. 主修改是把单帧部件/角色判定改为保留多种支持范围、再沿轨迹积累角色证据。SAM 自动 point prompts 保留全部
+   multimask alternatives；去除近重复后，按面积排序分三档轮换选 mask，同档优先尚未覆盖的区域。
+   Farthest-point 采样同时避开该时刻其他 mask 已采的坐标，避免瓶盖和瓶身重叠部分反复消耗预算。
+   不再减掉 robot mask 或因 robot 重叠提前拒绝 object proposal。保持既有质量/稳定性过滤、总点预算2048、
+   原尺寸全图+crop、至少十秒非腕部片段和相同 held cases；不改变源配比、模型、loss、权重与 tracker。
+2. Query-frame 的 robot mask 只是假设。追踪后，在多个 anchor 上取点对应的 robot-mask 证据；排除给定 query
+   帧本身，至少两个其他可观测 anchor 落入 robot core、且占可观测 anchor 的比例不小于2/3，才标 robot_context。
+   至少两个其他 anchor 在 mask 外且总重叠比例不超过1/4，作为 object candidate（原大场景 proposal 仍为 scene）；
+   冲突或证据不足标 unknown。Core 默认距边界超过2 px。这些仍是未校准启发式，不是正确性概率，重复误检仍可能
+   通过；“未被检测为 robot”也不是物体语义证明。逐点投票全部保存，unknown 运动另存
+   `uncertain_motion_candidate_mask`，不当作 robot/background GT。运动阈值默认去掉区域面积项，保留
+   `max(1.5 px, 3 * 二阶差分尺度)`，避免同一运动因 whole-object mask 比部件大而被隐藏；所有 raw 点仍导出。
+3. 新导出契约为 `grounded_object_motion_teacher_v2`，主视频使用同一 resolved role/target/context 选择。
+   每 case 添加 `source_review.json`（实际索引文件、episode 与片段文件帧范围、container 元数据）、整段 indexed
+   episode 的24帧概览、`role_resolution.json`（逐点跨 anchor 证据）和 `resolved_queries.pt`。
+   概览均匀抽样仅供检查源视频，不进入 tracker。RoboMIND 不猜测替换原路径；用户明确本轮只能交付代码，
+   由用户访问服务器/原始数据并反馈，未访问远端。可按现有 CASE_MANIFEST 接口提供修正后的完整 case record。
+
+**Why**
+
+避免局部 SAM mask 与单帧机械臂误检过早丢掉操作物体证据，同时将“源片段是否连续”和“采点/角色是否正确”分开查看。
+
+**Impact / 待验证结论**
+
+- 保留 baseline `9c11b3e6398d50d308b0e917c5163db1da64cc73`；新分支、新输出目录，前台单 GPU运行，运行阶段无
+  GitHub/模型下载依赖。复用完成 case/anchor/native tracks。W&B 新增整段来源概览与 uncertain-moving 计数。
+- 本次只做本地静态审查，不跑本地模型或远端推理。未证明覆盖率/角色准确率提升，更未证明 RoboMIND 原始映射修复。
+  新实现不做 source-specific 降权，不把轮换三个尺度档、2/3/1/4 比例或二阶差分解释为学习理论或语义真值。
+- 可证伪检查：同 case 瓶身仍无 raw query 则 proposal/预算问题未解决；raw 有点、主视频消失则查 motion_filter；
+  操作物体仍被持续标 robot 则跨时刻检测证据不足以分离角色；源概览有剪辑/错误边界则须先由用户确认原文件与映射。
+- 下一项仍是 G0 逐例用户复查，不启动 world-model 长训，不晋级 object-level teacher。新的独立运行/下载命令见
+  `/Users/hela/Instruct-GS-World-recovered-20260725/docs/POINT_TRACKER_VISUAL_REVIEW_V67.md` 最后一节。

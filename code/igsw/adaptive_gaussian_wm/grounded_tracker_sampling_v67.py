@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 import torch
 
-from .grounded_tracker_masks_v67 import inside_points
+from .grounded_region_coverage_v67 import spread_inside_points
 from .tracker_visual_review_v67 import read_json, write_json
 
 
@@ -58,7 +58,7 @@ def render_proposals(rgb, masks, records, points, frame, directory):
     draw.rectangle((0, 0, image.width, 20), fill="black")
     draw.text(
         (4, 4),
-        "green=object candidate orange=robot purple=unknown blue=scene",
+        "green=region candidate orange=robot HYPOTHESIS blue=large region",
         fill="white",
     )
     name = f"grounded_masks/frame_{frame}_queries.png"
@@ -144,8 +144,9 @@ def build_grounded_queries(video, case, args, segmenter, directory, configuratio
         with np.load(directory / info["mask_archive"]) as archive:
             masks = [archive[f"m{record['mask_index']}"] for record in info["regions"]]
         per_frame = []
+        occupied = np.zeros((case["height"], case["width"]), bool)
         for mask, record in zip(masks, info["regions"]):
-            xy = inside_points(mask, counts[record["region_id"]])
+            xy = spread_inside_points(mask, counts[record["region_id"]], occupied)
             left, top, right, bottom = record["box"]
             for coordinate in xy.tolist():
                 row = {
@@ -158,6 +159,7 @@ def build_grounded_queries(video, case, args, segmenter, directory, configuratio
                     "region_diagonal_px": float(np.hypot(right - left, bottom - top)),
                     "sam_score": record["sam_score"],
                     "robot_overlap": record["robot_overlap"],
+                    "scale_band": record.get("scale_band"),
                 }
                 point_rows.append(row)
                 per_frame.append(row)
@@ -196,7 +198,8 @@ def build_grounded_queries(video, case, args, segmenter, directory, configuratio
         "metadata": point_rows,
     }
     report = {
-        "kind": "grounding_dino_sam2_region_queries_v1",
+        "kind": "grounding_dino_sam2_coverage_queries_v2",
+        "native_hw": [case["height"], case["width"]],
         "configuration": configuration,
         "future_used_for_offline_query_selection": True,
         "actual_points": len(point_rows),
@@ -206,8 +209,8 @@ def build_grounded_queries(video, case, args, segmenter, directory, configuratio
         "views": views,
         "regions": all_records,
         "unselected_region_count": sum(count == 0 for count in counts.values()),
-        "semantics": "pseudo roles at query frame; region IDs are not persistent object IDs",
-        "sampling": "native mask interiors; region-balanced deterministic farthest points; no motion prefilter",
+        "semantics": "proposal roles only, resolved after native tracking; anchor-local region IDs are not object IDs",
+        "sampling": "all SAM alternatives; scale-balanced masks; no robot subtraction; farthest points also avoid prior points in overlapping masks",
         "sam_grid_role": "segmentation prompts only; these are not CoTracker queries",
     }
     save_tensor(directory / "queries.pt", queries)

@@ -9,7 +9,7 @@ VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 DEPLOYED_REVISION=local-unversioned
 if [ -f "${ROOT}/SOURCE_REVISION" ]; then read -r DEPLOYED_REVISION < "${ROOT}/SOURCE_REVISION"; fi
 SOURCE_REVISION="${SOURCE_REVISION:-${DEPLOYED_REVISION}}"
-RUN_NAME="${RUN_NAME:-grounded_object_tracker_v67_10s_seed17_${SOURCE_REVISION:0:7}}"
+RUN_NAME="${RUN_NAME:-grounded_object_coverage_v67_10s_seed17_${SOURCE_REVISION:0:7}}"
 OUT="${OUT:-${RUNTIME_ROOT}/outputs/tracker_visual_reviews/${RUN_NAME}}"
 
 export PYTHONPATH="${RUNTIME_ROOT}/third_party/co-tracker:${ROOT}/code:${PYTHONPATH:-}"
@@ -37,11 +37,15 @@ echo "[grounded-tracker] foreground=single_gpu output=${OUT} stage=${REVIEW_STAG
   --sam_score_threshold "${SAM_SCORE_THRESHOLD:-0.70}" --sam_stability_threshold "${SAM_STABILITY_THRESHOLD:-0.90}" \
   --mask_dedup_iou "${MASK_DEDUP_IOU:-0.80}" \
   --robot_box_threshold "${ROBOT_BOX_THRESHOLD:-0.25}" --robot_text_threshold "${ROBOT_TEXT_THRESHOLD:-0.20}" \
-  --robot_overlap_threshold "${ROBOT_OVERLAP_THRESHOLD:-0.10}" --scene_area_fraction "${SCENE_AREA_FRACTION:-0.40}" \
+  --robot_min_anchor_votes "${ROBOT_MIN_ANCHOR_VOTES:-2}" \
+  --robot_confirmation_fraction "${ROBOT_CONFIRMATION_FRACTION:-0.6666666666666666}" \
+  --robot_rejection_fraction "${ROBOT_REJECTION_FRACTION:-0.25}" --robot_core_margin_px "${ROBOT_CORE_MARGIN_PX:-2}" \
+  --scene_area_fraction "${SCENE_AREA_FRACTION:-0.40}" \
   --max_masks_per_frame "${MAX_MASKS_PER_FRAME:-48}" --max_context_masks "${MAX_CONTEXT_MASKS:-8}" \
-  --motion_floor_pixels "${MOTION_FLOOR_PIXELS:-1.5}" --motion_region_fraction "${MOTION_REGION_FRACTION:-0.08}" \
+  --motion_floor_pixels "${MOTION_FLOOR_PIXELS:-1.5}" --motion_region_fraction "${MOTION_REGION_FRACTION:-0}" \
   --motion_noise_multiplier "${MOTION_NOISE_MULTIPLIER:-3.0}" --minimum_visible_frames "${MINIMUM_VISIBLE_FRAMES:-6}" \
   --display_width "${DISPLAY_WIDTH:-640}" --reuse_completed "${REUSE_COMPLETED:-1}" \
+  --episode_overview_frames "${EPISODE_OVERVIEW_FRAMES:-24}" \
   --wandb_mode "${WANDB_MODE:-online}" --wandb_project "${WANDB_PROJECT:-instruct-gs-world}" \
   --wandb_entity "${WANDB_ENTITY:-healenrenss-university-of-chinese-acadmic-and-science}" \
   --wandb_name "${WANDB_NAME:-${RUN_NAME}}" --wandb_dir "${WANDB_DIR:-${RUNTIME_ROOT}/wandb}" \

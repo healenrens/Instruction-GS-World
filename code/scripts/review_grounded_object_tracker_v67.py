@@ -13,6 +13,8 @@ import torch
 import transformers
 
 from igsw.adaptive_gaussian_wm.grounded_tracker_masks_v67 import GroundedTrackerMasks
+from igsw.adaptive_gaussian_wm.grounded_tracker_roles_v67 import resolve_track_roles
+from igsw.adaptive_gaussian_wm.tracker_source_review_v67 import export_source_review
 from igsw.adaptive_gaussian_wm.grounded_tracker_sampling_v67 import (
     build_grounded_queries,
     save_tensor,
@@ -73,15 +75,19 @@ def parse_args():
     parser.add_argument("--mask_dedup_iou", type=float, default=0.80)
     parser.add_argument("--robot_box_threshold", type=float, default=0.25)
     parser.add_argument("--robot_text_threshold", type=float, default=0.20)
-    parser.add_argument("--robot_overlap_threshold", type=float, default=0.10)
+    parser.add_argument("--robot_min_anchor_votes", type=int, default=2)
+    parser.add_argument("--robot_confirmation_fraction", type=float, default=2 / 3)
+    parser.add_argument("--robot_rejection_fraction", type=float, default=0.25)
+    parser.add_argument("--robot_core_margin_px", type=float, default=2.0)
     parser.add_argument("--scene_area_fraction", type=float, default=0.40)
     parser.add_argument("--max_masks_per_frame", type=int, default=48)
     parser.add_argument("--max_context_masks", type=int, default=8)
     parser.add_argument("--motion_floor_pixels", type=float, default=1.5)
-    parser.add_argument("--motion_region_fraction", type=float, default=0.08)
+    parser.add_argument("--motion_region_fraction", type=float, default=0.0)
     parser.add_argument("--motion_noise_multiplier", type=float, default=3.0)
     parser.add_argument("--minimum_visible_frames", type=int, default=6)
     parser.add_argument("--display_width", type=int, default=640)
+    parser.add_argument("--episode_overview_frames", type=int, default=24)
     parser.add_argument("--reuse_completed", type=int, choices=(0, 1), default=1)
     parser.add_argument(
         "--wandb_mode", choices=("online", "offline", "disabled"), default="online"
@@ -207,7 +213,7 @@ def run_review(args):
         write_json(
             out / "training_manifest.json",
             {
-                "contract": "grounded_object_motion_teacher_v1",
+                "contract": "grounded_object_motion_teacher_v2",
                 "root": str(out.resolve()),
                 "entries": training_entries,
                 "pseudo_labels": True,
@@ -245,6 +251,10 @@ def run_review(args):
         )
         rgb_image(rgb[case["anchor_frame"] - case["first_frame"]]).save(
             directory / "anchor.png"
+        )
+        print(f"[grounded-tracker] source_overview={case['case_id']}", flush=True)
+        case["source_review"] = export_source_review(
+            case, directory, args.episode_overview_frames
         )
         sampling_path = directory / "sampling.json"
         if (
@@ -292,6 +302,14 @@ def run_review(args):
             save_tensor(
                 native_path, {"configuration": configuration, "prediction": native}
             )
+        queries, role_evidence, role_report = resolve_track_roles(
+            native, queries, sampling, directory, args
+        )
+        case["resolved_role_counts"] = role_report["role_counts"]
+        print(
+            f"[grounded-tracker] cross_anchor_roles={case['case_id']} roles={role_report['role_counts']}",
+            flush=True,
+        )
         for step in args.steps_ms:
             pair_dir = directory / f"step_{step}ms"
             pair_dir.mkdir(exist_ok=True)
@@ -337,7 +355,14 @@ def run_review(args):
                 case["record"]["fps"],
             )
             ids, point_selection = export_training_candidates(
-                pair_dir, case, queries, native, sampled, args, parameters
+                pair_dir,
+                case,
+                queries,
+                native,
+                sampled,
+                args,
+                parameters,
+                role_evidence,
             )
             print(
                 f"[grounded-tracker] render={case['case_id']} targets={point_selection['object_motion_target_count']} context={point_selection['context_count']}",
@@ -362,8 +387,17 @@ def run_review(args):
                 "path": str((pair_dir / "training_candidates.pt").relative_to(out)),
                 "queries": len(queries["xy"]),
                 "object_targets": point_selection["object_motion_target_count"],
+                "uncertain_motion_candidates": point_selection[
+                    "uncertain_motion_candidate_count"
+                ],
                 "context_points": point_selection["context_count"],
                 "sampling": str(sampling_path.relative_to(out)),
+                "role_resolution": str(
+                    (directory / "role_resolution.json").relative_to(out)
+                ),
+                "source_review": str(
+                    (directory / "source_review.json").relative_to(out)
+                ),
             }
             row = {
                 "case_id": case["case_id"],

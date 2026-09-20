@@ -184,6 +184,8 @@ open "${LOCAL_DIR}/index.html"
 
 ## Grounded-SAM-2：物体运动为目标，机械臂为上下文
 
+本节保留 `9c11b3e` baseline 的历史契约；当前修正版请使用文末“覆盖与角色修正版”，不要混用默认参数。
+
 本节是独立新入口，不覆盖前面的 moving baseline。实现位置：
 
 - `/Users/hela/Instruct-GS-World-recovered-20260725/code/igsw/adaptive_gaussian_wm/grounded_tracker_masks_v67.py`：GroundingDINO 机械臂 boxes、SAM2 query-frame masks、crop、去重、角色证据。
@@ -333,3 +335,101 @@ open "${LOCAL_DIR}/index.html"
 
 重点逐例看：机械臂是否误包了被抓物体、远处小物体是否有 mask/queries、主视频丢失的点在 all-query 中是否真实运动、
 阴影/相机运动是否被标为物体、遮挡后是否追到另一表面。新版本已完成静态检查，服务器推理和质量提升尚待运行确认。
+
+## 覆盖与角色修正版
+
+**What changed**
+
+1. 自动 SAM 点提示保留多个尺度的 mask；三档面积轮换选区域，优先新覆盖，重叠 mask 不重复采相同坐标。
+   不删除与 robot mask 重叠的候选；保留整物体与部件的可能性，不使用膨胀 mask 假装补全。
+2. Robot role 由 native tracks 在多个 anchor 的 mask 证据决定，query anchor 不投票。两个以上其他 anchor
+   落在 robot core 且比例>=2/3 才标橙色；两个以上在 mask 外且重叠<=1/4 为非 robot 候选；冲突为紫色 unknown。
+   绿色仍是候选，不是已证明的物体。默认运动阈值取消 mask 对角线项；原始微动/静止点仍在 all-query 视频。
+3. 增加源文件/episode 帧范围和整段24帧概览。RoboMIND 原版不可由本地确认，本次不改原 index，不替换猜测路径。
+
+**Why**
+
+先看清漏点发生在 proposal、采样、运动过滤还是角色排除，以及源片段本身是否连续，再决定哪些证据可以监督模型。
+
+**Impact**
+
+新 teacher candidate 契约为 `grounded_object_motion_teacher_v2`；新增 uncertain-motion mask 与逐 anchor role evidence。
+`queries.pt` 保留初始采样假设；`resolved_queries.pt` 和 `training_candidates.pt` 使用跨时刻角色，二者不可混读。
+后者 `role_evidence.evidence` 为 `[A,N]`，A 是 anchor 数，N 是总点数；-2=query帧不投票，-1=不可观测，
+0=robot mask外，1=robot边界，2=robot core。Core margin2px、比例和运动阈值都是待人工检查的参数。
+角色不确定的移动点在 `uncertain_motion_candidate_mask` 中，仍作为上下文显示；不是已认证训练标签。
+不改变现有训练入口，不重装环境。代码仅静态检查，用户运行后才能判断效果。所有源采用相同规则。
+
+### 同步代码（有 GitHub 网络时执行）
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source &&
+git fetch origin '+refs/heads/codex/grounded-object-coverage-v67:refs/remotes/origin/codex/grounded-object-coverage-v67' &&
+git switch --detach refs/remotes/origin/codex/grounded-object-coverage-v67 &&
+env ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source \
+  RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world \
+  SOURCE_REVISION="$(git rev-parse HEAD)" \
+  bash /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/code/scripts/deploy_continuous_predictive_object_field_v67_runtime.sh
+```
+
+### 单卡前台运行（独立命令，不访问 GitHub）
+
+将 SOURCE_REVISION 换成此次交付 commit。复用上一版已下载权重，不需要重新下载。
+CASE_MANIFEST 沿用用户已观看的同批十秒样本；清空它才重新选样。下面所有环境不依赖同步 shell。
+
+```bash
+export SOURCE_REVISION=<本次交付完整commit>
+export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export ROOT="${RUNTIME_ROOT}/runtime/continuous_predictive_object_field_v67/releases/${SOURCE_REVISION}"
+export VENV_ROOT="${RUNTIME_ROOT}"
+export DATA_INDEX="${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json"
+export CASE_MANIFEST="${RUNTIME_ROOT}/outputs/tracker_visual_reviews/tracker_motion_review_v67_10s_seed17_5d82a59/cases.json"
+export TRACKER_CHECKPOINT="${RUNTIME_ROOT}/checkpoints/cotracker/scaled_offline.pth"
+export TRACKER_VERSION=3 CUDA_VISIBLE_DEVICES=0
+export GROUNDING_MODEL="${RUNTIME_ROOT}/models/grounding-dino-base"
+export SAM_MODEL="${RUNTIME_ROOT}/models/sam2.1-hiera-large"
+export RUN_NAME="grounded_object_coverage_v67_10s_seed17_${SOURCE_REVISION:0:7}"
+export OUT="${RUNTIME_ROOT}/outputs/tracker_visual_reviews/${RUN_NAME}"
+export POINT_BUDGET=2048 POINTS_PER_PASS=256 QUERY_EVERY_SECONDS=2
+export ROBOT_POINT_FRACTION=0.15 OTHER_CONTEXT_FRACTION=0.05
+export ROBOT_MIN_ANCHOR_VOTES=2 ROBOT_CONFIRMATION_FRACTION=0.6666666666666666
+export ROBOT_REJECTION_FRACTION=0.25 ROBOT_CORE_MARGIN_PX=2
+export MOTION_REGION_FRACTION=0 MOTION_FLOOR_PIXELS=1.5 MOTION_NOISE_MULTIPLIER=3
+export CLIP_SECONDS=10 TEMPORAL_STEP_MS=400 SEED=17 REUSE_COMPLETED=1 EPISODE_OVERVIEW_FRAMES=24
+export WANDB_MODE=online WANDB_PROJECT=instruct-gs-world
+export WANDB_ENTITY=healenrenss-university-of-chinese-acadmic-and-science
+export WANDB_NAME="${RUN_NAME}" WANDB_DIR="${RUNTIME_ROOT}/wandb" REVIEW_STAGE=run
+unset WANDB_RUN_ID WANDB_RESUME
+cd "${ROOT}"
+bash "${ROOT}/code/scripts/review_grounded_object_tracker_v67.sh"
+echo "REVIEW_RC=$?"
+```
+
+同配置重跑会复用完整结果和中间轨迹，不覆盖 baseline。新增 episode overview 需要扫描整个 indexed episode，
+可能比只解码十秒片段慢；它不加载所谓原始路径、不修改 tracking 输入。只有上传失败时设 REVIEW_STAGE=upload。
+
+### 下载和反馈
+
+在自己的 Mac 运行，将提交短号换成此次交付值：
+
+```bash
+RUN_NAME=grounded_object_coverage_v67_10s_seed17_<commit前7位>
+LOCAL_DIR="${HOME}/Downloads/${RUN_NAME}"
+mkdir -p "${LOCAL_DIR}" &&
+scp -P 8600 "root@10.66.0.39:/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/tracker_visual_reviews/${RUN_NAME}/review_bundle.zip" "${LOCAL_DIR}/review_bundle.zip" &&
+unzip -o "${LOCAL_DIR}/review_bundle.zip" -d "${LOCAL_DIR}" &&
+open "${LOCAL_DIR}/index.html"
+```
+
+结果根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/tracker_visual_reviews/grounded_object_coverage_v67_10s_seed17_<commit前7位>/`。
+根下 index.html / review_bundle.zip / review.log 为展示、下载与进度；每个 case 下新增：
+
+- `source_review.json`：实际索引路径、camera、episode 文件帧范围、十秒窗口文件帧范围和视频元数据。
+- `episode_overview.png`：整段 indexed episode 的24帧概览，非模型输入、非原版认证；剪切发生在两张概览图之间时仍可能漏看。
+- `role_resolution.json` / `resolved_queries.pt`：每点跨时刻 robot/非robot/unknown 的依据；主视频颜色从这里读取。
+- `step_400ms/motion_filter.json`：每点幅度/阈值及进入 target、uncertain 或 context 的具体原因。
+- `step_400ms/training_candidates.pt`：全部轨迹、resolved roles、role evidence 和候选 masks，非 GT。
+
+先检查 RoboMIND 的源概览与连续 source.mp4；再检查瓶身等遗漏部位是否在原 mask/queries 中出现；最后对照
+all_queries.mp4 和主视频区分追踪/过滤/角色问题。Gallery 支持标记 edited_or_cut、wrong_episode_range、wrong_camera
+并导出 human_observations.json。若需要原版路径更换，用户须提供该 case 的实际原文件及 episode 范围后再修改映射。
