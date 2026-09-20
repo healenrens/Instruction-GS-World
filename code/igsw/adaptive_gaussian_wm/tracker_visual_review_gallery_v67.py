@@ -34,7 +34,11 @@ def write_gallery(out, cases, results, revision):
                     "Roles combine native tracks with robot masks at multiple anchors. "
                     "They are uncalibrated hypotheses, not verified identities. "
                     f"Uncertain moving candidates: {grounded['uncertain_motion_candidate_count']}. "
-                    if grounded.get("contract") == "grounded_object_motion_selection_v2"
+                    if grounded.get("contract")
+                    in (
+                        "grounded_object_motion_selection_v2",
+                        "grounded_object_motion_selection_v3",
+                    )
                     else "Query-frame pseudo roles, not verified object labels. "
                 )
                 display_note = (
@@ -46,6 +50,19 @@ def write_gallery(out, cases, results, revision):
                     f'<a href="{path}/training_candidates.pt">Training candidate export</a></p>'
                     f'<details><summary>All tracked points, BEFORE motion filtering</summary><video controls preload="none" src="{path}/all_queries.mp4"></video></details>'
                 )
+                if "motion_top_fraction" in grounded:
+                    before = grounded["object_motion_candidate_count_before_topk"]
+                    retained = grounded["object_motion_target_count"]
+                    fraction = grounded["motion_top_fraction"]
+                    display_note += (
+                        f"<h3>物体运动候选 Top-{fraction:.0%}：{before} → {retained}</h3>"
+                        "<p>按每段视频内的有效轨迹运动跨度排名，不是追踪置信度。机械臂、scene、unknown 不参与竞争；"
+                        "下方两图仅显示物体候选，上下文仍保留在数据和完整视频中。</p>"
+                        f'<div class="videos"><figure><figcaption>筛选前：所有通过运动门槛的物体候选 ({before})</figcaption>'
+                        f'<video controls loop preload="none" src="{path}/object_before_topk.mp4"></video></figure>'
+                        f"<figure><figcaption>筛选后：导出的物体运动目标 ({retained})</figcaption>"
+                        f'<video controls loop preload="none" src="{path}/object_after_topk.mp4"></video></figure></div>'
+                    )
             snapshot = (
                 f'<details><summary>Full-clip trajectory image</summary><figure><img loading="lazy" src="{path}/trajectories.png" alt="Full visible trajectory segments for displayed points"></figure></details>'
                 if "trajectories" in row.get("media", {})
@@ -95,11 +112,14 @@ def write_gallery(out, cases, results, revision):
                 f"Episode file frames: {provenance['episode_file_frame_range']}; "
                 f"tracked file frames: {provenance['selected_file_frames']}. "
                 "Original/unedited provenance is NOT established.</p>"
-                f'<p><a href="{esc(case_id)}/source_review.json">File and episode mapping</a>{role_links}</p>'
-                "<details><summary>Whole indexed episode overview (inspection only, NOT tracker input)</summary>"
+                f'<h3>整段 episode 概览与文件映射</h3><p><a href="{esc(case_id)}/episode_overview.png">直接打开整段概览 PNG</a> · '
+                f'<a href="{esc(case_id)}/source_review.json">File and episode mapping / 文件映射 JSON</a>{role_links}</p>'
+                "<details open><summary>Whole indexed episode overview / 整段概览（非原版认证）</summary>"
                 f'<figure><img loading="lazy" src="{esc(case_id)}/episode_overview.png" alt="Frames sampled across the entire indexed episode, annotated with frame numbers and times"></figure></details>'
                 f'<div class="review" data-review="{esc(case_id)}/source"><label>Indexed episode <select data-field="provenance"><option>unreviewed</option><option>continuous_episode</option><option>edited_or_cut</option><option>wrong_episode_range</option><option>wrong_camera</option><option>unclear</option></select></label><label class="notes">Cuts / timestamps / correct path if known <input data-field="notes"></label></div>'
             )
+        elif case.get("sampling_kind", "").startswith("grounding_dino_sam2_"):
+            source_note = "<p>此份结果没有 episode 概览或文件映射记录；不能用十秒追踪视频代替整段来源检查。</p>"
         blocks.append(f"""
 <section data-source="{esc(case["source"])}"><h2>{esc(case_id)}</h2>
 <p>{esc(case["group"])} · {case["width"]} × {case["height"]} · {case["record"]["fps"]:g} Hz · {case["clip_seconds"]:.2f} seconds · {esc(case["camera"])} · {case["point_count"]} queries</p>

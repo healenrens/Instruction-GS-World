@@ -44,6 +44,7 @@ echo "[grounded-tracker] foreground=single_gpu output=${OUT} stage=${REVIEW_STAG
   --max_masks_per_frame "${MAX_MASKS_PER_FRAME:-48}" --max_context_masks "${MAX_CONTEXT_MASKS:-8}" \
   --motion_floor_pixels "${MOTION_FLOOR_PIXELS:-1.5}" --motion_region_fraction "${MOTION_REGION_FRACTION:-0}" \
   --motion_noise_multiplier "${MOTION_NOISE_MULTIPLIER:-3.0}" --minimum_visible_frames "${MINIMUM_VISIBLE_FRAMES:-6}" \
+  --motion_top_fraction "${MOTION_TOP_FRACTION:-0.5}" \
   --display_width "${DISPLAY_WIDTH:-640}" --reuse_completed "${REUSE_COMPLETED:-1}" \
   --episode_overview_frames "${EPISODE_OVERVIEW_FRAMES:-24}" \
   --wandb_mode "${WANDB_MODE:-online}" --wandb_project "${WANDB_PROJECT:-instruct-gs-world}" \

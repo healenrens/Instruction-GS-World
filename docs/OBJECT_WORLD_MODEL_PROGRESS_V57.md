@@ -2,8 +2,8 @@
 
 > 更新日期：2026-09-20
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/grounded-object-coverage-v67`
-> 当前实现：第 15.33 节多尺度 mask 覆盖、跨时刻机械臂证据与源视频映射导出；保留第 15.31 节 baseline
+> 当前开发分支：`codex/grounded-motion-topk-v67`
+> 当前实现：第 15.34 节在既有轨迹上筛选 Top-50% 物体运动候选，并导出筛选前后对照；冻结机械臂角色规则
 > 最新人工反馈：第 15.32 节记录物体覆盖不足、跨数据集机械臂混淆和 RoboMIND 视频来源疑问；尚未证明 teacher 可用于物体级监督
 > 历史 V66 验证提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`（V66 四卡、六源、1536 held clips G0 audit）
 > V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
@@ -2788,3 +2788,32 @@ CoTracker 内部 resize 不会被本修改消除。本轮只完成本地代码�
   操作物体仍被持续标 robot 则跨时刻检测证据不足以分离角色；源概览有剪辑/错误边界则须先由用户确认原文件与映射。
 - 下一项仍是 G0 逐例用户复查，不启动 world-model 长训，不晋级 object-level teacher。新的独立运行/下载命令见
   `/Users/hela/Instruct-GS-World-recovered-20260725/docs/POINT_TRACKER_VISUAL_REVIEW_V67.md` 最后一节。
+
+### 15.34 2026-09-20 复用轨迹的运动 Top-K 候选筛选
+
+**What changed**
+
+1. 用户反馈整体追踪尚可，物体与机械臂粘连仍未解决，暂时保留；背景点增多且有错误移动，提出训练数据优先选择
+   移动点前50%。本轮冻结 SAM proposals、queries、CoTracker 输出、角色判断、源配比和模型，不继续增加 robot
+   分类规则。用户未找到来源概览，gallery 将其默认展开并增加 PNG/JSON 直接链接；不声称已确认 RoboMIND 原始数据。
+2. 在每个连续 clip 内，仅对已经通过现有 visibility/in-bounds/有限坐标/运动门槛的 object_candidate 排名。
+   排名分数仍是原生轨迹的非 query 有效位置 x/y 5%-95% 跨度的对角线长度，不引入新的语义评分。
+   默认保留 ceil(候选数*0.5)，同分按原 point ID 升序；空候选保持为空。Robot、unknown、scene 不参与名额竞争，
+   原 context 和 uncertain masks 不变。导出改为 `grounded_object_motion_teacher_v3`，同时保存 Top-K 前候选 mask、
+   排名、cutoff、每区域筛选前后数量与最终 target mask；本版未接入任何旧训练 loss。
+3. 新 CPU 前台入口读取上一版输出中的真实 tracks 与 teacher candidate export，重新筛选、导出和画图；不读取源数据、
+   不运行 SAM/CoTracker、无需 GPU。归档 source.mp4 只作绘图背景，不用于计算运动量。新增物体候选筛选前/后视频，
+   不叠加 context；原主视图仍展示最终 target+完整context，全点视频和原始数据不变。W&B 同步前后视频和数量。
+
+**Why**
+
+先降低低幅运动候选占用主要监督的比例，并直接观察被排除的点；避免为少量显示噪声重跑追踪或再改模型结构。
+
+**Impact / 证据边界**
+
+- 原输出不覆盖，新目录可同配置续做重筛选；既有完整 GPU采样入口也采用同一选择函数，默认 MOTION_TOP_FRACTION=0.5，
+  设1.0可取消排名截断，仍保留原运动门槛。复用 baseline `36dc6bea17caac3cb253a08277f62c1df2221d95` 的轨迹。
+- 50% 是用户提出的实验性采样预算，不是有效性的证明。相机运动、阴影或大幅漂移可能得高分；较慢/较远物体可能被
+  排除。Top-K 不能证明剩下的点更准确，不能替代 visibility/role/GT 验证，也不能用更干净的展示宣称 G0 通过。
+- 本次仅完成本地实现与静态检查，没有服务器访问或新效果数据。下一步由用户查看同 case 的 before/after 和逐点
+  筛选记录，特别检查真实小幅物体运动是否丢失、伪运动是否反而占据名额；机械臂粘连仍为未解决问题。

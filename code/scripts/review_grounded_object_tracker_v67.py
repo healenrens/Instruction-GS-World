@@ -15,6 +15,9 @@ import transformers
 from igsw.adaptive_gaussian_wm.grounded_tracker_masks_v67 import GroundedTrackerMasks
 from igsw.adaptive_gaussian_wm.grounded_tracker_roles_v67 import resolve_track_roles
 from igsw.adaptive_gaussian_wm.tracker_source_review_v67 import export_source_review
+from igsw.adaptive_gaussian_wm.grounded_tracker_selection_media_v67 import (
+    render_object_selection,
+)
 from igsw.adaptive_gaussian_wm.grounded_tracker_sampling_v67 import (
     build_grounded_queries,
     save_tensor,
@@ -85,6 +88,7 @@ def parse_args():
     parser.add_argument("--motion_floor_pixels", type=float, default=1.5)
     parser.add_argument("--motion_region_fraction", type=float, default=0.0)
     parser.add_argument("--motion_noise_multiplier", type=float, default=3.0)
+    parser.add_argument("--motion_top_fraction", type=float, default=0.5)
     parser.add_argument("--minimum_visible_frames", type=int, default=6)
     parser.add_argument("--display_width", type=int, default=640)
     parser.add_argument("--episode_overview_frames", type=int, default=24)
@@ -213,7 +217,7 @@ def run_review(args):
         write_json(
             out / "training_manifest.json",
             {
-                "contract": "grounded_object_motion_teacher_v2",
+                "contract": "grounded_object_motion_teacher_v3",
                 "root": str(out.resolve()),
                 "entries": training_entries,
                 "pseudo_labels": True,
@@ -380,6 +384,17 @@ def run_review(args):
             )
             all_queries_video(pair_dir, rgb, native, case, queries, args.display_width)
             media["all_queries"] = "all_queries.mp4"
+            media.update(
+                render_object_selection(
+                    pair_dir,
+                    rgb,
+                    native,
+                    case,
+                    queries,
+                    point_selection,
+                    args.display_width,
+                )
+            )
             entry = {
                 "case_id": case["case_id"],
                 "source": case["source"],
@@ -387,6 +402,10 @@ def run_review(args):
                 "path": str((pair_dir / "training_candidates.pt").relative_to(out)),
                 "queries": len(queries["xy"]),
                 "object_targets": point_selection["object_motion_target_count"],
+                "object_candidates_before_topk": point_selection[
+                    "object_motion_candidate_count_before_topk"
+                ],
+                "motion_top_fraction": args.motion_top_fraction,
                 "uncertain_motion_candidates": point_selection[
                     "uncertain_motion_candidate_count"
                 ],

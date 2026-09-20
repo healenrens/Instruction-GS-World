@@ -1,6 +1,7 @@
 """One selection contract shared by the training-candidate export and display."""
 
 from collections import Counter
+import math
 
 import numpy as np
 import torch
@@ -61,15 +62,50 @@ def select_training_points(native, queries, args):
                 "displayed": bool(use_target or use_context),
             }
         )
-    target = torch.tensor(target, dtype=torch.bool)
+    candidate = torch.tensor(target, dtype=torch.bool)
+    ranked_ids = sorted(
+        torch.where(candidate)[0].tolist(),
+        key=lambda index: (-rows[index]["span_px"], index),
+    )
+    keep = min(
+        len(ranked_ids), max(0, math.ceil(len(ranked_ids) * args.motion_top_fraction))
+    )
+    retained_ids = ranked_ids[:keep]
+    target = torch.zeros_like(candidate)
+    target[retained_ids] = True
+    for rank, index in enumerate(ranked_ids, start=1):
+        rows[index]["motion_rank_in_clip"] = rank
+    for index, row in enumerate(rows):
+        row["motion_rank_in_clip"] = row.get("motion_rank_in_clip")
+        row["object_motion_candidate_before_topk"] = bool(candidate[index])
+        row["object_motion_target"] = bool(target[index])
+        row["topk_rejected"] = bool(candidate[index] and not target[index])
+        row["displayed"] = bool(target[index] or context[index])
     uncertain = torch.tensor(uncertain, dtype=torch.bool)
     context = torch.tensor(context, dtype=torch.bool)
     display_ids = torch.where(target | context)[0]
     report = {
-        "contract": "grounded_object_motion_selection_v2",
+        "contract": "grounded_object_motion_selection_v3",
         "raw_point_count": len(rows),
         "shown_point_count": len(display_ids),
         "object_motion_target_count": int(target.sum()),
+        "object_motion_candidate_count_before_topk": int(candidate.sum()),
+        "object_motion_candidate_ids_before_topk": torch.where(candidate)[0].tolist(),
+        "motion_top_fraction": args.motion_top_fraction,
+        "topk_scope": "per clip, moving object candidates only; robot/unknown/scene never compete",
+        "topk_score": "native nonquery visible in-bounds xy 5%-95% span in pixels",
+        "topk_tie_break": "original point ID ascending",
+        "topk_cutoff_span_px": rows[retained_ids[-1]]["span_px"]
+        if retained_ids
+        else None,
+        "motion_ranked_object_ids": ranked_ids,
+        "region_candidates_before_topk": dict(
+            Counter(rows[i]["region_id"] for i in ranked_ids)
+        ),
+        "region_targets_after_topk": dict(
+            Counter(rows[i]["region_id"] for i in retained_ids)
+        ),
+        "topk_is_not_tracking_confidence": True,
         "uncertain_motion_candidate_count": int(uncertain.sum()),
         "context_count": int(context.sum()),
         "role_counts": dict(Counter(row["role"] for row in rows)),
@@ -104,13 +140,17 @@ def export_training_candidates(
     target, context, ids, report = select_training_points(native, queries, args)
     write_json(directory / "motion_filter.json", report)
     payload = {
-        "contract": "grounded_object_motion_teacher_v2",
+        "contract": "grounded_object_motion_teacher_v3",
         "source_revision": args.source_revision,
         "case": case,
         "queries": queries,
         "native": native,
         "sampled": sampled,
         "object_motion_target_mask": target,
+        "object_motion_candidate_mask_before_topk": torch.tensor(
+            [row["object_motion_candidate_before_topk"] for row in report["points"]],
+            dtype=torch.bool,
+        ),
         "uncertain_motion_candidate_mask": torch.tensor(
             [row["uncertain_motion_candidate"] for row in report["points"]],
             dtype=torch.bool,

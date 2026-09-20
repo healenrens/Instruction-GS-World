@@ -433,3 +433,79 @@ open "${LOCAL_DIR}/index.html"
 先检查 RoboMIND 的源概览与连续 source.mp4；再检查瓶身等遗漏部位是否在原 mask/queries 中出现；最后对照
 all_queries.mp4 和主视频区分追踪/过滤/角色问题。Gallery 支持标记 edited_or_cut、wrong_episode_range、wrong_camera
 并导出 human_observations.json。若需要原版路径更换，用户须提供该 case 的实际原文件及 episode 范围后再修改映射。
+
+## Top-50% 物体运动候选：不重跑追踪
+
+**What changed**
+
+1. 每个 clip 内对通过既有运动门槛的 object_candidate 按 span_px 降序，保留前50%（向上取整，同分按原point ID）。
+   不混入机械臂、scene、unknown；其上下文 mask 原样保留。MOTION_TOP_FRACTION=1.0 为不做 Top-K 截断。
+2. 读取已有 grounded coverage 输出，CPU重新导出 teacher candidates 和视频；没有 GPU推理、没有源视频数据集读取。
+   新契约v3同时保存 `object_motion_candidate_mask_before_topk` 和筛选后的 `object_motion_target_mask`。
+3. Episode概览默认展开并提供直接PNG链接。对象候选新增 before/after 两个不叠加上下文的视频，完整上下文仍在原主视频。
+
+**Why**
+
+把主要运动候选筛选与角色识别分开，先复查低幅点被移除后的数据；不会把大运动幅度解释成高追踪置信度。
+
+**Impact**
+
+仅变更离线 teacher candidate 选择，不启动或改造旧训练 loss。大幅错误移动仍可能入选，慢/远物体可能被排除，
+需看前后对照，不能从数量减少推导准确率提高。角色粘连问题暂时冻结，baseline轨迹和原输出均保留。
+
+### RoboMIND 概览的位置
+
+上一版已生成的目录为
+`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/tracker_visual_reviews/grounded_object_coverage_v67_10s_seed17_36dc6be/`。
+每个 case 子目录有 `episode_overview.png` 和 `source_review.json`，在根下 `index.html` 的对应case顶部展示。
+旧版入口文字为 Whole indexed episode overview 和 File and episode mapping；新页面改成中英双语并默认展开。
+W&B 这部分在 `tracker_review/indexed_sources` 表，不在轨迹视频表。只看 comparison.mp4 不会包含概览。
+如果目录中根本没有这两个文件，那份结果没有生成来源概览；不能把十秒视频视为整段原始episode。
+
+### 同步部署
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source &&
+git fetch origin '+refs/heads/codex/grounded-motion-topk-v67:refs/remotes/origin/codex/grounded-motion-topk-v67' &&
+git switch --detach refs/remotes/origin/codex/grounded-motion-topk-v67 &&
+env ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source \
+  RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world SOURCE_REVISION="$(git rev-parse HEAD)" \
+  bash /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/code/scripts/deploy_continuous_predictive_object_field_v67_runtime.sh
+```
+
+### 独立 CPU 前台重筛选
+
+```bash
+export SOURCE_REVISION=<本次交付完整commit>
+export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export ROOT="${RUNTIME_ROOT}/runtime/continuous_predictive_object_field_v67/releases/${SOURCE_REVISION}"
+export VENV_ROOT="${RUNTIME_ROOT}"
+export INPUT_REVIEW="${RUNTIME_ROOT}/outputs/tracker_visual_reviews/grounded_object_coverage_v67_10s_seed17_36dc6be"
+export RUN_NAME="grounded_motion_top50_v67_${SOURCE_REVISION:0:7}"
+export OUT="${RUNTIME_ROOT}/outputs/tracker_visual_reviews/${RUN_NAME}"
+export MOTION_TOP_FRACTION=0.5 DISPLAY_WIDTH=640 REUSE_COMPLETED=1 REVIEW_STAGE=run
+export WANDB_MODE=online WANDB_PROJECT=instruct-gs-world
+export WANDB_ENTITY=healenrenss-university-of-chinese-acadmic-and-science
+export WANDB_NAME="${RUN_NAME}" WANDB_DIR="${RUNTIME_ROOT}/wandb"
+unset WANDB_RUN_ID WANDB_RESUME
+cd "${ROOT}"
+bash "${ROOT}/code/scripts/refilter_grounded_object_tracker_v67.sh"
+echo "REFILTER_RC=$?"
+```
+
+没有 GitHub/模型下载依赖，结果通过W&B上传。重跑同配置复用完成的 case/分支；只有上传失败时设 REVIEW_STAGE=upload。
+不改INPUT_REVIEW目录；修改比例时使用新OUT保存对照。新目录下 index.html / review_bundle.zip / refilter.log 分别是
+展示、下载包、进度；每case的 step_400ms 下新增 object_before_topk.mp4 / object_after_topk.mp4。
+motion_filter.json逐点记录 span_px、motion_rank_in_clip、topk_rejected，并保留每区域before/after数量。
+完整context mask并没有减少，不能将上下文视图中仍存在背景点误认为Top-K未生效；物体监督使用最终target mask。
+
+### 下载
+
+```bash
+RUN_NAME=grounded_motion_top50_v67_<commit前7位>
+LOCAL_DIR="${HOME}/Downloads/${RUN_NAME}"
+mkdir -p "${LOCAL_DIR}" &&
+scp -P 8600 "root@10.66.0.39:/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/tracker_visual_reviews/${RUN_NAME}/review_bundle.zip" "${LOCAL_DIR}/review_bundle.zip" &&
+unzip -o "${LOCAL_DIR}/review_bundle.zip" -d "${LOCAL_DIR}" &&
+open "${LOCAL_DIR}/index.html"
+```

@@ -161,12 +161,16 @@ def upload(args):
                 "case",
                 "source",
                 "object_motion_targets",
+                "object_candidates_before_topk",
+                "motion_top_fraction",
                 "robot_queries",
                 "unknown_queries",
                 "uncertain_moving_candidates",
                 "scene_queries",
                 "raw_queries",
                 "all_queries_video",
+                "objects_before_topk_video",
+                "objects_after_topk_video",
             ]
         )
         for row in grounded_rows:
@@ -176,6 +180,8 @@ def upload(args):
                 row["case_id"],
                 row["source"],
                 selection["object_motion_target_count"],
+                selection.get("object_motion_candidate_count_before_topk"),
+                selection.get("motion_top_fraction"),
                 counts.get("robot_context", 0),
                 counts.get("unknown", 0),
                 selection.get("uncertain_motion_candidate_count"),
@@ -184,6 +190,18 @@ def upload(args):
                 wandb.Video(
                     str(out / row["directory"] / "all_queries.mp4"), format="mp4"
                 ),
+                wandb.Video(
+                    str(out / row["directory"] / row["media"]["before_topk"]),
+                    format="mp4",
+                )
+                if "before_topk" in row["media"]
+                else None,
+                wandb.Video(
+                    str(out / row["directory"] / row["media"]["after_topk"]),
+                    format="mp4",
+                )
+                if "after_topk" in row["media"]
+                else None,
             )
         run.log({"tracker_review/grounded_roles": roles})
     source_rows = [case for case in summary["cases"] if "source_review" in case]
