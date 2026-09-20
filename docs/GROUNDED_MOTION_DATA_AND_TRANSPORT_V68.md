@@ -81,10 +81,13 @@ RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world \
 下面每段独立从部署记录读取 revision，随后使用不可变的具体 release；运行时不访问 GitHub，不下载模型。
 已有本地 GroundingDINO、SAM2、CoTracker、DINO、SigLIP 权重继续复用。
 
-## 二：先造首批数据并输出可视化
+## 二：先造400个 Clip 并全部可视化
 
-四卡、前台；每源最多8个 episode，各取一个连续10秒窗口，共最多40个 clip。
-这是 train-partition 的数据检查批，不是 held 指标实验。旧清单不传入，重新应用相机策略。
+四卡、前台；RobotWin、AgiBot、RoboMIND、Bridge、HY 各80个 episode，各取一个连续10秒窗口，目标共400个 clip。
+腕部/时长不合格的 episode 不占80个名额，会继续选择该源的下一条外部视角 episode。若源中没有足够合法候选，
+selection.json 如实记录实际数量，不跨源凑数，也不重复视频。轨迹效果不好/没有最终目标的 case 仍保留并可视化，
+不能通过只展示成功追踪把400例变成偏置样本。这是 train-partition 的数据检查批，不是 held 指标实验。
+旧清单不传入，重新应用相机策略；用户核验这400例之后，才讨论扩展/训练，不自动启动。
 
 ```bash
 cd /mnt/pfs/public/xuhaoming/instruct_gs_world
@@ -93,9 +96,9 @@ export VENV_ROOT="${RUNTIME_ROOT}"
 export SOURCE_REVISION="$(<"${RUNTIME_ROOT}/runtime/grounded_motion_v68/DEPLOYED_REVISION")"
 export ROOT="${RUNTIME_ROOT}/runtime/grounded_motion_v68/releases/${SOURCE_REVISION}"
 export DATA_INDEX="${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json"
-export RUN_NAME="grounded_motion_v68_preview_${SOURCE_REVISION:0:7}"
+export RUN_NAME="grounded_motion_v68_review400_${SOURCE_REVISION:0:7}"
 export OUT="${RUNTIME_ROOT}/data/${RUN_NAME}"
-export DATA_GPUS=4 DATA_PARTITION=train CASES_PER_SOURCE=8
+export DATA_GPUS=4 DATA_PARTITION=train CASES_PER_SOURCE=80
 export CLIP_SECONDS=10 ALL_EPISODE_WINDOWS=0 MOTION_TOP_FRACTION=0.75
 export PILOT_POINT_BUDGET=512 POINT_BUDGET=2048 POINTS_PER_PASS=256
 export RENDER=1 REUSE_COMPLETED=1 DATA_STAGE=run OPERATION=build SEED=17
@@ -110,7 +113,7 @@ echo "BUILD_RC=$?"
 GPU 数、配置或代码改变时使用新 OUT，不能覆盖正在被训练读取的 teacher shards。
 若仅 W&B 上传失败，计算结果已落盘；重设相同全部参数，只把 `DATA_STAGE=upload`，重跑脚本即可重传后合并。
 
-关键产物位于 `/mnt/pfs/public/xuhaoming/instruct_gs_world/data/grounded_motion_v68_preview_<commit前7位>/`：
+关键产物位于 `/mnt/pfs/public/xuhaoming/instruct_gs_world/data/grounded_motion_v68_review400_<commit前7位>/`：
 
 - `index.html`：各 shard 入口；每 case 默认展开整段 episode 概览、同 episode 相机对照、实际文件/时间映射。
 - `review_bundle.zip`：离线可看的 HTML、视频、PNG、JSON，不包含大型 tensor 文件或模型权重。
@@ -129,7 +132,7 @@ GPU 数、配置或代码改变时使用新 OUT，不能覆盖正在被训练读
 
 ```bash
 REV="$(ssh -p 8600 root@10.66.0.39 'cat /mnt/pfs/public/xuhaoming/instruct_gs_world/runtime/grounded_motion_v68/DEPLOYED_REVISION')"
-NAME="grounded_motion_v68_preview_${REV:0:7}"
+NAME="grounded_motion_v68_review400_${REV:0:7}"
 LOCAL_DIR="${HOME}/Downloads/${NAME}"
 mkdir -p "${LOCAL_DIR}"
 scp -P 8600 "root@10.66.0.39:/mnt/pfs/public/xuhaoming/instruct_gs_world/data/${NAME}/review_bundle.zip" "${LOCAL_DIR}/review_bundle.zip" &&
@@ -178,7 +181,7 @@ REV="$(<"${RT}/runtime/grounded_motion_v68/DEPLOYED_REVISION")"
 ROOT="${RT}/runtime/grounded_motion_v68/releases/${REV}"
 CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
   "${RT}/.venv/bin/python" "${ROOT}/code/scripts/verify_grounded_object_transport_v68.py" \
-  --manifest "${RT}/data/grounded_motion_v68_preview_${REV:0:7}/training_manifest.json" \
+  --manifest "${RT}/data/grounded_motion_v68_review400_${REV:0:7}/training_manifest.json" \
   --dino_checkpoint "${RT}/models/dinov2_vitl14/model.safetensors" \
   --siglip_checkpoint "${RT}/models/siglip2-base-patch16-224"
 echo "VERIFY_RC=$?"

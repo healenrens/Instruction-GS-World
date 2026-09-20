@@ -141,14 +141,28 @@ def apply_view_policy(case, overrides):
 def select_data_cases(args):
     overrides = read_json(args.camera_overrides)["rules"] if args.camera_overrides else []
     counts, excluded = Counter(), []
+    cases = []
+    def include(case):
+        if case["last_frame"] - case["first_frame"] < math.ceil(max(10., args.clip_seconds) * case["record"]["fps"]):
+            resolved, reason = None, "clip_shorter_than_requested"
+        else:
+            resolved, reason = apply_view_policy(case, overrides)
+        counts[f"{case['source']}/{reason}"] += 1
+        if resolved is None:
+            excluded.append({"case_id": case["case_id"], "path": case["record"]["path"], "reason": reason})
+            return False
+        resolved["view_policy"] = "external_motion_data_v68"
+        resolved["partition"] = args.partition
+        cases.append(resolved)
+        return True
+
     sources, episodes, _ = load_multisource_index(args.data_index, skip_missing_payloads=True)
     episodes = select_group_partition_v61([e for e in episodes if e.split == "train"], args.partition, args.held_group_stride)
     if args.case_manifest:
         allowed = {(sources[e.source_index].name, e.group, e.episode_index) for e in episodes}
-        candidates = []
         for case in read_json(args.case_manifest)["cases"]:
             if (case["source"], case["group"], case["record"]["episode_index"]) in allowed:
-                candidates.append(case)
+                include(case)
             else:
                 excluded.append({"case_id": case["case_id"], "path": case["record"]["path"], "reason": "outside_requested_partition"})
                 counts[f"{case['source']}/outside_requested_partition"] += 1
@@ -159,7 +173,6 @@ def select_data_cases(args):
             name = sources[episode.source_index].name
             if name in SOURCES and episode.frame_count > math.ceil(args.clip_seconds * episode.fps):
                 pools[name][episode.group].append(episode)
-        candidates = []
         for name in SOURCES:
             groups = sorted(pools[name])
             if not groups:
@@ -182,33 +195,23 @@ def select_data_cases(args):
                     span = math.ceil(args.clip_seconds * episode.fps)
                     available = episode.frame_count - span - 1
                     starts = range(0, available + 1, span) if args.all_episode_windows else [available // 2]
+                    included_episode = False
                     for first in starts:
                         case = {"case_id": f"{name}_ep{episode.episode_index}_f{first}", "source": name,
                                 "group": episode.group, "record": record, "first_frame": first,
                                 "last_frame": first + span, "anchor_frame": first + span // 2,
                                 "clip_seconds": span / episode.fps, "episode_seconds": (episode.frame_count - 1) / episode.fps,
                                 "camera": camera_key(record["path"]) or "observation.images.cam_high", "decode_replaced": False}
-                        candidates.append(case)
-                    selected += 1
+                        included_episode = include(case) or included_episode
+                    # Rejected wrist/short cases do not consume the requested source quota.
+                    selected += int(included_episode)
                     if args.cases_per_source and selected >= args.cases_per_source:
                         break
                 if args.cases_per_source and selected >= args.cases_per_source:
                     break
         selection_mode = f"group-round-robin {args.partition}; no tracker-success selection"
-    cases = []
-    for case in candidates:
-        if case["last_frame"] - case["first_frame"] < math.ceil(max(10., args.clip_seconds) * case["record"]["fps"]):
-            excluded.append({"case_id": case["case_id"], "path": case["record"]["path"], "reason": "clip_shorter_than_requested"})
-            counts[f"{case['source']}/clip_shorter_than_requested"] += 1
-            continue
-        resolved, reason = apply_view_policy(case, overrides)
-        counts[f"{case['source']}/{reason}"] += 1
-        if resolved is not None:
-            resolved["view_policy"] = "external_motion_data_v68"
-            resolved["partition"] = args.partition
-            cases.append(resolved)
-        else:
-            excluded.append({"case_id": case["case_id"], "path": case["record"]["path"], "reason": reason})
     return cases, {"mode": selection_mode, "counts": dict(counts), "excluded": excluded,
                    "included_sources": list(SOURCES), "partition": args.partition,
+                   "selected_by_source": dict(Counter(case["source"] for case in cases)),
+                   "requested_episodes_per_source": args.cases_per_source,
                    "camera_key_is_not_visual_confirmation": True}

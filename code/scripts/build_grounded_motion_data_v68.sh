@@ -17,7 +17,7 @@ mkdir -p "${OUT}" "${RUNTIME_ROOT}/wandb"
   --seed "${SEED:-17}" --tracker_version "${TRACKER_VERSION:-3}" \
   --data_index "${DATA_INDEX:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json}" \
   --case_manifest "${CASE_MANIFEST:-}" --camera_overrides "${CAMERA_OVERRIDES:-}" \
-  --partition "${DATA_PARTITION:-held}" --cases_per_source "${CASES_PER_SOURCE:-8}" \
+  --partition "${DATA_PARTITION:-held}" --cases_per_source "${CASES_PER_SOURCE:-80}" \
   --all_episode_windows "${ALL_EPISODE_WINDOWS:-0}" --clip_seconds "${CLIP_SECONDS:-10}" \
   --tracker_checkpoint "${TRACKER_CHECKPOINT:-${RUNTIME_ROOT}/checkpoints/cotracker/scaled_offline.pth}" \
   --grounding_model "${GROUNDING_MODEL:-${RUNTIME_ROOT}/models/grounding-dino-base}" \

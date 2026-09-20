@@ -24,7 +24,7 @@ from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import read_json, write
 
 
 def configure(parser):
-    parser.set_defaults(motion_top_fraction=.75, cases_per_source=8, clip_seconds=10.0)
+    parser.set_defaults(motion_top_fraction=.75, cases_per_source=80, clip_seconds=10.0)
     parser.add_argument("--operation", choices=("build", "cameras"), default="build")
     parser.add_argument("--partition", choices=("train", "held"), default="held")
     parser.add_argument("--camera_overrides", default="")
@@ -60,6 +60,7 @@ def main():
         cases = cases[rank::world]
         selection.update(shard_rank=rank, shard_count=world, selected_in_shard=len(cases))
     write_json(out / "selection.json", selection)
+    print(f"[motion-data-v68] planned_global_by_source={selection['selected_by_source']} shard={rank} local_clips={len(cases)}", flush=True)
     write_json(out / "cases.json", {"cases": cases, "configuration": configuration})
     if args.operation == "cameras":
         links = ["<!doctype html><meta charset='utf-8'><h1>Camera catalog</h1>"]
