@@ -15,6 +15,7 @@ import torch
 from review_grounded_object_tracker_v67 import parse_args
 from igsw.adaptive_gaussian_wm.grounded_background_motion_v68 import reference_queries, fit_background, motion_evidence, relay_evidence
 from igsw.adaptive_gaussian_wm.grounded_motion_sources_v68 import select_data_cases
+from igsw.adaptive_gaussian_wm.grounded_motion_jobs_v68 import compatible_configuration, reserve_arguments, split_reserve, append_replacement, target_counts
 from igsw.adaptive_gaussian_wm.grounded_motion_refinement_v68 import refine_and_densify
 from igsw.adaptive_gaussian_wm.grounded_motion_export_v68 import CONTRACT, export_motion_teacher
 from igsw.adaptive_gaussian_wm.grounded_motion_review_v68 import render_motion_data, write_data_gallery, write_review_bundle, upload_data, camera_overview
@@ -22,6 +23,7 @@ from igsw.adaptive_gaussian_wm.grounded_tracker_masks_v67 import GroundedTracker
 from igsw.adaptive_gaussian_wm.grounded_tracker_roles_v67 import resolve_track_roles
 from igsw.adaptive_gaussian_wm.grounded_tracker_sampling_v67 import build_grounded_queries, save_tensor
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import read_json, write_json, decode_case, load_tracker, predict
+from igsw.adaptive_gaussian_wm.video_file_decoder import VideoDecodeError
 
 
 def configure(parser):
@@ -38,6 +40,10 @@ def configure(parser):
     parser.add_argument("--review_cases_per_source", type=int, default=80,
                         help="Global visualization quota per source; 0 renders all selected clips.")
     parser.add_argument("--workers_per_gpu", type=int, default=1)
+    parser.add_argument("--replacement_cases_per_source", type=int, default=0,
+                        help="Reserve episodes per source; 0 selects max(32, 25 percent of quota).")
+    parser.add_argument("--reuse_source_revision", default="",
+                        help="Explicitly reuse unchanged targets from this earlier code revision.")
 
 
 def plan_reviews(cases, enabled, quota):
@@ -67,20 +73,28 @@ def main():
         upload_data(args, out, manifest["entries"], manifest["configuration"])
         return
     case_plan = out / "cases.json"
-    if args.reuse_completed and case_plan.is_file() and read_json(case_plan)["configuration"] == configuration:
-        cases = read_json(case_plan)["cases"]
+    saved_plan = read_json(case_plan) if case_plan.is_file() else None
+    if args.reuse_completed and saved_plan and "reserve" in saved_plan and compatible_configuration(saved_plan["configuration"], configuration):
+        cases, reserve = saved_plan["cases"], saved_plan["reserve"]
         selection = read_json(out / "selection.json")
     else:
-        cases, selection = select_data_cases(args)
+        candidates, selection = select_data_cases(reserve_arguments(args))
+        cases, reserve = split_reserve(candidates, 0 if args.case_manifest else args.cases_per_source)
+        selection["selected_by_source"] = target_counts(cases)
+        selection["reserve_by_source"] = target_counts(reserve)
+        selection["requested_episodes_per_source"] = args.cases_per_source
         # Choose the review subset globally, independent of worker count or tracker success.
         selection["review_by_source"] = plan_reviews(cases, args.render, args.review_cases_per_source)
         selection["review_selection"] = "first source quota in deterministic group-round-robin case plan"
         cases = cases[rank::world]
+        reserve = reserve[rank::world]
         selection.update(shard_rank=rank, shard_count=world, selected_in_shard=len(cases))
     write_json(out / "selection.json", selection)
     print(f"[motion-data-v68] planned_global_by_source={selection['selected_by_source']} review_global_by_source={selection['review_by_source']} "
           f"shard={rank}/{world} cuda={device_index} workers_per_gpu={args.workers_per_gpu} local_clips={len(cases)}", flush=True)
-    write_json(out / "cases.json", {"cases": cases, "configuration": configuration})
+    def save_plan():
+        write_json(case_plan, {"cases": cases, "reserve": reserve, "configuration": configuration})
+    save_plan()
     if args.operation == "cameras":
         links = ["<!doctype html><meta charset='utf-8'><h1>Camera catalog</h1>"]
         for case in cases:
@@ -97,20 +111,30 @@ def main():
     model, tracker = load_tracker(args, device)
     entries = []
     review_entries = []
-    planned_reviews = sum(c["render"] for c in cases)
+    targets = target_counts(cases)
+    planned_clips = sum(targets.values())
+    planned_reviews = sum(c["render"] for c in cases if "replacement_for" not in c)
+    failure_path = out / "decode_failures.json"
+    saved_failures = read_json(failure_path) if failure_path.is_file() else None
+    failures = (saved_failures["cases"] if args.reuse_completed and saved_failures
+                and compatible_configuration(saved_failures["configuration"], configuration) else {})
+    bad_paths = {row["path"]: row["error"] for row in failures.values() if row["path_unusable"]}
+    replaced = {c["replacement_for"] for c in cases if "replacement_for" in c}
 
     def save_progress(status, update_gallery=False):
-        write_json(out / "progress.json", {"status": status, "completed_clips": len(entries), "planned_clips": len(cases),
+        write_json(out / "progress.json", {"status": status, "completed_clips": len(entries), "planned_clips": planned_clips,
+                   "decode_skipped_clips": len(failures), "attempt_queue_length": len(cases),
                    "rendered_clips": len(review_entries), "planned_review_clips": planned_reviews,
                    "shard_rank": rank, "cuda_device": device_index, "workers_per_gpu": args.workers_per_gpu,
                    "last_case": entries[-1]["case_id"] if entries else None})
         # Full production manifests are written once, not rewritten after each clip.
-        if status == "completed" or not entries:
+        if status != "building" or not entries:
             write_json(out / "training_manifest.json", {"contract": CONTRACT, "root": str(out.resolve()), "entries": entries,
                        "configuration": configuration, "tracker": tracker, "status": status,
                        "partition": args.partition, "shard_rank": rank, "shard_count": world,
+                       "planned_clips": planned_clips, "decode_skipped_clips": len(failures),
                        "teacher_only": True, "future_used_for_selection": True, "source_revision": args.source_revision})
-        if args.render and (update_gallery or status == "completed" or not entries):
+        if args.render and (update_gallery or status != "building" or not entries):
             write_data_gallery(out, review_entries, selection)
 
     save_progress("building")
@@ -118,7 +142,7 @@ def main():
         directory = out / case["case_id"]
         directory.mkdir(exist_ok=True)
         completed = directory / "complete.json"
-        if args.reuse_completed and completed.is_file() and read_json(completed)["configuration"] == configuration:
+        if args.reuse_completed and completed.is_file() and compatible_configuration(read_json(completed)["configuration"], configuration):
             entries.append(read_json(completed)["entry"])
             if entries[-1]["rendered"]:
                 review_entries.append(entries[-1])
@@ -127,10 +151,33 @@ def main():
             continue
         print(f"[motion-data-v68] shard={rank} case={ordinal+1}/{len(cases)} id={case['case_id']} camera={case['camera']}", flush=True)
         indices = torch.arange(case["first_frame"], case["last_frame"] + 1)
-        rgb = decode_case(case, indices)
+        path = case["record"]["path"]
+        if case["case_id"] in failures:
+            row = failures[case["case_id"]]
+            rgb = VideoDecodeError(row["error"], path_unusable=row["path_unusable"])
+        elif path in bad_paths:
+            rgb = VideoDecodeError(bad_paths[path], path_unusable=True)
+        else:
+            rgb = decode_case(case, indices, return_error=True)
+        if isinstance(rgb, VideoDecodeError):
+            replacement_id = None
+            if case["case_id"] not in replaced:
+                replacement_id = append_replacement(case, cases, reserve)
+                if replacement_id:
+                    replaced.add(case["case_id"])
+                save_plan()
+            failures[case["case_id"]] = {"case_id": case["case_id"], "source": case["source"], "path": path,
+                "first_frame": case["first_frame"], "last_frame": case["last_frame"], "error": str(rgb),
+                "path_unusable": rgb.path_unusable, "review_requested": case["render"]}
+            if rgb.path_unusable:
+                bad_paths[path] = str(rgb)
+            write_json(failure_path, {"configuration": configuration, "cases": failures})
+            print(f"[motion-data-v68] decode_skip={case['case_id']} path={path} replacement={replacement_id} error={rgb}", flush=True)
+            save_progress("building")
+            continue
         case["height"], case["width"] = rgb.shape[-2:]
         ref_path = directory / "background.pt"
-        if args.reuse_completed and ref_path.is_file() and torch.load(ref_path, weights_only=False)["configuration"] == configuration:
+        if args.reuse_completed and ref_path.is_file() and compatible_configuration(torch.load(ref_path, weights_only=False)["configuration"], configuration):
             background = torch.load(ref_path, weights_only=False)["value"]
         else:
             references = predict(model, rgb, indices, reference_queries(case, args.background_grid_side), device, args.points_per_pass)
@@ -147,7 +194,7 @@ def main():
                                     "region_diagonal_px": float((case["height"]**2 + case["width"]**2)**.5),
                                     "sam_score": 0.0, "robot_overlap": 0.0} for i, xy in enumerate(queries["xy"].tolist())]
         pilot_path = directory / "pilot_tracks.pt"
-        if args.reuse_completed and pilot_path.is_file() and torch.load(pilot_path, weights_only=False)["configuration"] == configuration:
+        if args.reuse_completed and pilot_path.is_file() and compatible_configuration(torch.load(pilot_path, weights_only=False)["configuration"], configuration):
             pilot = torch.load(pilot_path, weights_only=False)["value"]
         else:
             pilot = predict(model, rgb, indices, queries, device, args.points_per_pass)
@@ -155,14 +202,14 @@ def main():
         queries, _, _ = resolve_track_roles(pilot, queries, sampling, directory, args)
         pilot_evidence = motion_evidence(pilot, background, args)
         refinement_path = directory / "refined_query_cache.pt"
-        if args.reuse_completed and refinement_path.is_file() and torch.load(refinement_path, weights_only=False)["configuration"] == configuration:
+        if args.reuse_completed and refinement_path.is_file() and compatible_configuration(torch.load(refinement_path, weights_only=False)["configuration"], configuration):
             cached = torch.load(refinement_path, weights_only=False)
             queries = cached["queries"]
         else:
             queries, _ = refine_and_densify(rgb, case, queries, pilot, pilot_evidence, background, sampling, segmenter, directory, args, render=case["render"])
             save_tensor(refinement_path, {"configuration": configuration, "queries": queries})
         dense_path = directory / "dense_tracks.pt"
-        if args.reuse_completed and dense_path.is_file() and torch.load(dense_path, weights_only=False)["configuration"] == configuration:
+        if args.reuse_completed and dense_path.is_file() and compatible_configuration(torch.load(dense_path, weights_only=False)["configuration"], configuration):
             native = torch.load(dense_path, weights_only=False)["value"]
         else:
             native = predict(model, rgb, indices, queries, device, args.points_per_pass)
@@ -170,7 +217,7 @@ def main():
         queries, roles, _ = resolve_track_roles(native, queries, sampling, directory, args)
         evidence = motion_evidence(native, background, args)
         relay_path = directory / "relay.pt"
-        if args.reuse_completed and relay_path.is_file() and torch.load(relay_path, weights_only=False)["configuration"] == configuration:
+        if args.reuse_completed and relay_path.is_file() and compatible_configuration(torch.load(relay_path, weights_only=False)["configuration"], configuration):
             relay = torch.load(relay_path, weights_only=False)["value"]
         else:
             relay = relay_evidence(model, rgb, indices, queries, native, device, args)
@@ -182,6 +229,8 @@ def main():
                  "path": str((directory / "teacher.pt").relative_to(out)), "object_targets": report["object_motion_target_count"],
                  "background_valid_fraction": report["background_usable_frame_fraction"], "rendered": case["render"],
                  "partition": args.partition, "raw_video": case["record"]["path"]}
+        if "replacement_for" in case:
+            entry["replacement_for"] = case["replacement_for"]
         write_json(completed, {"configuration": configuration, "entry": entry})
         entries.append(entry)
         if entry["rendered"]:
@@ -189,11 +238,13 @@ def main():
         save_progress("building", update_gallery=entry["rendered"])
         print(f"[motion-data-v68] saved={directory / 'teacher.pt'} targets={entry['object_targets']}", flush=True)
         del rgb
-    save_progress("completed")
+    status = "completed" if dict(Counter(e["source"] for e in entries)) == targets else "incomplete"
+    save_progress(status)
     if args.render:
-        write_review_bundle(out, review_entries, [out / name for name in ("index.html", "selection.json", "training_manifest.json")])
+        write_review_bundle(out, review_entries, [out / name for name in ("index.html", "selection.json", "training_manifest.json", "decode_failures.json")])
     upload_data(args, out, entries, configuration)
-    print(f"[motion-data-v68] completed shard={rank} manifest={out / 'training_manifest.json'}", flush=True)
+    print(f"[motion-data-v68] status={status} shard={rank} clips={len(entries)}/{planned_clips} "
+          f"decode_skips={len(failures)} manifest={out / 'training_manifest.json'}", flush=True)
 
 
 if __name__ == "__main__":

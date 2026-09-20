@@ -11,7 +11,7 @@ import torch
 
 from .multisource_point_track_dataset import MultiSourcePointTrackObjectVideoDataset
 from .tracker_review_cases_v67 import select_long_cases
-from .video_file_decoder import decode_video_frames
+from .video_file_decoder import VideoDecodeError, decode_video_frames, read_video_frames
 
 
 def read_json(path):
@@ -57,16 +57,16 @@ def window_indices(case, step_ms, query_frames=()):
     return native, sampled, stride
 
 
-def decode_case(case, indices):
+def decode_case(case, indices, *, return_error=False):
     record = case["record"]
     absolute = indices + record["frame_offset"]
     if record["adapter"] == "rgb_episode_cache":
         return MultiSourcePointTrackObjectVideoDataset._decode_cache(
             record["path"], absolute
         )
-    return decode_video_frames(record["path"], absolute, record["fps"]).permute(
-        0, 3, 1, 2
-    )
+    decoder = read_video_frames if return_error else decode_video_frames
+    frames = decoder(record["path"], absolute, record["fps"])
+    return frames if isinstance(frames, VideoDecodeError) else frames.permute(0, 3, 1, 2)
 
 
 def manual_query_points(case, args):

@@ -20,10 +20,18 @@ class VideoDecodeError(ValueError):
 
 
 def decode_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.Tensor:
+    result = read_video_frames(path, indices, fps)
+    if isinstance(result, VideoDecodeError):
+        raise result
+    return result
+
+
+def read_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.Tensor | VideoDecodeError:
+    """Return an explicit media failure for offline jobs; never substitute frames."""
     import av
 
     if not os.path.isfile(path):
-        raise VideoDecodeError(
+        return VideoDecodeError(
             f"video payload is missing: {path}", path_unusable=True
         )
     wanted = [int(value) for value in indices.tolist()]
@@ -46,7 +54,7 @@ def decode_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.T
             )
             for frame in container.decode(stream):
                 if frame.pts is None:
-                    raise VideoDecodeError(f"video frame has no timestamp: {path}")
+                    return VideoDecodeError(f"video frame has no timestamp: {path}")
                 frame_index = int(
                     round(float((frame.pts - start_pts) * time_base) * fps)
                 )
@@ -57,12 +65,14 @@ def decode_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.T
                 if frame_index >= last:
                     break
     except (av.error.FFmpegError, OSError) as error:
-        raise VideoDecodeError(
+        failure = VideoDecodeError(
             f"video decoder rejected {path}: {error}", path_unusable=True
-        ) from error
+        )
+        failure.__cause__ = error
+        return failure
     missing = [index for index in wanted if index not in decoded]
     if missing:
-        raise VideoDecodeError(
+        return VideoDecodeError(
             f"video decode missed frames {missing[:8]} in {path}"
         )
     return torch.stack([decoded[index] for index in wanted])

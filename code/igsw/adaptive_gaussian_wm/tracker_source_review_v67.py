@@ -8,11 +8,27 @@ import torch
 
 from .tracker_visual_review_v67 import decode_case, write_json
 from .tracker_visual_review_media_v67 import rgb_image
+from .video_file_decoder import VideoDecodeError
 
 
-def export_source_review(case, directory, overview_frames):
+def export_source_review(case, directory, overview_frames, *, record_decode_errors=False):
     record = case["record"]
     container_info = {"adapter": record["adapter"]}
+    indices = torch.linspace(0, record["frame_count"] - 1, min(overview_frames, record["frame_count"])).round().long().unique()
+    rgb = decode_case(case, indices, return_error=record_decode_errors)
+    if isinstance(rgb, VideoDecodeError):
+        report = {"case_id": case["case_id"], "source": case["source"], "indexed_record": record,
+                  "camera": case["camera"], "overview_status": "decode_failed", "error": str(rgb),
+                  "overview_episode_frames": indices.tolist(), "raw_original_provenance": "unverified",
+                  "selected_episode_frames": [case["first_frame"], case["last_frame"]]}
+        sheet = Image.new("RGB", (1024, 96), "#202020")
+        draw = ImageDraw.Draw(sheet)
+        draw.text((12, 16), "EPISODE OVERVIEW UNAVAILABLE: source decode failed; tracked clip is separate.", fill="#ffb0a0")
+        draw.text((12, 48), "See source_review.json for the file path and decoder error.", fill="white")
+        sheet.save(directory / "episode_overview.png")
+        write_json(directory / "source_review.json", report)
+        print(f"[source-review] overview_decode_failed={case['case_id']} error={rgb}", flush=True)
+        return report
     if record["adapter"] != "rgb_episode_cache":
         with av.open(record["path"]) as container:
             stream = container.streams.video[0]
@@ -30,15 +46,6 @@ def export_source_review(case, directory, overview_frames):
                     "note": "the file may pack several episodes; this is not proof of an unedited original",
                 }
             )
-    indices = (
-        torch.linspace(
-            0, record["frame_count"] - 1, min(overview_frames, record["frame_count"])
-        )
-        .round()
-        .long()
-        .unique()
-    )
-    rgb = decode_case(case, indices)
     tile_width, tile_height, columns = 256, 190, 4
     sheet = Image.new(
         "RGB",
@@ -80,6 +87,7 @@ def export_source_review(case, directory, overview_frames):
         ],
         "episode_seconds": (record["frame_count"] - 1) / record["fps"],
         "overview_episode_frames": indices.tolist(),
+        "overview_status": "decoded",
         "overview_is_uniform_inspection_only": True,
         "raw_original_provenance": "unverified",
         "tracking_input": "consecutive indexed frames, not this overview or the 400ms display branch",

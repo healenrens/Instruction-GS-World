@@ -23,6 +23,7 @@ echo "[motion-data-v68] gpus=${DATA_GPUS} workers_per_gpu=${WORKERS_PER_GPU} wor
   --case_manifest "${CASE_MANIFEST:-}" --camera_overrides "${CAMERA_OVERRIDES:-}" \
   --partition "${DATA_PARTITION:-held}" --cases_per_source "${CASES_PER_SOURCE:-80}" \
   --workers_per_gpu "${WORKERS_PER_GPU}" --review_cases_per_source "${REVIEW_CASES_PER_SOURCE:-80}" \
+  --replacement_cases_per_source "${REPLACEMENT_CASES_PER_SOURCE:-0}" --reuse_source_revision "${REUSE_SOURCE_REVISION:-}" \
   --all_episode_windows "${ALL_EPISODE_WINDOWS:-0}" --clip_seconds "${CLIP_SECONDS:-10}" \
   --tracker_checkpoint "${TRACKER_CHECKPOINT:-${RUNTIME_ROOT}/checkpoints/cotracker/scaled_offline.pth}" \
   --grounding_model "${GROUNDING_MODEL:-${RUNTIME_ROOT}/models/grounding-dino-base}" \

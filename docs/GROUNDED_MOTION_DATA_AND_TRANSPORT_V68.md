@@ -87,6 +87,7 @@ SOURCE_REVISION="$(git rev-parse HEAD)" RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/i
 腕部/时长不合格的 episode 不占80个名额，会继续选择该源的下一条外部视角 episode。若源中没有足够合法候选，
 selection.json 如实记录实际数量，不跨源凑数，也不重复视频。轨迹效果不好/没有最终目标的 case 仍保留并可视化，
 不能通过只展示成功追踪把400例变成偏置样本。这是 train-partition 的数据检查批，不是 held 指标实验。
+不能解码的源片段单独记录并从同源 reserve 补位；追踪失败或零目标不补位。
 旧清单不传入，重新应用相机策略；用户核验这400例之后，才讨论扩展/训练，不自动启动。
 
 ```bash
@@ -112,6 +113,52 @@ echo "BUILD_RC=$?"
 同一条命令、同一 OUT、同一配置重跑即续做：已完成 case 和中间 reference/pilot/refined-query/dense/relay 阶段复用。
 GPU 数、配置或代码改变时使用新 OUT，不能覆盖正在被训练读取的 teacher shards。
 若仅 W&B 上传失败，计算结果已落盘；重设相同全部参数，只把 `DATA_STAGE=upload`，重跑脚本即可重传后合并。
+
+### 恢复旧400条单卡任务
+
+先执行上面的同步/部署步骤，再执行下面独立命令。读取旧目录 `workers.json` 恢复原数据参数和worker数，
+使用新代码，显式允许复用旧revision的相同teacher配置。不会删除或重算已完成的83条；日志中的实际复用数为准。
+如果采样/模型/相机参数发生变化则不复用不匹配结果。新增的reserve和失败记录不会改变已有有效clip的标签。
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world
+export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export VENV_ROOT="${RUNTIME_ROOT}"
+export SOURCE_REVISION="$(<"${RUNTIME_ROOT}/runtime/grounded_motion_v68/DEPLOYED_REVISION")"
+export ROOT="${RUNTIME_ROOT}/runtime/grounded_motion_v68/releases/${SOURCE_REVISION}"
+export OUT="${RUNTIME_ROOT}/data/grounded_motion_v68_review400_6b8a4e4_1gpu"
+export WANDB_MODE=online WANDB_PROJECT=instruct-gs-world
+export WANDB_ENTITY=healenrenss-university-of-chinese-acadmic-and-science
+bash "${ROOT}/code/scripts/resume_grounded_motion_data_v68.sh"
+echo "RESUME_RC=$?"
+```
+
+这是显式恢复入口，保留记录中的拓扑；旧400条仍单卡单worker，已运行的20,000条任务则恢复原8卡16worker。
+不同revision的复用只通过此入口或显式 `REUSE_SOURCE_REVISION` 开启，普通新构建不会自动继承别版数据。
+
+### 不等构建结束，打包已完成部分
+
+不加载模型、不占GPU，不改 `complete.json`、case plan或构建进度。只读取完成标记，不把仅存在teacher.pt的半成品当成完成。
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world
+RT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+REV="$(<"${RT}/runtime/grounded_motion_v68/DEPLOYED_REVISION")"
+"${RT}/.venv/bin/python" "${RT}/runtime/grounded_motion_v68/releases/${REV}/code/scripts/pack_grounded_motion_partial_v68.py" \
+  --out "${RT}/data/grounded_motion_v68_review400_6b8a4e4_1gpu"
+```
+
+输出 `partial_review_bundle.zip`、`partial_index.html`、`partial_manifest.json`，明确标记partial，不替代完整训练manifest。
+本机下载并打开已有部分：
+
+```bash
+NAME=grounded_motion_v68_review400_6b8a4e4_1gpu
+LOCAL_DIR="${HOME}/Downloads/${NAME}_partial"
+mkdir -p "${LOCAL_DIR}"
+scp -P 8600 "root@10.66.0.39:/mnt/pfs/public/xuhaoming/instruct_gs_world/data/${NAME}/partial_review_bundle.zip" "${LOCAL_DIR}/review.zip" &&
+unzip -o "${LOCAL_DIR}/review.zip" -d "${LOCAL_DIR}" &&
+open "${LOCAL_DIR}/partial_index.html"
+```
 
 关键产物位于 `/mnt/pfs/public/xuhaoming/instruct_gs_world/data/grounded_motion_v68_review400_<commit前7位>/`：
 
@@ -183,7 +230,14 @@ W&B 每 worker 一个 run，表格只展示预选案例；`motion_data/clips` �
 样本充足时应为20,000/400，每源4,000/80；不足时如实记录，不复制凑数。HTML和 `review_bundle.zip` 只含这400例的展示媒体。
 原始RGB视频和DINO/SigLIP特征不重复存盘；当前格式保留轨迹及续跑中间 tensor。
 按301帧、2048点估算，20,000条主要 tensor 合计约830GB，另需 mask、逐点JSON和400例媒体空间；这是张量字节估算而非实际磁盘测量。
-本次不启动模型训练。数据与人工检查完成后再固定 manifest；解码损坏等运行错误仍直接暴露，不静默替换标签。
+本次不启动模型训练。数据与人工检查完成后再固定 manifest。
+源视频解码失败不再终止整个worker：沿用精确帧解码器的已知媒体错误分类，写入 `decode_failures.json`，
+同worker后续不再尝试已因解码失败隔离的文件，并按同源reserve补位。没有伪造帧、置零轨迹或将模型异常当作坏视频。
+reserve默认每源 `max(32, ceil(25% * CASES_PER_SOURCE))` 个额外episode，可用 `REPLACEMENT_CASES_PER_SOURCE` 显式设置。
+reserve也按worker分片，补位继承原片段的展示名额；所有失败路径/原因随manifest和W&B artifact保留。
+若reserve耗尽，worker报告 `incomplete`，最终manifest为partial，不谎报400或20,000条已满。
+整段episode/其他相机概览若无法解码，展示明确的错误说明及源路径，不丢掉已经成功解码和追踪的10秒训练片段。
+程序错误、CUDA OOM和模型失败仍自然报错，不以跳过策略隐藏。
 
 下载这次400例展示包（本机运行；如之后部署了新版，`NAME` 使用原任务打印的名称）：
 

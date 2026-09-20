@@ -30,7 +30,7 @@ def main():
             for entry in payload["entries"]:
                 entries.append({**entry, "path": str(Path(directory.name) / entry["path"])})
         links.append(f"<p><a href='{html.escape(directory.name)}/index.html'>{html.escape(directory.name)} review</a></p>")
-        review_metadata.extend(directory / name for name in ("index.html", "selection.json", "training_manifest.json"))
+        review_metadata.extend(directory / name for name in ("index.html", "selection.json", "training_manifest.json", "decode_failures.json"))
     clips_by_source = dict(Counter(e["source"] for e in entries))
     review_by_source = dict(Counter(e["source"] for e in entries if e["rendered"]))
     rendered_clips = sum(review_by_source.values())
@@ -43,6 +43,7 @@ def main():
             "partition": manifests[0]["partition"], "configuration": manifests[0]["configuration"],
             "clips_by_source": clips_by_source, "review_by_source": review_by_source,
             "completed_clips": len(entries), "rendered_clips": rendered_clips,
+            "decode_skipped_clips": sum(m.get("decode_skipped_clips", 0) for m in manifests),
             "source_revision": manifests[0]["source_revision"], "shards": len(manifests), "teacher_only": True})
     if worker_record["configuration"]["render"] or worker_record["configuration"]["operation"] == "cameras":
         if worker_record["configuration"]["operation"] == "cameras":
