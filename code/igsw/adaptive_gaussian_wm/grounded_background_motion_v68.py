@@ -82,7 +82,7 @@ def motion_evidence(prediction, background, args):
         noise = float(np.quantile(background["fit_error_p90_px"].numpy()[good], .9)) if good.any() else 0.0
         threshold = max(args.motion_floor_pixels, args.motion_noise_multiplier * scale, 2 * noise)
         span, raw = 0.0, 0.0
-        if good.sum() >= args.minimum_visible_frames:
+        if good.sum() >= 2:
             span = float(np.linalg.norm(np.diff(np.quantile(compensated[good, point], [.05, .95], axis=0), axis=0)))
             raw = float(np.linalg.norm(np.diff(np.quantile(coordinates[good, point], [.05, .95], axis=0), axis=0)))
         spans.append(span)

@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import Dataset, Sampler
 
 from .grounded_motion_sources_v68 import SOURCES, permitted_camera
+from .grounded_motion_export_v68 import SELECTION_POLICY
 from .tracker_visual_review_v67 import decode_case
 
 
@@ -41,6 +42,10 @@ class GroundedMotionDatasetV68(Dataset):
         rgb[:4][~history_valid] = 0
         visible = native["visibility"] & native["in_bounds"] & torch.isfinite(native["tracks"]).all(-1)
         available = visible[current] & (queries["frames"] <= case["first_frame"] + current)
+        all_roles = data.get("selection_policy") == SELECTION_POLICY
+        selection = data["motion_target_mask"] if all_roles else data["object_motion_target_mask"]
+        if all_roles:
+            available &= selection
         # These queries are loss quadrature points, never inputs to encode_history().
         ids = torch.where(available)[0].numpy()
         rng.shuffle(ids)
@@ -54,7 +59,7 @@ class GroundedMotionDatasetV68(Dataset):
         # Invalid teacher locations have no geometric target, including no NaN payload.
         coordinates = torch.where(valid[..., None], coordinates, torch.zeros_like(coordinates))
         motion = torch.zeros(self.points, dtype=torch.bool)
-        motion[:count] = data["object_motion_target_mask"][selected]
+        motion[:count] = selection[selected]
         reliable = torch.zeros((2, self.points), dtype=torch.bool)
         reliable[:, :count] = data["target_valid"][future[:, None], torch.as_tensor(selected)[None]]
         # The given original query frame is not an independent tracking observation.
@@ -66,6 +71,8 @@ class GroundedMotionDatasetV68(Dataset):
         roles = torch.full((self.points,), -1, dtype=torch.long)
         names = sorted({queries["metadata"][int(i)]["region_id"] for i in selected})
         for j, i in enumerate(selected):
+            if all_roles:
+                continue
             regions[j] = names.index(queries["metadata"][int(i)]["region_id"])
             role = queries["metadata"][int(i)]["role"]
             roles[j] = {"robot_context": 1, "scene_context": 2}.get(role, -1)
@@ -77,12 +84,19 @@ class GroundedMotionDatasetV68(Dataset):
         noise = torch.full((self.points,), float("inf"))
         noise[:count] = data["motion_evidence"]["threshold_px"][selected]
         different = (delta[:, None] - delta[None]).norm(dim=-1) > noise[:, None] + noise[None]
-        different &= reliable[0, :, None] & reliable[0, None, :] & (regions[:, None] != regions[None])
+        different &= reliable[0, :, None] & reliable[0, None, :]
+        if not all_roles:
+            different &= regions[:, None] != regions[None]
+        point_ids = torch.full((self.points,), -1, dtype=torch.long)
+        point_ids[:count] = torch.as_tensor(selected)
         return {"video_rgb": rgb, "history_valid": history_valid, "coordinates": normalized,
                 "point_valid": valid, "target_valid": reliable, "motion_mask": motion, "region_ids": regions,
                 "roles": roles, "different_motion_evidence": different,
                 "frame_times": indices.float() / fps, "native_image_hw": torch.tensor([h, w]),
-                "source": entry["source"], "case_id": entry["case_id"], "sample_index": index}
+                "point_ids": point_ids, "frame_indices": indices + case["first_frame"],
+                "source": entry["source"], "case_id": entry["case_id"], "sample_index": index,
+                "data_epoch": epoch, "sampler_seed": self.seed,
+                "selection_policy": data.get("selection_policy", "legacy_object_region_selection")}
 
 
 def collate_grounded_motion_v68(samples):

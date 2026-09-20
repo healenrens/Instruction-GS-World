@@ -17,7 +17,7 @@ from igsw.adaptive_gaussian_wm.grounded_background_motion_v68 import reference_q
 from igsw.adaptive_gaussian_wm.grounded_motion_sources_v68 import select_data_cases
 from igsw.adaptive_gaussian_wm.grounded_motion_jobs_v68 import compatible_configuration, reserve_arguments, split_reserve, append_replacement, target_counts
 from igsw.adaptive_gaussian_wm.grounded_motion_refinement_v68 import refine_and_densify
-from igsw.adaptive_gaussian_wm.grounded_motion_export_v68 import CONTRACT, export_motion_teacher
+from igsw.adaptive_gaussian_wm.grounded_motion_export_v68 import CONTRACT, SELECTION_POLICY, export_motion_teacher
 from igsw.adaptive_gaussian_wm.grounded_motion_review_v68 import render_motion_data, write_data_gallery, write_review_bundle, upload_data, camera_overview
 from igsw.adaptive_gaussian_wm.grounded_tracker_masks_v67 import GroundedTrackerMasks
 from igsw.adaptive_gaussian_wm.grounded_tracker_roles_v67 import resolve_track_roles
@@ -66,6 +66,7 @@ def main():
     args.wandb_name += f"_shard{rank:04d}"
     configuration = {k: v for k, v in vars(args).items() if not k.startswith("wandb_") and k not in ("stage", "reuse_completed")}
     configuration["worker_count"] = world
+    configuration["selection_policy"] = SELECTION_POLICY
     if rank == 0:
         write_json(Path(args.out) / "workers.json", {"count": world, "configuration": configuration})
     if args.stage == "upload":
@@ -185,7 +186,8 @@ def main():
             save_tensor(ref_path, {"configuration": configuration, "value": background})
         pilot_args = deepcopy(args)
         pilot_args.point_budget = args.pilot_point_budget
-        queries, sampling = build_grounded_queries(rgb, case, pilot_args, segmenter, directory, configuration, render=case["render"])
+        queries, sampling = build_grounded_queries(rgb, case, pilot_args, segmenter, directory, configuration,
+                                                  render=case["render"], role_agnostic=True)
         if not len(queries["xy"]):
             queries = reference_queries(case, args.background_grid_side)
             queries["metadata"] = [{"point_id": i, "xy": xy, "frame": case["first_frame"],
@@ -227,6 +229,7 @@ def main():
             render_motion_data(directory, rgb, native, queries, background, report, case, args, evidence["valid"] & relay["valid"])
         entry = {"case_id": case["case_id"], "source": case["source"], "camera": case["camera"],
                  "path": str((directory / "teacher.pt").relative_to(out)), "object_targets": report["object_motion_target_count"],
+                 "motion_targets": report["selected_point_count"], "selection_policy": SELECTION_POLICY,
                  "background_valid_fraction": report["background_usable_frame_fraction"], "rendered": case["render"],
                  "partition": args.partition, "raw_video": case["record"]["path"]}
         if "replacement_for" in case:

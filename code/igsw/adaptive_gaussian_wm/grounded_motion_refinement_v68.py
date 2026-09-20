@@ -64,8 +64,8 @@ def refine_and_densify(rgb, case, pilot_queries, pilot, evidence, background, sa
         xy = pilot["tracks"][local].numpy()
         visible = (pilot["visibility"][local] & pilot["in_bounds"][local]).numpy()
         with np.load(directory / view["mask_archive"]) as archive:
-            for region in [r for r in sampling["regions"] if r["frame"] == frame and r["role"] == "object_candidate"]:
-                ids = [i for i, row in enumerate(result["metadata"]) if row["region_id"] == region["region_id"] and row["role"] == "object_candidate" and evidence["moving"][i] and visible[i]]
+            for region in [r for r in sampling["regions"] if r["frame"] == frame]:
+                ids = [i for i, row in enumerate(result["metadata"]) if row["region_id"] == region["region_id"] and evidence["moving"][i] and visible[i]]
                 if not ids:
                     continue
                 positive_ids = spaced_indices(xy, ids, 8)
@@ -106,7 +106,7 @@ def refine_and_densify(rgb, case, pilot_queries, pilot, evidence, background, sa
         extra = spread_inside_points(full_masks[region], count, occupied)
         for coordinate in extra.tolist():
             result["metadata"].append({"point_id": len(result["metadata"]), "xy": coordinate, "frame": frame,
-                "region_id": region, "role": "object_candidate", "region_area_px": record["area"],
+                "region_id": region, "role": record["role"], "region_area_px": record["area"],
                 "region_diagonal_px": float(np.hypot(record["box"][2] - record["box"][0], record["box"][3] - record["box"][1])),
                 "sam_score": record["sam_score"], "robot_overlap": record["robot_overlap"], "refined_support": True})
         result["xy"] = torch.cat((result["xy"], torch.from_numpy(extra).float()))

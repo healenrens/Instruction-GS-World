@@ -149,7 +149,7 @@ class GroundedTrackerMasks:
             for index, mask in enumerate(masks):
                 yield mask, float(selected_scores[index]), float(stable[index])
 
-    def frame(self, rgb, progress):
+    def frame(self, rgb, progress, *, role_agnostic=False):
         args = self.args
         image = Image.fromarray(rgb)
         height, width = rgb.shape[:2]
@@ -255,6 +255,8 @@ class GroundedTrackerMasks:
             key=lambda item: -item["sam_score"],
         )
         selected = objects + context[: args.max_context_masks]
+        if role_agnostic:
+            selected = select_scale_coverage(kept, args.max_masks_per_frame + args.max_context_masks, (height, width))
         masks, records = [], []
         for item in robot_regions + selected:
             mask = np.zeros((height, width), bool)

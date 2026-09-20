@@ -17,16 +17,19 @@
    Camera key 是采集配置证据，不是视觉确认；错误命名、剪辑、转换错误尚不能由此自动解决。
 3. 对每个 clip 做独立16×16参考点追踪，RANSAC 拟合背景主导的二维 homography。至少8点、55% inliers、覆盖16格中的6格
    才使用该帧的补偿。它不等于相机位姿，也不能消除所有视差；不足的帧保留为 unknown，不当成零运动。
-4. 先用现有 Grounded-SAM-2 多尺度 proposal 采512个 pilot 点并追踪。机械臂角色继续用跨 anchor 的证据，
-   未被检测为机械臂不等于已经证明是物体。Motion-positive pilot 点作为 SAM 正提示；邻近且长期符合背景运动的参考点
+4. 先用现有 Grounded-SAM-2 多尺度 proposal 采512个 pilot 点并追踪。V68新构建不再按物体/机械臂角色分配pilot预算，
+   不再只允许物体候选区域密集补点。Motion-positive pilot 点作为 SAM 正提示；邻近且长期符合背景运动的参考点
    作为负提示。重新生成支持 mask 后，再按区域面积与空间覆盖密集补点，总预算2048，单次 CoTracker256点。
 5. 相对背景的运动量是每条有效轨迹 x/y 的5%-95%跨度合成长度，单位是第一帧坐标系的 native pixels。
-   门槛为 `max(1.5 px, 3*二阶差分尺度, 2*背景拟合残差P90)`。这些是明确记录的工程筛选参数，不是物理定律或准确率。
+   该跨度在至少两个有效位置上计算，用于所有点的统一排名。旧运动门槛仍用于生成阶段的SAM正提示和诊断，
+   但不再用于最终75%选择；不能把门槛解释为物理定律或准确率。
 6. 从另一可见时刻重新查询同一条轨迹。至少6个共同有效帧且70%以上位置相差不超过3 px，才保留一致性证据。
    排除原 query 和重查询 anchor 自身；同一个 tracker 的重查询一致性仍不是真值验证。
-7. 在每个 anchor-local 合格区域内保留75%的候选，空间格轮换、格内按补偿后运动量排序。
-   75%不是整张图最大位移点的75%，也不是置信度。每个候选区域独立分配，减少大运动部件挤掉小/远物体的问题。
-   机械臂、scene、unknown 及被筛掉的点全部保存为 context，只有最终目标与有效帧交集进入强 motion loss。
+7. **所有类别的可测量轨迹在整个clip内一起排序，保留前75%（向上取整）**。排序只看背景补偿后的运动跨度，
+   同分按point ID稳定排序。物体、夹爪、机械臂、背景、unknown均参与；不使用role、refined mask、固定运动阈值或区域配额。
+   少于两个有效位置、跨度非有限的轨迹没有可比较的运动量，单独记录。排名后不再因类别/整条一致性再次删点；
+   逐帧几何监督仍只使用可见、在图内、背景补偿可用、relay一致的位置。因此75%入选池不等于每帧75%有效监督。
+   快速运动的夹爪也可能入选；本版不再声称这些点都属于被操作物体。
 
 每个 case 保存 `teacher.pt`，其中包括原始轨迹、补偿坐标、query 时间、tracker visibility、重查询误差、背景模型、
 target/context masks、mask/role evidence、相机及文件映射。Track ID 不是 object ID；SAM region ID 只在当前 anchor 有效。
@@ -37,17 +40,19 @@ target/context masks、mask/role evidence、相机及文件映射。Track ID 不
 - **Data reader**：读固定 manifest 和离线 teacher，随机取当前时刻及独立的1–4帧历史，历史间隔0.1秒。
   读取两张未来帧：当前后1秒、3秒。3秒是请求的固定跨度，不是 episode 终局或语言 goal。
   batch 中 RGB 为 `[B,6,3,H,W]`，四个历史位置用有效性 mask 表示1–4帧，不重复当前帧；图像只 pad、不全图缩小。
-  最多256个当前可见轨迹点作为监督读取位置，未来筛选不决定 RGB encoder 看见的区域、历史长度或密度。
+  最多256个点从全局75%入选池中、当前可见且query已发生的轨迹里抽取，不再混入被淘汰点。
+  当前和未来都有效的位置才参与位移监督；未来筛选不决定 RGB encoder 看见的区域、历史长度或密度。
 - **RGB encoder**：复用 native CNN 的三层卷积，移除全局平均池化，得到 stride-4 可学习特征图。
-  18个 recurrent slots 对有效图像特征做三轮 attention pooling / GRU 更新；16个是 object hypotheses，另外2个用于 robot 与 scene。
+  18个 recurrent slots 对有效图像特征做三轮 attention pooling / GRU 更新。维度保留，但新数据不再用错误类别
+  将其中两个slot硬指定为robot与scene。
   输出 `[B,18,256]` latent 和 attention centroid。它们不是已证明的物理状态或语义 identity。
   teacher 坐标、mask、future RGB 不进入 `encode_history`。Student 不读 CoTracker 输出来构造状态。
 - **State auxiliary readout**：在当前坐标，按各 slot 的独立 feature field 和当前 ownership 合成 DINO/SigLIP 预测。
   冻结 teacher 读取原生224像素重叠 tiles，保留 DINO1024维、SigLIP768维，不做旧版固定分组维度压缩。
   局部14/28/56像素邻域池化仅作 appearance 辅助目标；它不是 object boundary、identity 或 dynamics 成功标准。
-- **State supervision**：appearance cosine、可用轨迹的跨帧 ownership JS、object/robot/scene 弱角色 CE、同 anchor-local
-  区域内的 binding、不同区域明显不同相对运动的 separation。仅这些训练期 loss 可读取未来轨迹。
-  同区域不保证同物体，不同运动不保证不同物体，articulation 等情形仍可能违反弱证据，必须保留逐例验证。
+- **State supervision**：新数据用appearance cosine、可用轨迹的跨帧ownership JS、明显不同相对运动的separation。
+  role CE与SAM同区域binding关闭：新reader的role/region标签都是-1，不把错误的物体/夹爪分类或混合mask作为真值。
+  不同运动仍只是分离的弱证据，不保证不同物体，articulation等情形必须逐例检验。
 - **Dynamics**：先加载 V68 state checkpoint 并冻结 encoder；target encoder 拷贝其最终参数后固定。
   训练期 posterior 读取当前/未来 slot transition，得到每个 component 一个连续32维 effect，总形状 `[B,18,32]`。
   Mean/log-variance 描述变分分布，不代表空间 Gaussian；没有显式机器人 action、语言或 History Prior。
@@ -57,13 +62,44 @@ target/context masks、mask/role evidence、相机及文件映射。Track ID 不
   两条3秒路径分别接受真实轨迹监督，再约束其一致性。Zero effect 通过显式差分结构得到 current-copy，
   不把这一恒等构造当成学到的能力。正确/shuffled effect 的实际误差差距才需要实验检验。
 
-State loss 是 appearance + correspondence + 0.25 role + 0.1(binding + separation)。
+新数据State loss是appearance + correspondence + 0.1 separation；旧v4数据保留原role/binding行为以便复现。
 Dynamics loss 是 short + long-direct + rollout 的坐标 SmoothL1，另加0.25 path、0.1 intervention、
 0.1 tracker-observability BCEWithLogits、0.001 posterior KL。SmoothL1 在归一化图像坐标中计算，beta=0.01；
 W&B 同时输出原生像素 EPE、P50/P90/P95 和逐案例有效点的误差数组。
 EPE 是预测坐标与 tracker 目标坐标的欧氏距离，**不是人工 GT accuracy**。
 Visibility 辅助仅学习 tracker 可观测输出，不训练“对象不存在”的真值。RGB reconstruction 不进入 loss。
 所列权重和32维 effect 是本次实现的起点，尚无消融证明它们最优。
+
+## 当前执行：仅重筛已完成数据，并看真正的训练样本
+
+用户明确不继续凑400条、不启动20,000条和训练。新契约为`all_point_motion_teacher_v5`。
+先执行下文同步/部署，再执行以下独立命令：快照旧目录中所有`complete.json`，不加载SAM/CoTracker，
+复用原轨迹、背景配准、relay，只重算排名与新teacher；输出到新目录，旧数据不改。
+不能通过重筛补回旧采点阶段未覆盖的位置；未来新构建已同步取消pilot/refinement的角色限制。
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world
+RT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+REV="$(<"${RT}/runtime/grounded_motion_v68/DEPLOYED_REVISION")"
+ROOT="${RT}/runtime/grounded_motion_v68/releases/${REV}"
+OUT="${RT}/data/grounded_motion_v68_completed_allpoints75_${REV:0:7}"
+"${RT}/.venv/bin/python" "${ROOT}/code/scripts/reselect_grounded_motion_data_v68.py" \
+  --input "${RT}/data/grounded_motion_v68_review400_6b8a4e4_1gpu" \
+  --out "${OUT}" --source_revision "${REV}" --motion_top_fraction 0.75 \
+  --points 256 --seed 17 --epochs 0
+```
+
+主要看`training_samples/index.html`：直接调用训练`GroundedMotionDatasetV68[(sample_index,epoch)]`，
+显示真正的1–4张history、当前采样点、+1秒/+3秒有效监督；不是另外挑一组好看的点。
+每例保存原始6帧PNG、无叠加的student_input.png、training_sample.png和逐点JSON（ID、native坐标、有效性）。
+青色是当前appearance查询，黄色是+1秒监督，粉色是+3秒监督，不表示语义类别。
+这是指定seed/epoch的样本，训练epoch改变时会重新采样；future RGB不进入history，也不用于RGB重建。
+`index.html`还展示整个10秒clip的全部入选轨迹，黄色只表示全局入选，不是每次训练的256点。
+最终`review_bundle.zip`包括上述媒体和JSON，不包含teacher.pt。
+
+原生20,000条入口也使用同一排名/reader；合并后仅为预选400例输出epoch0的真实loader样本，不扩大可视化配额。
+训练更改点数/seed后，可使用`review_grounded_motion_training_data_v68.py --manifest <OUT/dataset.json>`，
+配合同一`--points/--seed/--epochs`重现该训练的采样。重筛不证明目标准确，G0仍需用户逐例查看。
 
 ## 一：同步并部署（仅这一步访问 GitHub）
 
@@ -114,11 +150,10 @@ echo "BUILD_RC=$?"
 GPU 数、配置或代码改变时使用新 OUT，不能覆盖正在被训练读取的 teacher shards。
 若仅 W&B 上传失败，计算结果已落盘；重设相同全部参数，只把 `DATA_STAGE=upload`，重跑脚本即可重传后合并。
 
-### 恢复旧400条单卡任务
+### 历史功能：恢复同契约构建（本轮不要执行）
 
-先执行上面的同步/部署步骤，再执行下面独立命令。读取旧目录 `workers.json` 恢复原数据参数和worker数，
-使用新代码，显式允许复用旧revision的相同teacher配置。不会删除或重算已完成的83条；日志中的实际复用数为准。
-如果采样/模型/相机参数发生变化则不复用不匹配结果。新增的reserve和失败记录不会改变已有有效clip的标签。
+此入口仅用于同一数据语义的构建续跑；本次v4到v5改变选择/采点规则，不要用它在旧400目录内续跑。
+本轮只运行上面的重筛脚本，保持旧teacher不变。以下仅保留历史操作参考。
 
 ```bash
 cd /mnt/pfs/public/xuhaoming/instruct_gs_world

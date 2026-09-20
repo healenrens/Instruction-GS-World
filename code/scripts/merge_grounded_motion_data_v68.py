@@ -10,6 +10,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
 from igsw.adaptive_gaussian_wm.grounded_motion_review_v68 import write_review_bundle
+from igsw.adaptive_gaussian_wm.grounded_motion_export_v68 import SELECTION_POLICY
+from igsw.adaptive_gaussian_wm.grounded_motion_training_review_v68 import write_training_review
 
 
 def main():
@@ -36,7 +38,6 @@ def main():
     rendered_clips = sum(review_by_source.values())
     links.insert(1, f"<p>Training clips: {len(entries)}; visualized clips: {rendered_clips}</p>"
                    f"<p>Per source: {html.escape(json.dumps(clips_by_source))}</p>")
-    (root / "index.html").write_text("\n".join(links), encoding="utf-8")
     if manifests:
         write_json(root / "training_manifest.json", {"contract": manifests[0]["contract"], "root": str(root.resolve()), "entries": entries,
             "status": "completed" if len(manifests) == workers and all(m["status"] == "completed" for m in manifests) else "partial",
@@ -45,6 +46,12 @@ def main():
             "completed_clips": len(entries), "rendered_clips": rendered_clips,
             "decode_skipped_clips": sum(m.get("decode_skipped_clips", 0) for m in manifests),
             "source_revision": manifests[0]["source_revision"], "shards": len(manifests), "teacher_only": True})
+        if rendered_clips and manifests[0]["configuration"].get("selection_policy") == SELECTION_POLICY:
+            write_training_review(root / "training_manifest.json", root / "training_samples",
+                                  seed=manifests[0]["configuration"]["seed"])
+            links.insert(1, "<p><a href='training_samples/index.html'>实际训练loader样本（默认256点，epoch 0）</a></p>")
+            review_metadata.extend((root / "training_samples").rglob("*"))
+    (root / "index.html").write_text("\n".join(links), encoding="utf-8")
     if worker_record["configuration"]["render"] or worker_record["configuration"]["operation"] == "cameras":
         if worker_record["configuration"]["operation"] == "cameras":
             for rank in range(workers):

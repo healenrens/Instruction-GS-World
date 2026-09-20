@@ -171,6 +171,7 @@ class GroundedObjectTransportV68(nn.Module):
             role_loss = self.weighted(-grouped.clamp_min(1e-6).log().gather(-1, roles.clamp_min(0)[..., None])[..., 0], (roles >= 0) & batch["point_valid"][:, 3])
             # Same anchor-local region is positive support evidence, not an object ID.
             same = (batch["region_ids"][:, :, None] == batch["region_ids"][:, None]) & batch["motion_mask"][:, :, None] & batch["motion_mask"][:, None]
+            same &= (batch["region_ids"][:, :, None] >= 0) & (batch["region_ids"][:, None] >= 0)
             same &= batch["point_valid"][:, 3, :, None] & batch["point_valid"][:, 3, None, :]
             off_diagonal = ~torch.eye(ownership.shape[1], dtype=torch.bool, device=ownership.device)[None]
             binding = self.weighted(1 - torch.einsum("bnk,bmk->bnm", ownership, ownership), same & off_diagonal)

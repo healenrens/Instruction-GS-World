@@ -66,7 +66,7 @@ def render_proposals(rgb, masks, records, points, frame, directory):
     return name
 
 
-def build_grounded_queries(video, case, args, segmenter, directory, configuration, *, render=True):
+def build_grounded_queries(video, case, args, segmenter, directory, configuration, *, render=True, role_agnostic=False):
     directory = Path(directory)
     mask_dir = directory / "grounded_masks"
     mask_dir.mkdir(exist_ok=True)
@@ -88,6 +88,7 @@ def build_grounded_queries(video, case, args, segmenter, directory, configuratio
             masks, regions, detection = segmenter.frame(
                 video[local].permute(1, 2, 0).numpy(),
                 f"case={case['case_id']} frame={frame}",
+                role_agnostic=role_agnostic,
             )
             for record in regions:
                 record.update(
@@ -127,6 +128,9 @@ def build_grounded_queries(video, case, args, segmenter, directory, configuratio
         if not groups[name]:
             budgets["object"] += budgets[name]
             budgets[name] = 0
+    if role_agnostic:
+        groups = {"all_roles": all_records}
+        budgets = {"all_roles": args.point_budget}
     counts = {}
     for name, records in groups.items():
         allocations = allocate_regions(

@@ -18,7 +18,7 @@ def main():
     record = json.loads((out / "workers.json").read_text())
     saved = record["configuration"]
     previous = saved.get("reuse_source_revision") or saved["source_revision"]
-    options = {k: v for k, v in saved.items() if k not in ("worker_count", "queries_json")}
+    options = {k: v for k, v in saved.items() if k not in ("worker_count", "queries_json", "selection_policy")}
     options.update(out=str(out), source_revision=args.source_revision, reuse_source_revision=previous,
                    stage="run", operation="build", reuse_completed=1)
     rt = os.environ.get("RUNTIME_ROOT", "/mnt/pfs/public/xuhaoming/instruct_gs_world")

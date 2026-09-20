@@ -10,6 +10,8 @@ from PIL import Image, ImageDraw
 import torch
 
 from .grounded_motion_sources_v68 import alternate_views
+from .grounded_motion_export_v68 import SELECTION_POLICY
+from .grounded_motion_training_review_v68 import render_motion_selection
 from .grounded_tracker_export_v67 import styled_tracks
 from .grounded_tracker_selection_media_v67 import render_object_selection
 from .tracker_source_review_v67 import export_source_review
@@ -55,7 +57,11 @@ def render_motion_data(directory, rgb, native, queries, background, report, case
     export_source_review(case, directory, args.episode_overview_frames, record_decode_errors=True)
     camera_overview(case, directory)
     target_display = {**native, "visibility": native["visibility"] & target_valid}
-    render_object_selection(directory, rgb, target_display, case, queries, report, args.display_width)
+    if report.get("selection") == SELECTION_POLICY:
+        render_motion_selection(directory, rgb, native, target_display["visibility"], report["object_target_ids"],
+                                args.display_width, case["record"]["fps"])
+    else:
+        render_object_selection(directory, rgb, target_display, case, queries, report, args.display_width)
     styled = styled_tracks(native, queries, torch.arange(len(queries["xy"])))
     def frames():
         for index, image in enumerate(rgb):
@@ -79,7 +85,7 @@ def write_data_gallery(out, entries, selection, *, index_name="index.html", mani
     esc = html.escape
     body = ["<!doctype html><meta charset='utf-8'><title>Grounded motion data v68</title>",
             "<style>body{font:16px system-ui;max-width:1250px;margin:24px auto}video{width:48%;vertical-align:top}img{max-width:100%}section{border-top:1px solid #bbb;padding:24px 0}pre{white-space:pre-wrap}</style>",
-            "<h1>V68 离线运动数据</h1><p>主视频只画实际训练目标；全部点和机械臂上下文另列。75%是采样预算，不是准确率。</p>",
+            "<h1>V68 离线运动数据</h1><p>轨迹视频展示离线入选池；单次训练点见实际loader样本。比例是采样预算，不是准确率。</p>",
             f"<p><a href='selection.json'>来源/视角排除记录</a> · <a href='{esc(manifest_name)}'>当前展示 manifest</a></p>"]
     if index_name != "index.html":
         body.append("<p>PARTIAL REVIEW: only completed cases are shown; this is not the complete requested dataset.</p>")
@@ -91,10 +97,15 @@ def write_data_gallery(out, entries, selection, *, index_name="index.html", mani
         if entry["rendered"]:
             body.append(f"<h3>当前选择及同 episode 可用视角</h3><img src='{path}/camera_overview.png'>"
                         f"<p><a href='{path}/camera_mapping.json'>相机实际路径/时间映射</a> · <a href='{path}/source_review.json'>源文件映射</a></p>"
-                        f"<h3>整段 episode 概览</h3><img src='{path}/episode_overview.png'>"
-                        f"<h3>物体候选筛选前 / 实际75%目标</h3><video controls src='{path}/object_before_topk.mp4'></video>"
-                        f"<video controls src='{path}/object_after_topk.mp4'></video>"
-                        f"<h3>背景参考 / 全部点和上下文</h3><video controls src='{path}/background_reference.mp4'></video>"
+                        f"<h3>整段 episode 概览</h3><img src='{path}/episode_overview.png'>")
+            if entry.get("selection_policy") == SELECTION_POLICY:
+                body.append(f"<h3>全部类别统一排名后的轨迹池</h3><p>黄色=入选，不表示物体类别；有效时刻才绘制。</p>"
+                            f"<video controls src='{path}/selected_motion.mp4'></video>")
+            else:
+                body.append(f"<h3>旧版：物体候选筛选前 / 区域内筛选后</h3><video controls src='{path}/object_before_topk.mp4'></video>"
+                            f"<video controls src='{path}/object_after_topk.mp4'></video>")
+            body.append(f"<h3>诊断参考：不是训练点选择</h3><p>这里的角色颜色是旧自动假设，不能解释为正确类别。</p>"
+                        f"<video controls src='{path}/background_reference.mp4'></video>"
                         f"<video controls src='{path}/all_points_context.mp4'></video>")
             refinement = json.loads((out / Path(entry["path"]).parent / "refinement.json").read_text())
             body.append("<h3>运动点与背景负提示重新得到的 SAM 支持区域</h3>")
@@ -137,8 +148,9 @@ def upload_data(args, out, entries, configuration):
             continue
         table_counts[row["source"]] += 1
         directory = out / Path(row["path"]).parent
+        video = "selected_motion.mp4" if row.get("selection_policy") == SELECTION_POLICY else "object_after_topk.mp4"
         table.add_data(row["case_id"], row["source"], row["camera"], row["object_targets"], row["background_valid_fraction"],
-            wandb.Video(str(directory / "object_after_topk.mp4"), format="mp4") if row["rendered"] else None,
+            wandb.Video(str(directory / video), format="mp4") if row["rendered"] else None,
             wandb.Image(str(directory / "camera_overview.png")) if row["rendered"] and (directory / "camera_overview.png").is_file() else None)
     run.log({"motion_data/cases": table, "motion_data/clips": len(entries),
              "motion_data/table_is_sample": sum(table_counts.values()) < len(entries),
