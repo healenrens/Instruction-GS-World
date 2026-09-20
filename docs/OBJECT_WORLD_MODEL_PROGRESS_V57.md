@@ -2817,3 +2817,98 @@ CoTracker 内部 resize 不会被本修改消除。本轮只完成本地代码�
   排除。Top-K 不能证明剩下的点更准确，不能替代 visibility/role/GT 验证，也不能用更干净的展示宣称 G0 通过。
 - 本次仅完成本地实现与静态检查，没有服务器访问或新效果数据。下一步由用户查看同 case 的 before/after 和逐点
   筛选记录，特别检查真实小幅物体运动是否丢失、伪运动是否反而占据名额；机械臂粘连仍为未解决问题。
+
+### 15.35 2026-09-20 训练数据接入讨论：先修正视角与背景，再学习可测量的物体变化
+
+**What changed**
+
+1. 用户将运动候选保留比例调整为70%-80%，下一版方案取75%，并排除 DROID；HY/RoboMIND 背景误标和
+   RoboMIND 腕部视角必须列为实际修正工作，不能仅登记风险。本轮核对代码发现：复用 CASE_MANIFEST 时不重新
+   执行 camera_view；相机判断仅依据路径名称；SAM 面积小于阈值的 proposal 被初标为 object_candidate，跨 anchor
+   判定主要排除 robot，不能证明其为物体；Top-K 使用未经相机补偿的像素跨度。尚未查看用户报告的具体源片段，
+   不把这些代码缺口写成所有错误 case 的已确认根因。
+2. 拟统一新采样、旧清单复用和训练 loader 的 source/view policy。按采集配置读取实际 LeRobot camera metadata，
+   输出同 episode 多视角概览，记录经确认的外部视角映射；换相机时使用该相机的 episode 时间/文件映射，不简单
+   替换路径字符串。未确认、只有腕部或存在剪辑跳变的片段不进入强 object-motion target，不用腕部作为缺失外部
+   视角的替代。背景修正采用稀疏空间均衡参考轨迹估计背景主导运动，再结合跨时刻区域支持、局部轨迹一致性和
+   独立重查询的漂移检查，区分相对背景运动与整幅画面移动；可用可靠运动点/邻近背景点作为 SAM 正负 prompts
+   收紧混合 mask，再密集采点。运动一致性不能单独证明 objectness，单平面补偿不能解释所有视差；证据冲突的
+   点保留为 unknown/context，不作为背景或不存在的真值。75% 在合格运动区域内部选取并保留空间覆盖，避免全图
+   排名让大幅运动区域挤掉小物体；同时保留 raw、背景参考、被排除点及原始/补偿坐标，供逐例复查。
+3. 模型主线保持单 RGB-only history student、连续区域聚合和 compact object-level latent-effect Dynamics。
+   当前 train_continuous_predictive_object_field_v67.py 仍实例化旧在线 teacher；新的 teacher_v3 导出尚未接入。
+   当前 _operator 在真实未来 track_coordinates 上调用 decoder，因此该路径不能证明预测了未来空间位置。
+   拟新增源坐标/区域局部坐标到未来坐标、support 与可观测性的读出，由共享 object latent 驱动；未来坐标仅作
+   teacher target，不作为 decoder 查询输入。对应点位置误差是主要可解释监督，DINO/SigLIP 对应区域特征为辅助，
+   不把任意投影的 cosine、std 或独立点跟踪成功改名为 object identity/物理状态成功。静态区域保留为 state/context，
+   动态权重用于 transition，不将对象定义为始终移动。部署输入中的区域/采点仅依赖已观察内容；全视频75%筛选
+   只影响训练目标权重，不能反过来决定 student 看见的区域、密度或历史长度。
+
+**Why**
+
+下一步需要直接学习和评估物体如何改变，而不是继续用背景主导的弱标签、未来位置提示或自洽特征距离替代这个目标。
+
+**Impact / 执行方案与证据边界**
+
+- 本节是讨论方案和用户反馈记录，尚未修改或推送可执行代码；当前脚本默认仍为50%，既有 index 仍含 DROID。
+  未访问远端、未读取 RoboMIND 原始数据、未运行模型或证明背景/视角问题已经解决。
+- 数据生成采用独立离线 teacher 作业，先产出可复查的固定版本 shard，再扩展；不在每个训练 step 在线运行
+  SAM/CoTracker，也不交替用尚未验证的 student 重标 teacher。剩余 shard 可与训练并行生成，但每次训练固定
+  manifest，新增数据显式开启后续数据版本，strict resume 不偷偷改变样本集合。
+- 缓存原生连续至少十秒的轨迹、query 时间、mask/role 证据、实际时间戳和视频映射；原图继续按需读取，
+  DINO/SigLIP 可沿用冻结 JIT 编码。Track ID 只代表表面点 correspondence，SAM region ID 只代表局部 proposal，
+  两者不直接等同于持久 object ID；tracker visibility 仍是弱观测，不等同于存在性真值。
+- 保留当前被用户认可的 baseline。先用同 case 的原始轨迹、背景补偿、最终目标和多视角映射区分误差来源，
+  同时检查小/远物体的点没有被清掉；按源记录误保留背景与误删真实运动。最早未完成项仍为 G0 teacher 有效性，
+  不从“展示更干净”或结构检查通过直接跳到 object-level 能力结论。通过后再接入共享 teacher reader，先学习
+  state/correspondence，再用 posterior-conditioned transport 学习变化；固定时间差、正确/zero/shuffled effect、
+  held 逐例位置误差和区域删除干预分别检验预测精度、effect 使用与对象独立性。
+
+### 15.36 2026-09-20 V68：数据和模型同步实现，先交付造数据指令
+
+**What changed**
+
+用户明确“同步改，我只是告诉你先给我什么指令”：本轮不是只做可视化，也不是先启动训练。
+分支 `codex/grounded-motion-data-v68` 实现离线 teacher、共享 reader、RGB-only student、posterior transport 和独立前台 launcher。
+原 V67 baseline、源 index 和旧输出不修改。详细模块、目标、限制与独立执行命令见
+`/Users/hela/Instruct-GS-World-recovered-20260725/docs/GROUNDED_MOTION_DATA_AND_TRANSPORT_V68.md`。
+
+1. 数据统一排除 DROID；native 至少10秒；默认512 pilot、2048总点预算、每次256点，采用75%区域内保留。
+   新采样/旧 CASE_MANIFEST/reader 共用 source-camera policy。RoboMIND 腕部映射按真实 LeRobot metadata 换到同 episode
+   外部 camera；无对应外部文件的记录排除，不沿用旧视角。整段 episode、多相机截图和原始路径/offset 默认显示。
+   HY 默认使用 cam_high；实际 camera key 是否错误命名、视频是否已经剪辑，仍要看用户运行的 case，不能声称自动修复。
+2. 独立空间参考点拟合背景主导 homography，保存原/补偿轨迹和逐帧拟合支持；pilot 运动正提示与背景负提示重新生成 SAM
+   支持，再密集采点。另一时刻重新查询检验轨迹漂移；角色/运动/mask/重查询条件合格后，每区域空间格轮换保留75%。
+   导出 `grounded_object_motion_teacher_v4`。最终 `target_valid` 同时用于训练监督和主可视化，raw/context 全保留。
+   homography 是二维主导运动模型，SAM/role 是 pseudo label，relay 是同一 tracker 的一致性证据，均不等于独立 GT。
+3. 独立 GPU worker 离线造 shard，按 case 和中间阶段保存，重复同配置命令复用；全量 manifest 只在完成时集中写入，
+   中途进度保存在各 shard 的 progress.json。W&B 同步案例表和产物；全量表为明确标记的前64例/源/worker展示，
+   不是随机 held 质量估计。原图按需读取，构建期和训练期都不重建 RGB cache。
+4. Student 单路径输入1–4张历史 native RGB，stride-4 CNN 保留空间场，18个 recurrent slots 输出 `[B,18,256]`：
+   16个 object hypotheses、robot/scene 各1个。不把 teacher 的未来密集查询当作 encoder 输入，也不把名字当作物理语义证明。
+   冻结原生 tile 的 DINO1024/SigLIP768 局部特征作 appearance 辅助；本版不调用旧 arbitrary fixed-group feature 压缩。
+   State 以 track ownership correspondence、角色证据、区域 binding/不同运动分离和 appearance 训练。弱分组证据可能有误，
+   同区域并不被提升为真实持久 object ID；没有预训练成功或 capacity 恢复的实验结论。
+5. Dynamics 从 V68 state checkpoint 显式初始化并冻结 encoder/target，用训练期 posterior 得到每 component32维连续 effect。
+   共享18-token Transformer 产生变化，由当前坐标/当前 ownership 读出未来坐标。真实未来点只进 loss，不进 transport query。
+   固定1秒、3秒目标和 direct/rollout alignment；3秒不是 episode 终局。Zero effect 持续当前状态是结构约束，不是学习成绩。
+   主 loss 直接比较轨迹位置，辅以 path、shuffled intervention、KL、tracker observability；没有显式 action、Prior、语言、RGB loss。
+   W&B 保存 native-pixel EPE 分布与逐案例误差，名称明确为相对 tracker 目标而不是人工准确率。
+6. 发布到独立服务器目录 `/mnt/pfs/public/xuhaoming/instruct_gs_world/runtime/grounded_motion_v68/releases/`。
+   数据四卡、训练八卡均前台运行，无 GitHub/模型下载依赖。state/dynamics分开；checkpoint v68 保存完整模型/EMA、优化器、
+   scheduler、rank RNG、数据 manifest、epoch/cursor、W&B ID；只在显式 RESUME 时恢复，不根据输出目录自动猜测。
+
+**Why**
+
+用户认可的是逐点追踪观感，但指出目标区域与视角仍错。先明确生产出的实际监督，并把模型训练绑定到同一导出；
+同时替换旧“在真实未来位置解码”的测量路径，让新模型必须从当前位置预测对应点去了哪里。
+这解决接口与预测任务错位，不等于已经解决 objectness、机械臂粘连、背景视差、阴影或 tracker 系统性误差。
+
+**Impact / 已验证与未验证**
+
+- 已实现并静态审查模块调用、shape、mask、AMP 使用、DDP accumulation、断点恢复与离线运行接口。
+  本地未运行任何模型/训练；服务器未在本轮执行，RoboMIND 原始文件未访问。
+- 先执行每源8个 episode 的 train-partition 数据检查批，查看实际 target、原始/context 点、mask refinement 与相机映射。
+  这不是 held 能力测试。确认数据后再扩大固定离线版本，state 学好后再启动 dynamics，不自动提交两阶段训练。
+- 首批目标仍为 G0 teacher 有效性。新工程默认阈值不是经标注校准的结论；camera-key whitelist 也不是视觉内容证明。
+  不为“脚本完成”晋级主线，后续记录必须逐例区分误保留背景、误删小运动、机械臂接触、未知可见性以及真实物体范围。

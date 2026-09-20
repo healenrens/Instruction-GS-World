@@ -1,5 +1,9 @@
 # CoTracker 原始可视化评估
 
+后续离线数据与模型同步实现的入口见
+`/Users/hela/Instruct-GS-World-recovered-20260725/docs/GROUNDED_MOTION_DATA_AND_TRANSPORT_V68.md`。
+V68 使用75%区域内选择、排除DROID、外部相机重映射、背景补偿与密集重查询；下面的 V67 baseline 保留不变。
+
 ## 本轮只回答的问题
 
 同一个可见表面点是否被持续追踪，遮挡时的 visibility 是否合理，重现时是否回到同一个点；相同物理时间范围内，连续帧和训练抽帧是否产生不同结果。本轮不训练模型，不把点 ID 当 object ID，不由运动相似度生成 object GT。

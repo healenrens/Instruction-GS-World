@@ -46,7 +46,7 @@ from igsw.adaptive_gaussian_wm.tracker_visual_review_gallery_v67 import write_ga
 from review_point_tracker_v67 import pack_review, upload
 
 
-def parse_args():
+def parse_args(configure=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True)
     parser.add_argument("--data_index", required=True)
@@ -103,6 +103,8 @@ def parse_args():
     )
     parser.add_argument("--wandb_name", default="grounded_object_tracker_v67")
     parser.add_argument("--wandb_dir", default=".")
+    if configure is not None:
+        configure(parser)
     args = parser.parse_args()
     args.steps_ms = [int(value) for value in args.steps_ms.split(",")]
     args.queries_json = ""
