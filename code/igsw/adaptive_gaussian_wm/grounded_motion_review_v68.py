@@ -4,6 +4,7 @@ import html
 import json
 from collections import Counter
 from pathlib import Path
+import zipfile
 
 from PIL import Image, ImageDraw
 import torch
@@ -72,6 +73,8 @@ def write_data_gallery(out, entries, selection):
             "<h1>V68 离线运动数据</h1><p>主视频只画实际训练目标；全部点和机械臂上下文另列。75%是采样预算，不是准确率。</p>",
             "<p><a href='selection.json'>来源/视角排除记录</a> · <a href='training_manifest.json'>训练 manifest</a></p>"]
     for entry in entries:
+        if not entry["rendered"]:
+            continue
         path = esc(str(Path(entry["path"]).parent))
         body.append(f"<section><h2>{esc(entry['case_id'])}</h2><p>{esc(entry['camera'])} · targets={entry['object_targets']}</p>")
         if entry["rendered"]:
@@ -90,6 +93,18 @@ def write_data_gallery(out, entries, selection):
     (out / "index.html").write_text("\n".join(body), encoding="utf-8")
 
 
+def write_review_bundle(out, entries, metadata):
+    # Only reviewed cases contribute media; the manifest still lists all training clips.
+    artifacts = set(metadata)
+    for entry in entries:
+        if entry["rendered"]:
+            artifacts.update((out / Path(entry["path"]).parent).rglob("*"))
+    with zipfile.ZipFile(out / "review_bundle.zip", "w", compression=zipfile.ZIP_STORED) as archive:
+        for path in sorted(artifacts):
+            if path.is_file() and path.suffix in (".html", ".png", ".mp4", ".json"):
+                archive.write(path, path.relative_to(out))
+
+
 def upload_data(args, out, entries, configuration):
     if args.wandb_mode == "disabled":
         return
@@ -103,6 +118,8 @@ def upload_data(args, out, entries, configuration):
     table = wandb.Table(columns=["case", "source", "camera", "object_targets", "reference_usable_fraction", "targets", "cameras"])
     table_counts = Counter()
     for row in entries:
+        if args.render and not row["rendered"]:
+            continue
         if not row["rendered"] and table_counts[row["source"]] >= 64:
             continue
         table_counts[row["source"]] += 1
@@ -110,7 +127,10 @@ def upload_data(args, out, entries, configuration):
         table.add_data(row["case_id"], row["source"], row["camera"], row["object_targets"], row["background_valid_fraction"],
             wandb.Video(str(directory / "object_after_topk.mp4"), format="mp4") if row["rendered"] else None,
             wandb.Image(str(directory / "camera_overview.png")) if row["rendered"] and (directory / "camera_overview.png").is_file() else None)
-    run.log({"motion_data/cases": table, "motion_data/clips": len(entries), "motion_data/table_is_sample": not bool(args.render),
+    run.log({"motion_data/cases": table, "motion_data/clips": len(entries),
+             "motion_data/table_is_sample": sum(table_counts.values()) < len(entries),
+             "motion_data/table_clips": sum(table_counts.values()),
+             "motion_data/review_clips": sum(e["rendered"] for e in entries),
              "motion_data/target_points": sum(e["object_targets"] for e in entries),
              **{f"motion_data/clips_{source}": count for source, count in Counter(e["source"] for e in entries).items()}})
     artifact = wandb.Artifact(args.wandb_name, type="motion-data-review")

@@ -48,7 +48,7 @@ def refine_mask(segmenter, image, positives, negatives, embeddings):
                          "sam_score": float(scores[best]), "positive_points": positives.tolist(), "negative_points": negatives.tolist()}, output.image_embeddings
 
 
-def refine_and_densify(rgb, case, pilot_queries, pilot, evidence, background, sampling, segmenter, directory, args):
+def refine_and_densify(rgb, case, pilot_queries, pilot, evidence, background, sampling, segmenter, directory, args, *, render=True):
     result = deepcopy(pilot_queries)
     for row in result["metadata"]:
         row["refined_support"] = False
@@ -115,7 +115,7 @@ def refine_and_densify(rgb, case, pilot_queries, pilot, evidence, background, sa
     mask_path = directory / "refined_masks.npz"
     np.savez_compressed(mask_path, **full_masks)
     views = []
-    for frame in sorted({r["frame"] for r in mask_records}):
+    for frame in sorted({r["frame"] for r in mask_records}) if render else []:
         records = [r for r in mask_records if r["frame"] == frame]
         points = [r for r in result["metadata"] if r["frame"] == frame]
         # Keep the original proposal image intact; refinement has a separate location.

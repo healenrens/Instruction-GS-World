@@ -66,7 +66,7 @@ def render_proposals(rgb, masks, records, points, frame, directory):
     return name
 
 
-def build_grounded_queries(video, case, args, segmenter, directory, configuration):
+def build_grounded_queries(video, case, args, segmenter, directory, configuration, *, render=True):
     directory = Path(directory)
     mask_dir = directory / "grounded_masks"
     mask_dir.mkdir(exist_ok=True)
@@ -172,7 +172,7 @@ def build_grounded_queries(video, case, args, segmenter, directory, configuratio
             per_frame,
             info["frame"],
             directory,
-        )
+        ) if render else None
         union = np.zeros(case["height"] * case["width"], bool).reshape(
             case["height"], case["width"]
         )

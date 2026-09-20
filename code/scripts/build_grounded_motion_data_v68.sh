@@ -8,16 +8,21 @@ PY="${VENV_ROOT}/.venv/bin/python"
 SOURCE_REVISION="${SOURCE_REVISION:-local-unversioned}"
 RUN_NAME="${RUN_NAME:-grounded_motion_data_v68_${SOURCE_REVISION:0:7}}"
 OUT="${OUT:-${RUNTIME_ROOT}/data/${RUN_NAME}}"
+DATA_GPUS="${DATA_GPUS:-1}"
+WORKERS_PER_GPU="${WORKERS_PER_GPU:-1}"
+DATA_WORKERS=$((DATA_GPUS * WORKERS_PER_GPU))
 export PYTHONPATH="${RUNTIME_ROOT}/third_party/co-tracker:${ROOT}/code:${PYTHONPATH:-}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1 OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 mkdir -p "${OUT}" "${RUNTIME_ROOT}/wandb"
-"${PY}" -m torch.distributed.run --standalone --nproc_per_node "${DATA_GPUS:-1}" \
+echo "[motion-data-v68] gpus=${DATA_GPUS} workers_per_gpu=${WORKERS_PER_GPU} workers=${DATA_WORKERS} out=${OUT}"
+"${PY}" -m torch.distributed.run --standalone --nproc_per_node "${DATA_WORKERS}" \
   "${ROOT}/code/scripts/build_grounded_motion_data_v68.py" \
   --out "${OUT}" --source_revision "${SOURCE_REVISION}" --operation "${OPERATION:-build}" --stage "${DATA_STAGE:-run}" \
   --seed "${SEED:-17}" --tracker_version "${TRACKER_VERSION:-3}" \
   --data_index "${DATA_INDEX:-${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json}" \
   --case_manifest "${CASE_MANIFEST:-}" --camera_overrides "${CAMERA_OVERRIDES:-}" \
   --partition "${DATA_PARTITION:-held}" --cases_per_source "${CASES_PER_SOURCE:-80}" \
+  --workers_per_gpu "${WORKERS_PER_GPU}" --review_cases_per_source "${REVIEW_CASES_PER_SOURCE:-80}" \
   --all_episode_windows "${ALL_EPISODE_WINDOWS:-0}" --clip_seconds "${CLIP_SECONDS:-10}" \
   --tracker_checkpoint "${TRACKER_CHECKPOINT:-${RUNTIME_ROOT}/checkpoints/cotracker/scaled_offline.pth}" \
   --grounding_model "${GROUNDING_MODEL:-${RUNTIME_ROOT}/models/grounding-dino-base}" \

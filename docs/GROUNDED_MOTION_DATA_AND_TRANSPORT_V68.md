@@ -73,7 +73,7 @@ Visibility 辅助仅学习 tracker 可观测输出，不训练“对象不存在
 cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
 git fetch origin '+refs/heads/codex/grounded-motion-data-v68:refs/remotes/origin/codex/grounded-motion-data-v68' &&
 git switch --detach refs/remotes/origin/codex/grounded-motion-data-v68 &&
-RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world \
+SOURCE_REVISION="$(git rev-parse HEAD)" RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world \
   bash /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/code/scripts/deploy_grounded_motion_v68_runtime.sh
 ```
 
@@ -83,7 +83,7 @@ RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world \
 
 ## 二：先造400个 Clip 并全部可视化
 
-四卡、前台；RobotWin、AgiBot、RoboMIND、Bridge、HY 各80个 episode，各取一个连续10秒窗口，目标共400个 clip。
+单卡、单 worker、前台；RobotWin、AgiBot、RoboMIND、Bridge、HY 各80个 episode，各取一个连续10秒窗口，目标共400个 clip。
 腕部/时长不合格的 episode 不占80个名额，会继续选择该源的下一条外部视角 episode。若源中没有足够合法候选，
 selection.json 如实记录实际数量，不跨源凑数，也不重复视频。轨迹效果不好/没有最终目标的 case 仍保留并可视化，
 不能通过只展示成功追踪把400例变成偏置样本。这是 train-partition 的数据检查批，不是 held 指标实验。
@@ -98,13 +98,13 @@ export ROOT="${RUNTIME_ROOT}/runtime/grounded_motion_v68/releases/${SOURCE_REVIS
 export DATA_INDEX="${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json"
 export RUN_NAME="grounded_motion_v68_review400_${SOURCE_REVISION:0:7}"
 export OUT="${RUNTIME_ROOT}/data/${RUN_NAME}"
-export DATA_GPUS=4 DATA_PARTITION=train CASES_PER_SOURCE=80
+export DATA_GPUS=1 WORKERS_PER_GPU=1 DATA_PARTITION=train CASES_PER_SOURCE=80 REVIEW_CASES_PER_SOURCE=80
 export CLIP_SECONDS=10 ALL_EPISODE_WINDOWS=0 MOTION_TOP_FRACTION=0.75
 export PILOT_POINT_BUDGET=512 POINT_BUDGET=2048 POINTS_PER_PASS=256
 export RENDER=1 REUSE_COMPLETED=1 DATA_STAGE=run OPERATION=build SEED=17
 export WANDB_MODE=online WANDB_PROJECT=instruct-gs-world
 export WANDB_ENTITY=healenrenss-university-of-chinese-acadmic-and-science
-unset CASE_MANIFEST CAMERA_OVERRIDES CUDA_VISIBLE_DEVICES WANDB_RUN_ID
+unset CASE_MANIFEST CAMERA_OVERRIDES WANDB_RUN_ID
 bash "${ROOT}/code/scripts/build_grounded_motion_data_v68.sh"
 echo "BUILD_RC=$?"
 ```
@@ -142,10 +142,17 @@ open "${LOCAL_DIR}/index.html"
 
 如期间又部署了其他 revision，应使用原构建的 RUN_NAME，不下载另一版目录。
 
-## 四：确认样本之后，全量离线构建
+## 四：当前生产任务：20,000条数据，只可视化400条
 
-与首批独立执行；仍是四卡前台。所有符合策略的 train episodes，每10秒一个不重叠窗口；最后不足10秒的尾段不纳入。
-不画全量视频，不在线交替重标。不用已有 DROID 标注，也不改原始 index。
+与原400条任务使用不同输出目录，不停止或覆盖旧任务。五源各4,000个 train episodes，各一个连续10秒窗口，目标20,000条。
+在全局 case plan 上先固定每源前80条作为展示集，再分片；不是每个 worker 各选400条，也不按追踪效果挑成功案例。
+`REVIEW_CASES_PER_SOURCE=80` 是全局每源展示上限；设0表示展示全部选中片段，`RENDER=0` 表示不展示。
+非展示样本仍完整产生训练 teacher、中间续跑缓存、mask 和逐点证据，但不渲染 PNG/MP4、不加入 review 视频包。
+
+在已分配8张可见GPU的任务中前台执行。`DATA_GPUS=8` × `WORKERS_PER_GPU=2` = 16个独立进程；local rank 0/1用可见卡0，
+2/3用卡1，以此类推。不是16卡 DDP；不做梯度同步。每个进程各自持有 SAM/GroundingDINO/CoTracker，能让一条任务的CPU解码、
+磁盘写入与另一条任务的GPU推理重叠，但会增加模型副本和推理峰值显存，不保证线性加速。每个进程使用独立 shard。
+不重置平台的 `CUDA_VISIBLE_DEVICES`，GPU编号是该变量映射后的逻辑编号。默认仍每卡1个 worker，下面显式启用2个。
 
 ```bash
 cd /mnt/pfs/public/xuhaoming/instruct_gs_world
@@ -154,20 +161,41 @@ export VENV_ROOT="${RUNTIME_ROOT}"
 export SOURCE_REVISION="$(<"${RUNTIME_ROOT}/runtime/grounded_motion_v68/DEPLOYED_REVISION")"
 export ROOT="${RUNTIME_ROOT}/runtime/grounded_motion_v68/releases/${SOURCE_REVISION}"
 export DATA_INDEX="${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json"
-export RUN_NAME="grounded_motion_v68_train_${SOURCE_REVISION:0:7}"
+export RUN_NAME="grounded_motion_v68_train20k_review400_${SOURCE_REVISION:0:7}_8g2w"
 export OUT="${RUNTIME_ROOT}/data/${RUN_NAME}"
-export DATA_GPUS=4 DATA_PARTITION=train CASES_PER_SOURCE=0 ALL_EPISODE_WINDOWS=1
+export DATA_GPUS=8 WORKERS_PER_GPU=2 DATA_PARTITION=train
+export CASES_PER_SOURCE=4000 REVIEW_CASES_PER_SOURCE=80 ALL_EPISODE_WINDOWS=0
 export CLIP_SECONDS=10 MOTION_TOP_FRACTION=0.75 PILOT_POINT_BUDGET=512 POINT_BUDGET=2048 POINTS_PER_PASS=256
-export RENDER=0 REUSE_COMPLETED=1 DATA_STAGE=run OPERATION=build SEED=17
+export RENDER=1 REUSE_COMPLETED=1 DATA_STAGE=run OPERATION=build SEED=17
+export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1
 export WANDB_MODE=online WANDB_PROJECT=instruct-gs-world
 export WANDB_ENTITY=healenrenss-university-of-chinese-acadmic-and-science
-unset CASE_MANIFEST CAMERA_OVERRIDES CUDA_VISIBLE_DEVICES WANDB_RUN_ID
+unset CASE_MANIFEST CAMERA_OVERRIDES WANDB_RUN_ID
 bash "${ROOT}/code/scripts/build_grounded_motion_data_v68.sh"
 echo "BUILD_RC=$?"
 ```
 
-全量 manifest 完成后才使用它训练。W&B 全量构建表每源展示前64个 case/worker，完整条目仍在 manifest artifact；
-这不是随机质量评估样本。源视频缺失在 index 读取阶段跳过，解码损坏等运行错误直接暴露，不静默替换标签。
+重复相同代码、OUT和全部参数即可续做，不必重新生成完成的片段；更改 worker 数时使用新 OUT，避免改变既有分片归属。
+若改为每卡1个 worker，同时改成 `WORKERS_PER_GPU=1` 和新的 `RUN_NAME`（例如尾缀 `_8g1w`），不在已运行目录混用。
+运行中每个 `shard_0000/progress.json` 到 `shard_0015/progress.json` 记录完成/计划片段和展示数量；日志为 `${OUT}/build.log`。
+W&B 每 worker 一个 run，表格只展示预选案例；`motion_data/clips` 仍统计该 worker 的全部训练数据，不把400例平均外推为全部质量。
+全部 worker 完成后 `${OUT}/training_manifest.json` 汇总 `completed_clips`、`rendered_clips`、`clips_by_source`、`review_by_source`。
+样本充足时应为20,000/400，每源4,000/80；不足时如实记录，不复制凑数。HTML和 `review_bundle.zip` 只含这400例的展示媒体。
+原始RGB视频和DINO/SigLIP特征不重复存盘；当前格式保留轨迹及续跑中间 tensor。
+按301帧、2048点估算，20,000条主要 tensor 合计约830GB，另需 mask、逐点JSON和400例媒体空间；这是张量字节估算而非实际磁盘测量。
+本次不启动模型训练。数据与人工检查完成后再固定 manifest；解码损坏等运行错误仍直接暴露，不静默替换标签。
+
+下载这次400例展示包（本机运行；如之后部署了新版，`NAME` 使用原任务打印的名称）：
+
+```bash
+REV="$(ssh -p 8600 root@10.66.0.39 'cat /mnt/pfs/public/xuhaoming/instruct_gs_world/runtime/grounded_motion_v68/DEPLOYED_REVISION')"
+NAME="grounded_motion_v68_train20k_review400_${REV:0:7}_8g2w"
+LOCAL_DIR="${HOME}/Downloads/${NAME}"
+mkdir -p "${LOCAL_DIR}"
+scp -P 8600 "root@10.66.0.39:/mnt/pfs/public/xuhaoming/instruct_gs_world/data/${NAME}/review_bundle.zip" "${LOCAL_DIR}/review_bundle.zip" &&
+unzip -o "${LOCAL_DIR}/review_bundle.zip" -d "${LOCAL_DIR}" &&
+open "${LOCAL_DIR}/index.html"
+```
 
 ## 五：服务器端可选整条前反向检查
 
@@ -198,7 +226,7 @@ export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
 export VENV_ROOT="${RUNTIME_ROOT}"
 export SOURCE_REVISION="$(<"${RUNTIME_ROOT}/runtime/grounded_motion_v68/DEPLOYED_REVISION")"
 export ROOT="${RUNTIME_ROOT}/runtime/grounded_motion_v68/releases/${SOURCE_REVISION}"
-export TEACHER_MANIFEST="${RUNTIME_ROOT}/data/grounded_motion_v68_train_${SOURCE_REVISION:0:7}/training_manifest.json"
+export TEACHER_MANIFEST="${RUNTIME_ROOT}/data/grounded_motion_v68_train20k_review400_${SOURCE_REVISION:0:7}_8g2w/training_manifest.json"
 export STAGE=state RUN_NAME=grounded_object_transport_v68_state_r1_seed17
 export OUT="${RUNTIME_ROOT}/outputs/${RUN_NAME}"
 export NPROC_PER_NODE=8 BATCH_PER_GPU=4 TARGET_GLOBAL_BATCH=256 WORKERS_PER_RANK=2 POINTS_PER_SAMPLE=256
@@ -222,7 +250,7 @@ export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
 export VENV_ROOT="${RUNTIME_ROOT}"
 export SOURCE_REVISION="$(<"${RUNTIME_ROOT}/runtime/grounded_motion_v68/DEPLOYED_REVISION")"
 export ROOT="${RUNTIME_ROOT}/runtime/grounded_motion_v68/releases/${SOURCE_REVISION}"
-export TEACHER_MANIFEST="${RUNTIME_ROOT}/data/grounded_motion_v68_train_${SOURCE_REVISION:0:7}/training_manifest.json"
+export TEACHER_MANIFEST="${RUNTIME_ROOT}/data/grounded_motion_v68_train20k_review400_${SOURCE_REVISION:0:7}_8g2w/training_manifest.json"
 export STATE_CHECKPOINT="${RUNTIME_ROOT}/outputs/grounded_object_transport_v68_state_r1_seed17/latest.pt"
 export STAGE=dynamics RUN_NAME=grounded_object_transport_v68_dynamics_r1_seed17
 export OUT="${RUNTIME_ROOT}/outputs/${RUN_NAME}"
