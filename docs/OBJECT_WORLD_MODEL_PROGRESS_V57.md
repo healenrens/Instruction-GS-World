@@ -2,8 +2,8 @@
 
 > 更新日期：2026-09-20
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/tracker-visual-review-v67`
-> 当前实现：第 15.30 节已有轨迹的 CPU 移动点筛选与完整轨迹重绘；区域过大问题尚未解决，不修改训练目标
+> 当前开发分支：`codex/grounded-object-tracker-v67`
+> 当前实现：第 15.31 节 GroundingDINO + SAM2 区域采点、CoTracker、角色可视化与同源训练候选导出；保留上一版 baseline
 > 历史 V66 验证提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`（V66 四卡、六源、1536 held clips G0 audit）
 > V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
 > V62 B/C/D structural audit 实现提交：`2ad1158084ff0e8b4070f43c6721261df1884485`（静态验证，待服务器执行）
@@ -2675,3 +2675,44 @@ CoTracker 内部 resize 不会被本修改消除。本轮只完成本地代码�
 仍可能来自相机、机械臂、阴影或 tracker 漂移；缓慢微小运动可能被隐藏，须通过保存的逐点记录检查。新阈值未做
 独立校准。本轮只做静态语法/接口核对，未在本地或服务器执行推理/重绘。下一证据是用户观看重绘结果并定位区域
 过大样本，再决定 proposal 边界应如何改进；G0 仍未晋级。
+
+### 15.31 2026-09-20 Grounded-SAM-2 区域采样与物体优先数据导出
+
+**What changed**
+
+1. 用户认可移动点+完整轨迹 baseline 的展示，要求保留；同时反馈少量阴影伪运动、机械臂与物体未分开、DROID
+   远处小物体漏选。用户提出阈值筛选可能是漏点原因，决定不先单独定位，而直接实现 Grounded-SAM-2 方案。
+   这些是当前样本的人工反馈，不是总体准确率结论。baseline `6866816` 保留，新流程用独立分支与输出目录。
+2. 新流程继承至少十秒、非腕部、原生连续 RGB 和相同 held cases。在每两秒的 query frame 上，用冻结
+   GroundingDINO 的 `robot arm / robot gripper / robot hand` boxes 提示 SAM2 得到机械臂上下文 mask；
+   同时用 SAM2 全图+四个重叠原图 crop 产生 class-agnostic masks。SAM 点网格只是分割提示，真正的 CoTracker
+   queries 在去重后的 mask 内部按区域分配，并作确定性 farthest-point 采样；不再先以 optical-flow 阈值淘汰区域。
+3. 默认每段 2048 点预算：物体候选 80%、机械臂上下文 15%、unknown/scene 5%；不存在的上下文角色预算还给
+   物体候选。先给每个候选区域轮流分配四点，再按面积平方根分配剩余量，每区域最多 96 点。容量不足明确记录；
+   小 mask 在区域数量上限处优先保留。机械臂重叠区域标 unknown，不直接删除，不假定与夹爪接触的物体属于机械臂。
+4. 原生 CoTracker 追踪后，按每点 5%-95% 位置范围和区域尺度筛选运动候选：阈值为
+   `max(1.5 px, 0.08 * query区域包围盒对角线, 3 * 二阶差分尺度)`，至少六个非 query 有效帧。
+   二阶差分尺度是轨迹变化统计，不是已校准的 tracking uncertainty；这些参数仍是可见、待人工复查的启发式。
+   机械臂/unknown/scene 保留为上下文，不进入 `object_motion_target_mask`。所有原始点和逐点数值仍保存。
+5. 主视频用绿色显示物体运动候选、橙色显示机械臂、紫色显示 unknown、蓝色显示 scene，保留完整轨迹和遮挡断线；
+   另有 `all_queries.mp4` 展示包括静止/微动候选的全部点。每个分支导出 `training_candidates.pt`，其中 target、
+   context 和 display IDs 使用同一份选择结果；`training_manifest.json` 索引全部分支，不能只保留好看的 case。
+
+**Why**
+
+目标是物体运动成为主要学习证据，机械臂保留为交互与遮挡上下文。把区域发现与运动强度分开，避免远处小物体在获得
+任何查询点前就被整图位移阈值淘汰；保留 raw/all-query 对照，才能看清是 SAM 没分到、没有点预算、tracker 漂移，
+还是最终筛选隐藏了真实微动。展示和导出采用相同点集，避免只修饰展示却继续用另一套数据训练。
+
+**Impact / 当前证据边界**
+
+- 已实现单卡前台 sampling/tracking/render/export 和中断复用、独立权重下载步骤、W&B 表及完整 ZIP。使用 HF 原生
+  GroundingDINO/SAM2 接口，不重装环境，不改现有训练模型、loss 或训练入口。
+- SAM region 是 query-frame proposal，region ID 只在该 anchor 有效；不是跨帧 object ID。CoTracker 传播点，
+  本版没有传播 SAM mask。GroundingDINO 没检测到机械臂不等于机械臂不存在。SAM 也可能分出部件、阴影或漏掉小物体。
+- 采样/运动选择使用完整片段，导出是 training-only teacher candidate，不能作为因果 student 的未来输入。
+  输入按原尺寸解码并增加 crop，但 SAM/CoTracker 自身内部 resize 仍然存在。
+- 此次静态审查已完成；尚未执行新版本服务器推理，未证明机械臂分离准确率或小物体召回提升。G0 不晋级，
+  下一步只运行这批可视化与数据生成，人工检查 held-object 被误归机械臂、DROID 小物体、阴影和遮挡轨迹。
+- 完整执行/下载说明在 `/Users/hela/Instruct-GS-World-recovered-20260725/docs/POINT_TRACKER_VISUAL_REVIEW_V67.md`
+  的 Grounded-SAM-2 小节；旧 moving baseline 入口和产物保持不变。

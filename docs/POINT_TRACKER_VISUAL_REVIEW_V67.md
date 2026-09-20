@@ -181,3 +181,155 @@ scp -P 8600 "root@10.66.0.39:/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs
 unzip -o "${LOCAL_DIR}/review_bundle.zip" -d "${LOCAL_DIR}" &&
 open "${LOCAL_DIR}/index.html"
 ```
+
+## Grounded-SAM-2：物体运动为目标，机械臂为上下文
+
+本节是独立新入口，不覆盖前面的 moving baseline。实现位置：
+
+- `/Users/hela/Instruct-GS-World-recovered-20260725/code/igsw/adaptive_gaussian_wm/grounded_tracker_masks_v67.py`：GroundingDINO 机械臂 boxes、SAM2 query-frame masks、crop、去重、角色证据。
+- `/Users/hela/Instruct-GS-World-recovered-20260725/code/igsw/adaptive_gaussian_wm/grounded_tracker_sampling_v67.py`：区域预算、mask 内部采点、采点图和查询记录。
+- `/Users/hela/Instruct-GS-World-recovered-20260725/code/igsw/adaptive_gaussian_wm/grounded_tracker_export_v67.py`：运动筛选、角色颜色及同点集训练候选导出。
+- `/Users/hela/Instruct-GS-World-recovered-20260725/code/scripts/review_grounded_object_tracker_v67.py`：完整流程与中断复用。
+
+### 具体产生什么数据
+
+```text
+原生非腕部 RGB 连续片段，至少 10 秒
+ -> 每 2 秒一张 query frame
+ -> GroundingDINO 机械臂/夹爪框 -> SAM2 mask，角色 robot_context
+ -> SAM2 全图+重叠 crop 候选区域 -> object_candidate / unknown / scene_context
+ -> 区域内采样，物体优先，保留机械臂点
+ -> CoTracker 原生连续帧 + 400 ms 对照，各自追踪相同 queries
+ -> 原生轨迹逐点运动筛选
+ -> 同一组 IDs 的主视频 + 完整 raw/all-query 对照 + training_candidates.pt
+```
+
+这里的 Grounded-SAM-2 是 GroundingDINO 与 SAM2 的组合，使用已公开的
+[HF GroundingDINO 接口](https://huggingface.co/docs/transformers/en/model_doc/grounding-dino) 和
+[HF SAM2 接口](https://huggingface.co/docs/transformers/en/model_doc/sam2)，不另外引入训练模型。
+推理要求既有环境提供 `Sam2Model`、`Sam2Processor` 和 `AutoModelForZeroShotObjectDetection`；脚本不会安装或升级环境。
+
+机械臂文本是 `robot arm. robot gripper. robot hand.`。其他候选通过 SAM2 自动提示产生，不要求列出杯子/积木等物体类别。
+默认每张 query frame：全图与 2x2 重叠 crop 各有 12x12 分割提示点，一次 16 prompts，复用当前图像 embedding；
+这些网格点不是 tracker queries。SAM 选择每个提示评分最高的 mask，再按 SAM score>=0.7、logit stability>=0.9、
+原图面积>=8 px 选 proposal。crop 边界截断的 mask 不当新物体；mask IoU>=0.8 去重，最多 48 个 object candidates
+和 8 个其他候选，机械臂 mask 单独保留。以上是 proposal 参数，不是已证明正确的 object 判据。
+
+与机械臂 mask 重叠占自身面积超过 10% 的候选先作为 unknown 保留；与机械臂几乎重复的 mask 由 robot_context 覆盖。
+占整帧超过 40% 的其他大区域作为 scene_context，这是面积启发式，不是已确认的背景。其余标 object_candidate，
+不等于非机械臂分类必然正确。未检测到机械臂会明确记录 `not_detected_not_proven_absent`。
+
+2048 点预算按 object/robot/other=80%/15%/5% 分配；空上下文预算还给 object。区域轮流获得最多四个基础点，
+剩余按面积平方根分配，单区域最多 96 点。采点在 mask 内部进行 farthest-point 覆盖，优先远离边界。
+这是 mask 内的密集追踪，不是 dense optical flow，也不能保证 SAM 没发现的小物体被追踪。
+
+运动筛选采用原生轨迹、排除给定 query 帧，只使用 visibility=true、in-bounds、有限坐标的至少六帧。
+5%-95% x/y 范围的对角线超过 `max(1.5 px, 0.08 * 区域对角线, 3 * 二阶差分尺度)` 时为 moving。
+二阶差分尺度是连续三个有效位置的二阶差分范数中位数除以 sqrt(6)，用于描述高频变化，不是 tracker confidence。
+object_candidate 且 moving 才进入物体运动目标；robot、unknown、scene 都保留为上下文。
+没有移动的 object candidates 不进主视频，但仍在全点视频与 raw 数据。这里没有声称消除了相机运动或阴影。
+
+**数据与展示一致性**：主视频展示 `object_motion_target_mask | context_mask`，同一组 IDs 用于原生/抽帧两个分支。
+导出数据也保留这两个 mask、所有 raw tracks、tracker visibility、in-bounds、query frame、区域来源和逐点阈值。
+将来训练可用前者构造 motion supervision，后者保留交互/遮挡上下文；本次没有改动 world-model 训练或 loss。
+完整视频用于分割和筛选，因此这是离线 teacher 数据，不能把未来采点、未来 visibility 或角色选择泄露给部署 student。
+
+### 第一步：同步与部署
+
+以下命令仅在可访问 GitHub 的同步环境执行；不删除工作区文件、不覆盖原实验产物。
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source &&
+git fetch origin '+refs/heads/codex/grounded-object-tracker-v67:refs/remotes/origin/codex/grounded-object-tracker-v67' &&
+git switch --detach refs/remotes/origin/codex/grounded-object-tracker-v67 &&
+env ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source \
+  RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world \
+  SOURCE_REVISION="$(git rev-parse HEAD)" \
+  bash /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/code/scripts/deploy_continuous_predictive_object_field_v67_runtime.sh
+```
+
+### 第二步：仅准备新增权重
+
+这一步允许下载；已有文件由 Hugging Face 下载工具复用。只下载权重及 processor/tokenizer 文件，不重装环境。
+将下面两处运行命令中的 `SOURCE_REVISION` 都换成交付的完整 commit。
+
+```bash
+export SOURCE_REVISION=<交付的完整commit>
+export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export ROOT="${RUNTIME_ROOT}/runtime/continuous_predictive_object_field_v67/releases/${SOURCE_REVISION}"
+"${RUNTIME_ROOT}/.venv/bin/python" "${ROOT}/code/scripts/prepare_grounded_tracker_models_v67.py" \
+  --models_root "${RUNTIME_ROOT}/models"
+```
+
+下载目录分别是 `/mnt/pfs/public/xuhaoming/instruct_gs_world/models/grounding-dino-base` 和
+`/mnt/pfs/public/xuhaoming/instruct_gs_world/models/sam2.1-hiera-large`。已有 CoTracker 使用原路径，不重新下载。
+
+### 第三步：单卡前台重新采样、追踪与可视化
+
+独立环境，不依赖前两条命令的 shell；运行阶段不访问 Git/GitHub，不联网获取模型。W&B 用于上传结果。
+`CASE_MANIFEST` 指向用户已看过的十秒样本清单，保证同 case 比较，不按新 mask 的好坏重选样本。
+需要重新从六源选样时设置 `CASE_MANIFEST=`，默认每源 5 个 held clips。
+
+```bash
+export SOURCE_REVISION=<交付的完整commit>
+export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export ROOT="${RUNTIME_ROOT}/runtime/continuous_predictive_object_field_v67/releases/${SOURCE_REVISION}"
+export VENV_ROOT="${RUNTIME_ROOT}"
+export DATA_INDEX="${RUNTIME_ROOT}/data/multisource_real_robot_video_v53/index.json"
+export CASE_MANIFEST="${RUNTIME_ROOT}/outputs/tracker_visual_reviews/tracker_motion_review_v67_10s_seed17_5d82a59/cases.json"
+export TRACKER_CHECKPOINT="${RUNTIME_ROOT}/checkpoints/cotracker/scaled_offline.pth"
+export TRACKER_VERSION=3 CUDA_VISIBLE_DEVICES=0
+export GROUNDING_MODEL="${RUNTIME_ROOT}/models/grounding-dino-base"
+export SAM_MODEL="${RUNTIME_ROOT}/models/sam2.1-hiera-large"
+export RUN_NAME="grounded_object_tracker_v67_10s_seed17_${SOURCE_REVISION:0:7}"
+export OUT="${RUNTIME_ROOT}/outputs/tracker_visual_reviews/${RUN_NAME}"
+export POINT_BUDGET=2048 POINTS_PER_PASS=256 QUERY_EVERY_SECONDS=2
+export ROBOT_POINT_FRACTION=0.15 OTHER_CONTEXT_FRACTION=0.05
+export CLIP_SECONDS=10 TEMPORAL_STEP_MS=400 SEED=17 REUSE_COMPLETED=1
+export WANDB_MODE=online WANDB_PROJECT=instruct-gs-world
+export WANDB_ENTITY=healenrenss-university-of-chinese-acadmic-and-science
+export WANDB_NAME="${RUN_NAME}" WANDB_DIR="${RUNTIME_ROOT}/wandb" REVIEW_STAGE=run
+unset WANDB_RUN_ID WANDB_RESUME
+cd "${ROOT}"
+bash "${ROOT}/code/scripts/review_grounded_object_tracker_v67.sh"
+echo "REVIEW_RC=$?"
+```
+
+中断后同配置原样重跑，复用完成的 anchor masks、queries、native tracks 和分支结果。
+变更任何采样配置使用新 `RUN_NAME`/`OUT` 保留对照；不回退成旧 flow sampling，不隐藏模型/文件错误。
+ZIP 在 W&B 上传前落盘。若仅上传失败，同环境设置 `REVIEW_STAGE=upload` 重跑，不重新加载模型或做追踪。
+
+### 结果与下载
+
+统一结果根是 `/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/tracker_visual_reviews/grounded_object_tracker_v67_10s_seed17_<commit前7位>`。
+
+| 文件 | 用途 |
+|---|---|
+| `index.html` / `review_bundle.zip` / `review.log` | 本地浏览、完整下载包、前台进度日志 |
+| `training_manifest.json` | 同批所有 case/时间分支的训练候选索引 |
+| `<case>/grounded_masks/frame_<frame>.npz` / `.json` | 原尺寸 SAM masks、boxes/分类来源/采样配置 |
+| `<case>/grounded_masks/frame_<frame>_queries.png` | 原图 mask 与采点覆盖 |
+| `<case>/sampling.json` / `queries.pt` | 全区域与点预算、真实 query 坐标/时间/角色 |
+| `<case>/step_400ms/comparison.mp4` / `trajectories.png` | 目标+上下文两路对照与完整轨迹 |
+| `<case>/step_400ms/all_queries.mp4` | 包含被运动阈值隐藏的小幅/静止候选，排查漏点 |
+| `<case>/step_400ms/motion_filter.json` | 逐点跨度、阈值、筛选依据 |
+| `<case>/step_400ms/training_candidates.pt` | 全轨迹+target/context/display IDs，teacher-only，不是 GT |
+
+`training_candidates.pt` 中 `native.tracks` 形状为 `[T,N,2]`，以原图像素为单位；`visibility/in_bounds` 为 `[T,N]`；
+`queries.xy` 为 `[N,2]`，`queries.frames` 为 `[N]` 原视频帧号；三种 target/context/robot masks 为 `[N]`；
+`display_point_ids` 为所显示的原始点索引。`T` 是真实连续帧数，`N` 是实际采得的点数，不保证固定2048。
+region IDs 仅是 anchor-local 区域索引，不是物体身份真值。可见性仍是 CoTracker 的预测。
+
+下载 Mac 上执行（不用其他 Mac 的用户名）：
+
+```bash
+RUN_NAME=grounded_object_tracker_v67_10s_seed17_<交付commit前7位>
+LOCAL_DIR="${HOME}/Downloads/${RUN_NAME}"
+mkdir -p "${LOCAL_DIR}" &&
+scp -P 8600 "root@10.66.0.39:/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/tracker_visual_reviews/${RUN_NAME}/review_bundle.zip" "${LOCAL_DIR}/review_bundle.zip" &&
+unzip -o "${LOCAL_DIR}/review_bundle.zip" -d "${LOCAL_DIR}" &&
+open "${LOCAL_DIR}/index.html"
+```
+
+重点逐例看：机械臂是否误包了被抓物体、远处小物体是否有 mask/queries、主视频丢失的点在 all-query 中是否真实运动、
+阴影/相机运动是否被标为物体、遮挡后是否追到另一表面。新版本已完成静态检查，服务器推理和质量提升尚待运行确认。

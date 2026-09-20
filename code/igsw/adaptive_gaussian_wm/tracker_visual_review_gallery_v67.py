@@ -28,6 +28,17 @@ def write_gallery(out, cases, results, revision):
                 if display
                 else ""
             )
+            grounded = row.get("grounded_selection")
+            if grounded:
+                display_note = (
+                    f"<p>Object-motion targets: {grounded['object_motion_target_count']}; "
+                    f"context points: {grounded['context_count']}; total raw queries: {grounded['raw_point_count']}. "
+                    "Green = object-motion candidate; orange = robot; purple = unknown; blue = scene. "
+                    "Query-frame pseudo roles, not verified object labels. Main display uses exactly the exported selection.</p>"
+                    f'<p><a href="{path}/motion_filter.json">Per-point selection and thresholds</a> · '
+                    f'<a href="{path}/training_candidates.pt">Training candidate export</a></p>'
+                    f'<details><summary>All tracked points, BEFORE motion filtering</summary><video controls preload="none" src="{path}/all_queries.mp4"></video></details>'
+                )
             snapshot = (
                 f'<details><summary>Full-clip trajectory image</summary><figure><img loading="lazy" src="{path}/trajectories.png" alt="Full visible trajectory segments for displayed points"></figure></details>'
                 if "trajectories" in row.get("media", {})
@@ -58,13 +69,18 @@ def write_gallery(out, cases, results, revision):
             else ""
         )
         mask_open = "" if any("display_filter" in row for row in pairs) else " open"
+        mask_title = (
+            "Grounded-SAM-2 masks and query roles (before motion selection)"
+            if case.get("sampling_kind") == "grounding_dino_sam2_region_queries_v1"
+            else "Original proposal masks and queries, BEFORE track filtering (not object labels)"
+        )
         blocks.append(f"""
 <section data-source="{esc(case["source"])}"><h2>{esc(case_id)}</h2>
 <p>{esc(case["group"])} · {case["width"]} × {case["height"]} · {case["record"]["fps"]:g} Hz · {case["clip_seconds"]:.2f} seconds · {esc(case["camera"])} · {case["point_count"]} queries</p>
 <details><summary>Native source video</summary><video class="wide" controls loop preload="none" src="{esc(case_id)}/source.mp4"></video></details>
-<details{mask_open}><summary>Original proposal masks and queries, BEFORE track filtering (not object labels)</summary><div class="videos">{proposals}</div></details>{empty}
-<p><a href="{esc(case_id)}/sampling.json">Mask method, thresholds and camera-motion fit</a> · <a href="{esc(case_id)}/queries.pt">Query positions and times</a></p>
-<div class="review" data-review="{esc(case_id)}/masks"><label>Region selection <select data-field="mask"><option>unreviewed</option><option>moving_object_covered</option><option>oversized_region_background_spill</option><option>small_object_missed</option><option>mostly_arm</option><option>camera_motion</option><option>shadow_or_noise</option><option>empty</option><option>mixed</option></select></label><label class="notes">Incorrect regions / frames <input data-field="notes"></label></div>
+<details{mask_open}><summary>{mask_title}</summary><div class="videos">{proposals}</div></details>{empty}
+<p><a href="{esc(case_id)}/sampling.json">Mask method, thresholds and sampling metadata</a> · <a href="{esc(case_id)}/queries.pt">Query positions and times</a></p>
+<div class="review" data-review="{esc(case_id)}/masks"><label>Region selection <select data-field="mask"><option>unreviewed</option><option>moving_object_covered</option><option>oversized_region_background_spill</option><option>small_object_missed</option><option>object_mislabelled_robot</option><option>robot_mislabelled_object</option><option>mostly_arm</option><option>camera_motion</option><option>shadow_or_noise</option><option>empty</option><option>mixed</option></select></label><label class="notes">Incorrect regions / frames <input data-field="notes"></label></div>
 <details class="picker" data-case="{esc(case_id)}"><summary>Select points for a manual rerun</summary>
 <div class="toolbar"><label>Point group <input class="point-label" value="target"></label><button class="undo" type="button">Undo point</button><button class="clear" type="button">Clear points</button><span class="point-count">0 points</span></div>
 <canvas data-image="{esc(case_id)}/anchor.png"></canvas><pre class="point-list"></pre></details>
@@ -114,4 +130,16 @@ picker.querySelector('.undo').onclick=()=>{saved.points[id].pop();persist();redr
         .replace("__BLOCKS__", "".join(blocks))
         .replace("__PAYLOAD__", payload)
     )
+    if any(
+        case.get("sampling_kind") == "grounding_dino_sam2_region_queries_v1"
+        for case in cases
+    ):
+        document = document.replace(
+            "Long-clip motion-mask tracker review",
+            "Grounded object / robot tracker review",
+        )
+        document = document.replace(
+            "Motion masks select queries at multiple times, not object labels. Orange = raw proposal; cyan = query before filtering. Stable trajectory color = original point ID.",
+            "SAM masks select queries at multiple times. Green = object candidate, orange = robot context, purple = unknown/contact overlap, blue = scene context. These are query-frame pseudo roles, not per-frame verified identities. Main videos use the exported training selection; all-query videos retain filtered points.",
+        )
     (out / "index.html").write_text(document, encoding="utf-8")

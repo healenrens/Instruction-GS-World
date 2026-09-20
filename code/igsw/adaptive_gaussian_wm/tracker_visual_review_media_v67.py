@@ -16,6 +16,14 @@ def color(point):
     return tuple(round(value * 255) for value in rgb)
 
 
+def point_color(prediction, point):
+    if "point_colors" in prediction:
+        return tuple(prediction["point_colors"][point])
+    return color(
+        int(prediction.get("point_ids", range(prediction["tracks"].shape[1]))[point])
+    )
+
+
 def rgb_image(frame):
     return Image.fromarray(frame.permute(1, 2, 0).numpy())
 
@@ -75,12 +83,13 @@ def draw_points(image, prediction, frame, fps, labels, title, trails_seconds=0):
     suffix = f" | {supplied} supplied query points" if supplied else ""
     draw.text(
         (7, 20),
-        "filled=visible; ring=not visible; border X=offscreen" + suffix,
+        prediction.get("legend", "filled=visible; ring=not visible; border X=offscreen")
+        + suffix,
         fill="white",
     )
     for point, xy in enumerate(coordinates[frame]):
         point_id = int(point_ids[point])
-        tint = color(point_id)
+        tint = point_color(prediction, point)
         # Draw each visible run separately; never bridge an occlusion/offscreen gap.
         run_mask = valid[first : frame + 1, point]
         boundaries = np.flatnonzero(
@@ -183,7 +192,7 @@ def panel(image, boxes, width, prediction, frame):
                         (y - top) * crop_width / (bottom - top) + 3,
                     ),
                     str(point_id),
-                    fill=color(point_id),
+                    fill=point_color(prediction, point),
                     stroke_width=1,
                     stroke_fill="black",
                 )

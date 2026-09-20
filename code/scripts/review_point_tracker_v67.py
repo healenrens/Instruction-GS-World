@@ -136,7 +136,9 @@ def upload(args):
             row["actual_step_ms"],
             row["clip_seconds"],
             row["point_count"],
-            row.get("display_filter", {}).get("shown_point_count", row["point_count"]),
+            row.get("grounded_selection", row.get("display_filter", {})).get(
+                "shown_point_count", row["point_count"]
+            ),
             row["parameters"]["case"]["camera"],
             row["native_resolution_hw"],
             summary["tracker"]["internal_resolution_hw"],
@@ -152,6 +154,36 @@ def upload(args):
             diagnostic["paired_distance_px_p95"],
         )
     run.log({"tracker_review/cases": table})
+    grounded_rows = [row for row in summary["results"] if "grounded_selection" in row]
+    if grounded_rows:
+        roles = wandb.Table(
+            columns=[
+                "case",
+                "source",
+                "object_motion_targets",
+                "robot_queries",
+                "unknown_queries",
+                "scene_queries",
+                "raw_queries",
+                "all_queries_video",
+            ]
+        )
+        for row in grounded_rows:
+            selection = row["grounded_selection"]
+            counts = selection["role_counts"]
+            roles.add_data(
+                row["case_id"],
+                row["source"],
+                selection["object_motion_target_count"],
+                counts.get("robot_context", 0),
+                counts.get("unknown", 0),
+                counts.get("scene_context", 0),
+                selection["raw_point_count"],
+                wandb.Video(
+                    str(out / row["directory"] / "all_queries.mp4"), format="mp4"
+                ),
+            )
+        run.log({"tracker_review/grounded_roles": roles})
     masks = wandb.Table(
         columns=[
             "case",
