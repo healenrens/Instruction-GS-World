@@ -16,7 +16,7 @@ from igsw.adaptive_gaussian_wm.grounded_motion_export_v68 import export_motion_t
 from igsw.adaptive_gaussian_wm.grounded_motion_dataset_v68 import GroundedMotionDatasetV68
 from igsw.adaptive_gaussian_wm.grounded_motion_training_review_v68 import render_training_sample
 from igsw.adaptive_gaussian_wm.grounded_motion_jobs_v68 import interleave_sources, append_replacement, target_counts
-from igsw.adaptive_gaussian_wm.grounded_motion_recovery_v68 import recover_plan, recover_tracks
+from igsw.adaptive_gaussian_wm.grounded_motion_recovery_v68 import recover_plan, recover_tracks, reprocess_only
 
 
 def main():
@@ -70,7 +70,7 @@ def main():
         (old_shard / "cases.json").write_text(json.dumps({"cases": planned}))
         (old_shard / "selection.json").write_text(json.dumps({"review_by_source": {"robotwin": 1, "agibot": 1}}))
         settings = argparse.Namespace(recover_from=str(root / "old"), cases_per_source=2,
-                                      case_manifest="", replacement_cases_per_source=0)
+                                      case_manifest="", replacement_cases_per_source=0, reprocess_only_sources="robotwin")
         spare = {**planned[2], "case_id": "agibot_spare", "record": {"episode_index": 2}}
         with patch("igsw.adaptive_gaussian_wm.grounded_motion_recovery_v68.select_data_cases",
                    return_value=(planned + [spare], {})):
@@ -92,6 +92,9 @@ def main():
         assert restored["parent_teacher"] == str(old_case / "teacher.pt")
         assert (new_case / "refinement.json").is_file() and not (new_case / "teacher.pt").exists()
         assert recover_tracks(settings, 0, planned[1], new_case) is None
+        assert reprocess_only(settings, planned[1]) and not reprocess_only(settings, planned[2])
+        (old_case / "complete.json").unlink()
+        assert recover_tracks(settings, 0, planned[0], new_case) is not None
     print("all-point selection -> Dataset -> preview regression passed")
 
 

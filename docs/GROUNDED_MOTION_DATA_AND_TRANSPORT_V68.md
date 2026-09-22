@@ -296,6 +296,9 @@ open "${LOCAL_DIR}/index.html"
 先在代码同步环境部署本节实现后的release，再在八卡任务内前台运行下面独立命令；运行过程不访问GitHub。
 `DEPLOYED_REVISION`是部署记录，不做hash校验。worker拓扑、模型路径、原采样参数从旧 `workers.json` 恢复，
 本次旧任务为8卡每卡2个worker。重复同一命令会续做新目录，既不覆盖旧目录也不重新追踪已迁移案例。
+用户确认RoboTwin2已完成：设置 `REPROCESS_ONLY_SOURCES=robotwin`，只重筛该来源的旧轨迹并重新展示，
+即使某case没有旧轨迹也不启动SAM/CoTracker或补采新RoboTwin。其余四源继续正常生成，缺失旧轨迹的case记录在
+各shard的 `reprocess_only_missing.json`，其他来源不因此停止。
 
 ```bash
 cd /mnt/pfs/public/xuhaoming/instruct_gs_world
@@ -305,6 +308,7 @@ export SOURCE_REVISION="$(<"${RUNTIME_ROOT}/runtime/grounded_motion_v68/DEPLOYED
 export ROOT="${RUNTIME_ROOT}/runtime/grounded_motion_v68/releases/${SOURCE_REVISION}"
 export RECOVER_FROM="${RUNTIME_ROOT}/data/grounded_motion_v68_train20k_review400_6cd5c38_8g2w"
 export OUT="${RUNTIME_ROOT}/data/grounded_motion_v68_train20k_allpoints75_recovered_r1"
+export REPROCESS_ONLY_SOURCES=robotwin
 export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1
 export WANDB_MODE=online WANDB_PROJECT=instruct-gs-world
 export WANDB_ENTITY=healenrenss-university-of-chinese-acadmic-and-science

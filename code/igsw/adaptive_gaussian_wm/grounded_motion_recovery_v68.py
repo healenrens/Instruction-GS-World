@@ -10,6 +10,10 @@ from .grounded_motion_sources_v68 import select_data_cases
 from .tracker_visual_review_v67 import read_json
 
 
+def reprocess_only(args, case):
+    return case["source"] in {name.strip() for name in args.reprocess_only_sources.split(",") if name.strip()}
+
+
 def recover_plan(args, rank, world):
     root = Path(args.recover_from)
     shard = root / f"shard_{rank:04d}"
@@ -35,7 +39,9 @@ def recover_tracks(args, rank, case, directory):
     if not args.recover_from:
         return None
     old = Path(args.recover_from) / f"shard_{rank:04d}" / case["case_id"]
-    if not (old / "complete.json").is_file():
+    # teacher.pt is saved atomically before rendering; reuse it even if rendering was interrupted.
+    cached_only = reprocess_only(args, case) and (old / "teacher.pt").is_file()
+    if not (old / "complete.json").is_file() and not cached_only:
         return None
     payload = torch.load(old / "teacher.pt", map_location="cpu", weights_only=False)
     payload["parent_teacher"] = str(old / "teacher.pt")

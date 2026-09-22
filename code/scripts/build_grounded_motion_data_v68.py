@@ -16,7 +16,7 @@ from review_grounded_object_tracker_v67 import parse_args
 from igsw.adaptive_gaussian_wm.grounded_background_motion_v68 import reference_queries, fit_background, motion_evidence, relay_evidence
 from igsw.adaptive_gaussian_wm.grounded_motion_sources_v68 import select_data_cases
 from igsw.adaptive_gaussian_wm.grounded_motion_jobs_v68 import compatible_configuration, reserve_arguments, split_reserve, append_replacement, target_counts, interleave_sources
-from igsw.adaptive_gaussian_wm.grounded_motion_recovery_v68 import recover_plan, recover_tracks
+from igsw.adaptive_gaussian_wm.grounded_motion_recovery_v68 import recover_plan, recover_tracks, reprocess_only
 from igsw.adaptive_gaussian_wm.grounded_motion_refinement_v68 import refine_and_densify
 from igsw.adaptive_gaussian_wm.grounded_motion_export_v68 import CONTRACT, SELECTION_POLICY, export_motion_teacher
 from igsw.adaptive_gaussian_wm.grounded_motion_review_v68 import render_motion_data, write_data_gallery, write_review_bundle, upload_data, camera_overview
@@ -47,6 +47,8 @@ def configure(parser):
                         help="Explicitly reuse unchanged targets from this earlier code revision.")
     parser.add_argument("--recover_from", default="",
                         help="Read completed tracks and original case plans from an older, untouched build.")
+    parser.add_argument("--reprocess_only_sources", default="",
+                        help="Comma-separated sources whose saved tracks may be reselected but never regenerated.")
 
 
 def plan_reviews(cases, enabled, quota):
@@ -96,6 +98,8 @@ def main():
         reserve = reserve[rank::world]
         selection.update(shard_rank=rank, shard_count=world, selected_in_shard=len(cases))
     cases = interleave_sources(cases)
+    reserve = [case for case in reserve if not reprocess_only(args, case)]
+    selection["reprocess_only_sources"] = args.reprocess_only_sources
     selection["execution_order"] = "per-worker source round-robin; original quotas and review IDs unchanged"
     write_json(out / "selection.json", selection)
     print(f"[motion-data-v68] planned_global_by_source={selection['selected_by_source']} review_global_by_source={selection['review_by_source']} "
@@ -128,11 +132,13 @@ def main():
                 and compatible_configuration(saved_failures["configuration"], configuration) else {})
     bad_paths = {row["path"]: row["error"] for row in failures.values() if row["path_unusable"]}
     replaced = {c["replacement_for"] for c in cases if "replacement_for" in c}
+    reprocess_missing = {}
 
     def save_progress(status, update_gallery=False):
         write_json(out / "progress.json", {"status": status, "completed_clips": len(entries), "planned_clips": planned_clips,
                    "completed_by_source": dict(Counter(e["source"] for e in entries)), "planned_by_source": targets,
                    "recovered_clips": sum("parent_teacher" in e for e in entries),
+                   "reprocess_only_missing_clips": len(reprocess_missing),
                    "decode_skipped_clips": len(failures), "attempt_queue_length": len(cases),
                    "decode_skipped_by_source": dict(Counter(e["source"] for e in failures.values())),
                    "rendered_clips": len(review_entries), "planned_review_clips": planned_reviews,
@@ -144,6 +150,7 @@ def main():
                        "configuration": configuration, "tracker": tracker, "status": status,
                        "partition": args.partition, "shard_rank": rank, "shard_count": world,
                        "planned_clips": planned_clips, "decode_skipped_clips": len(failures),
+                       "reprocess_only_missing": list(reprocess_missing.values()),
                        "teacher_only": True, "future_used_for_selection": True, "source_revision": args.source_revision})
         if args.render and (update_gallery or status != "building" or not entries):
             write_data_gallery(out, review_entries, selection)
@@ -155,6 +162,7 @@ def main():
         completed = directory / "complete.json"
         if args.reuse_completed and completed.is_file() and compatible_configuration(read_json(completed)["configuration"], configuration):
             entries.append(read_json(completed)["entry"])
+            write_json(completed, {"configuration": configuration, "entry": entries[-1]})
             if entries[-1]["rendered"]:
                 review_entries.append(entries[-1])
             print(f"[motion-data-v68] shard={rank} reuse={case['case_id']}", flush=True)
@@ -164,6 +172,13 @@ def main():
         indices = torch.arange(case["first_frame"], case["last_frame"] + 1)
         path = case["record"]["path"]
         inherited = recover_tracks(args, rank, case, directory)
+        if reprocess_only(args, case) and inherited is None:
+            reprocess_missing[case["case_id"]] = {"case_id": case["case_id"], "source": case["source"],
+                                                   "reason": "no_saved_tracks; source_not_authorized_for_generation"}
+            write_json(out / "reprocess_only_missing.json", reprocess_missing)
+            print(f"[motion-data-v68] reprocess_only_skip={case['case_id']} reason=no_saved_tracks", flush=True)
+            save_progress("building")
+            continue
         if case["case_id"] in failures:
             row = failures[case["case_id"]]
             rgb = VideoDecodeError(row["error"], path_unusable=row["path_unusable"])
@@ -175,7 +190,7 @@ def main():
             rgb = decode_case(case, indices, return_error=True)
         if isinstance(rgb, VideoDecodeError):
             replacement_id = None
-            if case["case_id"] not in replaced:
+            if case["case_id"] not in replaced and not reprocess_only(args, case):
                 replacement_id = append_replacement(case, cases, reserve)
                 if replacement_id:
                     replaced.add(case["case_id"])
@@ -196,6 +211,7 @@ def main():
             print(f"[motion-data-v68] recover_raw_tracks={case['case_id']} parent={inherited['parent_teacher']}", flush=True)
         else:
             case["height"], case["width"] = rgb.shape[-2:]
+            print(f"[motion-data-v68] generate_tracks={case['case_id']} source={case['source']}", flush=True)
             background, native, queries, sampling, roles, relay = track_case(
                 args, configuration, directory, case, rgb, indices, model, segmenter, device)
         evidence = motion_evidence(native, background, args)

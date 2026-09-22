@@ -21,12 +21,14 @@ def main():
         record_path = Path(args.input) / "workers.json"
     record = json.loads(record_path.read_text())
     saved = record["configuration"]
-    previous = saved.get("reuse_source_revision") or saved["source_revision"]
+    previous = saved["source_revision"]
     options = {k: v for k, v in saved.items() if k not in ("worker_count", "queries_json", "selection_policy")}
     options.update(out=str(out), source_revision=args.source_revision, reuse_source_revision=previous,
                    stage="run", operation="build", reuse_completed=1)
     if args.input:
         options["recover_from"] = str(Path(args.input).resolve())
+    if "REPROCESS_ONLY_SOURCES" in os.environ:
+        options["reprocess_only_sources"] = os.environ["REPROCESS_ONLY_SOURCES"]
     rt = os.environ.get("RUNTIME_ROOT", "/mnt/pfs/public/xuhaoming/instruct_gs_world")
     options.update(wandb_mode=os.environ.get("WANDB_MODE", "online"),
                    wandb_project=os.environ.get("WANDB_PROJECT", "instruct-gs-world"),
@@ -38,7 +40,8 @@ def main():
         value = ",".join(map(str, value)) if isinstance(value, list) else str(value)
         command.extend((f"--{name}", value))
     print(f"[motion-data-v68-resume] out={out} workers={record['count']} workers_per_gpu={saved.get('workers_per_gpu', 1)} "
-          f"code={args.source_revision} reuse_previous={previous} recover_from={options.get('recover_from', '')}", flush=True)
+          f"code={args.source_revision} reuse_previous={previous} recover_from={options.get('recover_from', '')} "
+          f"reprocess_only_sources={options.get('reprocess_only_sources', '')}", flush=True)
     subprocess.run(command, check=True)
     subprocess.run([sys.executable, str(script.with_name("merge_grounded_motion_data_v68.py")), "--out", str(out)], check=True)
 

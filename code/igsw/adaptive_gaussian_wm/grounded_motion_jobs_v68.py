@@ -8,7 +8,7 @@ def compatible_configuration(saved, current):
     previous = current.get("reuse_source_revision", "")
     if saved["source_revision"] not in (current["source_revision"], previous):
         return False
-    execution = {"source_revision", "reuse_source_revision", "replacement_cases_per_source"}
+    execution = {"source_revision", "reuse_source_revision", "replacement_cases_per_source", "reprocess_only_sources"}
     defaults = {"workers_per_gpu": 1, "review_cases_per_source": 80, "recover_from": ""}
     first = {**defaults, **saved}
     second = {**defaults, **current}
