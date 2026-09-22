@@ -1,6 +1,6 @@
 """Deterministic replacement queues and explicit reuse of unchanged teacher results."""
 
-from collections import Counter
+from collections import Counter, defaultdict, deque
 from copy import deepcopy
 
 
@@ -9,7 +9,7 @@ def compatible_configuration(saved, current):
     if saved["source_revision"] not in (current["source_revision"], previous):
         return False
     execution = {"source_revision", "reuse_source_revision", "replacement_cases_per_source"}
-    defaults = {"workers_per_gpu": 1, "review_cases_per_source": 80}
+    defaults = {"workers_per_gpu": 1, "review_cases_per_source": 80, "recover_from": ""}
     first = {**defaults, **saved}
     second = {**defaults, **current}
     return ({k: v for k, v in first.items() if k not in execution}
@@ -49,3 +49,16 @@ def append_replacement(case, cases, reserve):
 
 def target_counts(cases):
     return dict(Counter(case["source"] for case in cases if "replacement_for" not in case))
+
+
+def interleave_sources(cases):
+    queues = defaultdict(deque)
+    for case in cases:
+        queues[case["source"]].append(case)
+    result = []
+    while queues:
+        for source in list(queues):
+            result.append(queues[source].popleft())
+            if not queues[source]:
+                del queues[source]
+    return result

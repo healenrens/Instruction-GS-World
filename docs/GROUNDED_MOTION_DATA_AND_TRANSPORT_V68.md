@@ -286,6 +286,38 @@ unzip -o "${LOCAL_DIR}/review_bundle.zip" -d "${LOCAL_DIR}" &&
 open "${LOCAL_DIR}/index.html"
 ```
 
+## 从旧20k任务恢复到所有点75%的新数据目录
+
+适用于日志中的 `grounded_motion_v68_train20k_review400_6cd5c38_8g2w`。坏视频直接跳过并从同源reserve补位，
+不修复原视频、不重新构建index。旧case计划与400例展示名额保留，未完成case在每个worker内按来源轮换；
+恢复已完成case只复用raw轨迹重新筛选，不重跑SAM/CoTracker。新teacher记录原轨迹revision，旧目录不改。
+旧采点遗漏的表面点不会凭重筛产生；新旧raw采点来源可通过 `tracks_source_revision` 区分。
+
+先在代码同步环境部署本节实现后的release，再在八卡任务内前台运行下面独立命令；运行过程不访问GitHub。
+`DEPLOYED_REVISION`是部署记录，不做hash校验。worker拓扑、模型路径、原采样参数从旧 `workers.json` 恢复，
+本次旧任务为8卡每卡2个worker。重复同一命令会续做新目录，既不覆盖旧目录也不重新追踪已迁移案例。
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world
+export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export VENV_ROOT="${RUNTIME_ROOT}"
+export SOURCE_REVISION="$(<"${RUNTIME_ROOT}/runtime/grounded_motion_v68/DEPLOYED_REVISION")"
+export ROOT="${RUNTIME_ROOT}/runtime/grounded_motion_v68/releases/${SOURCE_REVISION}"
+export RECOVER_FROM="${RUNTIME_ROOT}/data/grounded_motion_v68_train20k_review400_6cd5c38_8g2w"
+export OUT="${RUNTIME_ROOT}/data/grounded_motion_v68_train20k_allpoints75_recovered_r1"
+export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1
+export WANDB_MODE=online WANDB_PROJECT=instruct-gs-world
+export WANDB_ENTITY=healenrenss-university-of-chinese-acadmic-and-science
+unset WANDB_RUN_ID WANDB_RESUME
+bash "${ROOT}/code/scripts/resume_grounded_motion_data_v68.sh"
+echo "BUILD_RC=$?"
+```
+
+日志是 `${OUT}/build.log`；各 `shard_*/progress.json` 有 `completed_by_source`、`planned_by_source`、
+`decode_skipped_by_source`、`recovered_clips`；失败路径在各 `decode_failures.json`。
+完成后打开 `${OUT}/training_samples/index.html` 查看真实训练样本，下载 `${OUT}/review_bundle.zip`。
+不自动启动模型训练。原quota或同源reserve不足仍按实际数量报告，不从其他来源静默加样、不复制数据凑数。
+
 ## 五：服务器端可选整条前反向检查
 
 这只测 reader/AMP/backward、future swap 和 zero effect，不是能力 gate，不要求训练 launcher 读取其结果。

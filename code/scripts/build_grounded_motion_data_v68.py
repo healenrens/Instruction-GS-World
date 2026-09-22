@@ -15,7 +15,8 @@ import torch
 from review_grounded_object_tracker_v67 import parse_args
 from igsw.adaptive_gaussian_wm.grounded_background_motion_v68 import reference_queries, fit_background, motion_evidence, relay_evidence
 from igsw.adaptive_gaussian_wm.grounded_motion_sources_v68 import select_data_cases
-from igsw.adaptive_gaussian_wm.grounded_motion_jobs_v68 import compatible_configuration, reserve_arguments, split_reserve, append_replacement, target_counts
+from igsw.adaptive_gaussian_wm.grounded_motion_jobs_v68 import compatible_configuration, reserve_arguments, split_reserve, append_replacement, target_counts, interleave_sources
+from igsw.adaptive_gaussian_wm.grounded_motion_recovery_v68 import recover_plan, recover_tracks
 from igsw.adaptive_gaussian_wm.grounded_motion_refinement_v68 import refine_and_densify
 from igsw.adaptive_gaussian_wm.grounded_motion_export_v68 import CONTRACT, SELECTION_POLICY, export_motion_teacher
 from igsw.adaptive_gaussian_wm.grounded_motion_review_v68 import render_motion_data, write_data_gallery, write_review_bundle, upload_data, camera_overview
@@ -44,6 +45,8 @@ def configure(parser):
                         help="Reserve episodes per source; 0 selects max(32, 25 percent of quota).")
     parser.add_argument("--reuse_source_revision", default="",
                         help="Explicitly reuse unchanged targets from this earlier code revision.")
+    parser.add_argument("--recover_from", default="",
+                        help="Read completed tracks and original case plans from an older, untouched build.")
 
 
 def plan_reviews(cases, enabled, quota):
@@ -78,6 +81,8 @@ def main():
     if args.reuse_completed and saved_plan and "reserve" in saved_plan and compatible_configuration(saved_plan["configuration"], configuration):
         cases, reserve = saved_plan["cases"], saved_plan["reserve"]
         selection = read_json(out / "selection.json")
+    elif args.recover_from:
+        cases, reserve, selection = recover_plan(args, rank, world)
     else:
         candidates, selection = select_data_cases(reserve_arguments(args))
         cases, reserve = split_reserve(candidates, 0 if args.case_manifest else args.cases_per_source)
@@ -90,6 +95,8 @@ def main():
         cases = cases[rank::world]
         reserve = reserve[rank::world]
         selection.update(shard_rank=rank, shard_count=world, selected_in_shard=len(cases))
+    cases = interleave_sources(cases)
+    selection["execution_order"] = "per-worker source round-robin; original quotas and review IDs unchanged"
     write_json(out / "selection.json", selection)
     print(f"[motion-data-v68] planned_global_by_source={selection['selected_by_source']} review_global_by_source={selection['review_by_source']} "
           f"shard={rank}/{world} cuda={device_index} workers_per_gpu={args.workers_per_gpu} local_clips={len(cases)}", flush=True)
@@ -124,7 +131,10 @@ def main():
 
     def save_progress(status, update_gallery=False):
         write_json(out / "progress.json", {"status": status, "completed_clips": len(entries), "planned_clips": planned_clips,
+                   "completed_by_source": dict(Counter(e["source"] for e in entries)), "planned_by_source": targets,
+                   "recovered_clips": sum("parent_teacher" in e for e in entries),
                    "decode_skipped_clips": len(failures), "attempt_queue_length": len(cases),
+                   "decode_skipped_by_source": dict(Counter(e["source"] for e in failures.values())),
                    "rendered_clips": len(review_entries), "planned_review_clips": planned_reviews,
                    "shard_rank": rank, "cuda_device": device_index, "workers_per_gpu": args.workers_per_gpu,
                    "last_case": entries[-1]["case_id"] if entries else None})
@@ -153,11 +163,14 @@ def main():
         print(f"[motion-data-v68] shard={rank} case={ordinal+1}/{len(cases)} id={case['case_id']} camera={case['camera']}", flush=True)
         indices = torch.arange(case["first_frame"], case["last_frame"] + 1)
         path = case["record"]["path"]
+        inherited = recover_tracks(args, rank, case, directory)
         if case["case_id"] in failures:
             row = failures[case["case_id"]]
             rgb = VideoDecodeError(row["error"], path_unusable=row["path_unusable"])
         elif path in bad_paths:
             rgb = VideoDecodeError(bad_paths[path], path_unusable=True)
+        elif inherited is not None and not case["render"]:
+            rgb = None
         else:
             rgb = decode_case(case, indices, return_error=True)
         if isinstance(rgb, VideoDecodeError):
@@ -176,62 +189,30 @@ def main():
             print(f"[motion-data-v68] decode_skip={case['case_id']} path={path} replacement={replacement_id} error={rgb}", flush=True)
             save_progress("building")
             continue
-        case["height"], case["width"] = rgb.shape[-2:]
-        ref_path = directory / "background.pt"
-        if args.reuse_completed and ref_path.is_file() and compatible_configuration(torch.load(ref_path, weights_only=False)["configuration"], configuration):
-            background = torch.load(ref_path, weights_only=False)["value"]
+        if inherited is not None:
+            case["height"], case["width"] = inherited["case"]["height"], inherited["case"]["width"]
+            background, native, queries = inherited["background_motion"], inherited["native"], inherited["queries"]
+            sampling, roles, relay = inherited["sampling"], inherited["role_evidence"], inherited["relay_evidence"]
+            print(f"[motion-data-v68] recover_raw_tracks={case['case_id']} parent={inherited['parent_teacher']}", flush=True)
         else:
-            references = predict(model, rgb, indices, reference_queries(case, args.background_grid_side), device, args.points_per_pass)
-            background = fit_background(references, case, args)
-            save_tensor(ref_path, {"configuration": configuration, "value": background})
-        pilot_args = deepcopy(args)
-        pilot_args.point_budget = args.pilot_point_budget
-        queries, sampling = build_grounded_queries(rgb, case, pilot_args, segmenter, directory, configuration,
-                                                  render=case["render"], role_agnostic=True)
-        if not len(queries["xy"]):
-            queries = reference_queries(case, args.background_grid_side)
-            queries["metadata"] = [{"point_id": i, "xy": xy, "frame": case["first_frame"],
-                                    "region_id": "background_reference", "role": "scene_context",
-                                    "region_area_px": case["height"] * case["width"],
-                                    "region_diagonal_px": float((case["height"]**2 + case["width"]**2)**.5),
-                                    "sam_score": 0.0, "robot_overlap": 0.0} for i, xy in enumerate(queries["xy"].tolist())]
-        pilot_path = directory / "pilot_tracks.pt"
-        if args.reuse_completed and pilot_path.is_file() and compatible_configuration(torch.load(pilot_path, weights_only=False)["configuration"], configuration):
-            pilot = torch.load(pilot_path, weights_only=False)["value"]
-        else:
-            pilot = predict(model, rgb, indices, queries, device, args.points_per_pass)
-            save_tensor(pilot_path, {"configuration": configuration, "value": pilot})
-        queries, _, _ = resolve_track_roles(pilot, queries, sampling, directory, args)
-        pilot_evidence = motion_evidence(pilot, background, args)
-        refinement_path = directory / "refined_query_cache.pt"
-        if args.reuse_completed and refinement_path.is_file() and compatible_configuration(torch.load(refinement_path, weights_only=False)["configuration"], configuration):
-            cached = torch.load(refinement_path, weights_only=False)
-            queries = cached["queries"]
-        else:
-            queries, _ = refine_and_densify(rgb, case, queries, pilot, pilot_evidence, background, sampling, segmenter, directory, args, render=case["render"])
-            save_tensor(refinement_path, {"configuration": configuration, "queries": queries})
-        dense_path = directory / "dense_tracks.pt"
-        if args.reuse_completed and dense_path.is_file() and compatible_configuration(torch.load(dense_path, weights_only=False)["configuration"], configuration):
-            native = torch.load(dense_path, weights_only=False)["value"]
-        else:
-            native = predict(model, rgb, indices, queries, device, args.points_per_pass)
-            save_tensor(dense_path, {"configuration": configuration, "value": native})
-        queries, roles, _ = resolve_track_roles(native, queries, sampling, directory, args)
+            case["height"], case["width"] = rgb.shape[-2:]
+            background, native, queries, sampling, roles, relay = track_case(
+                args, configuration, directory, case, rgb, indices, model, segmenter, device)
         evidence = motion_evidence(native, background, args)
-        relay_path = directory / "relay.pt"
-        if args.reuse_completed and relay_path.is_file() and compatible_configuration(torch.load(relay_path, weights_only=False)["configuration"], configuration):
-            relay = torch.load(relay_path, weights_only=False)["value"]
-        else:
-            relay = relay_evidence(model, rgb, indices, queries, native, device, args)
-            save_tensor(relay_path, {"configuration": configuration, "value": relay})
-        report = export_motion_teacher(directory, case, queries, native, evidence, relay, background, sampling, roles, args)
+        export_args = deepcopy(args)
+        export_args.tracks_source_revision = inherited["source_revision"] if inherited is not None else args.source_revision
+        export_args.raw_queries_reused = inherited is not None
+        report = export_motion_teacher(directory, case, queries, native, evidence, relay, background, sampling, roles, export_args)
         if case["render"]:
             render_motion_data(directory, rgb, native, queries, background, report, case, args, evidence["valid"] & relay["valid"])
         entry = {"case_id": case["case_id"], "source": case["source"], "camera": case["camera"],
                  "path": str((directory / "teacher.pt").relative_to(out)), "object_targets": report["object_motion_target_count"],
                  "motion_targets": report["selected_point_count"], "selection_policy": SELECTION_POLICY,
+                 "tracks_source_revision": export_args.tracks_source_revision,
                  "background_valid_fraction": report["background_usable_frame_fraction"], "rendered": case["render"],
                  "partition": args.partition, "raw_video": case["record"]["path"]}
+        if inherited is not None:
+            entry["parent_teacher"] = inherited["parent_teacher"]
         if "replacement_for" in case:
             entry["replacement_for"] = case["replacement_for"]
         write_json(completed, {"configuration": configuration, "entry": entry})
@@ -240,7 +221,7 @@ def main():
             review_entries.append(entry)
         save_progress("building", update_gallery=entry["rendered"])
         print(f"[motion-data-v68] saved={directory / 'teacher.pt'} targets={entry['object_targets']}", flush=True)
-        del rgb
+        del rgb, inherited
     status = "completed" if dict(Counter(e["source"] for e in entries)) == targets else "incomplete"
     save_progress(status)
     if args.render:
@@ -248,6 +229,56 @@ def main():
     upload_data(args, out, entries, configuration)
     print(f"[motion-data-v68] status={status} shard={rank} clips={len(entries)}/{planned_clips} "
           f"decode_skips={len(failures)} manifest={out / 'training_manifest.json'}", flush=True)
+
+
+def track_case(args, configuration, directory, case, rgb, indices, model, segmenter, device):
+    ref_path = directory / "background.pt"
+    if args.reuse_completed and ref_path.is_file() and compatible_configuration(torch.load(ref_path, weights_only=False)["configuration"], configuration):
+        background = torch.load(ref_path, weights_only=False)["value"]
+    else:
+        references = predict(model, rgb, indices, reference_queries(case, args.background_grid_side), device, args.points_per_pass)
+        background = fit_background(references, case, args)
+        save_tensor(ref_path, {"configuration": configuration, "value": background})
+    pilot_args = deepcopy(args)
+    pilot_args.point_budget = args.pilot_point_budget
+    queries, sampling = build_grounded_queries(rgb, case, pilot_args, segmenter, directory, configuration,
+                                              render=case["render"], role_agnostic=True)
+    if not len(queries["xy"]):
+        queries = reference_queries(case, args.background_grid_side)
+        queries["metadata"] = [{"point_id": i, "xy": xy, "frame": case["first_frame"],
+                                "region_id": "background_reference", "role": "scene_context",
+                                "region_area_px": case["height"] * case["width"],
+                                "region_diagonal_px": float((case["height"]**2 + case["width"]**2)**.5),
+                                "sam_score": 0.0, "robot_overlap": 0.0} for i, xy in enumerate(queries["xy"].tolist())]
+    pilot_path = directory / "pilot_tracks.pt"
+    if args.reuse_completed and pilot_path.is_file() and compatible_configuration(torch.load(pilot_path, weights_only=False)["configuration"], configuration):
+        pilot = torch.load(pilot_path, weights_only=False)["value"]
+    else:
+        pilot = predict(model, rgb, indices, queries, device, args.points_per_pass)
+        save_tensor(pilot_path, {"configuration": configuration, "value": pilot})
+    queries, _, _ = resolve_track_roles(pilot, queries, sampling, directory, args)
+    pilot_evidence = motion_evidence(pilot, background, args)
+    refinement_path = directory / "refined_query_cache.pt"
+    if args.reuse_completed and refinement_path.is_file() and compatible_configuration(torch.load(refinement_path, weights_only=False)["configuration"], configuration):
+        cached = torch.load(refinement_path, weights_only=False)
+        queries = cached["queries"]
+    else:
+        queries, _ = refine_and_densify(rgb, case, queries, pilot, pilot_evidence, background, sampling, segmenter, directory, args, render=case["render"])
+        save_tensor(refinement_path, {"configuration": configuration, "queries": queries})
+    dense_path = directory / "dense_tracks.pt"
+    if args.reuse_completed and dense_path.is_file() and compatible_configuration(torch.load(dense_path, weights_only=False)["configuration"], configuration):
+        native = torch.load(dense_path, weights_only=False)["value"]
+    else:
+        native = predict(model, rgb, indices, queries, device, args.points_per_pass)
+        save_tensor(dense_path, {"configuration": configuration, "value": native})
+    queries, roles, _ = resolve_track_roles(native, queries, sampling, directory, args)
+    relay_path = directory / "relay.pt"
+    if args.reuse_completed and relay_path.is_file() and compatible_configuration(torch.load(relay_path, weights_only=False)["configuration"], configuration):
+        relay = torch.load(relay_path, weights_only=False)["value"]
+    else:
+        relay = relay_evidence(model, rgb, indices, queries, native, device, args)
+        save_tensor(relay_path, {"configuration": configuration, "value": relay})
+    return background, native, queries, sampling, roles, relay
 
 
 if __name__ == "__main__":
