@@ -26,7 +26,7 @@ def decode_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.T
     return result
 
 
-def read_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.Tensor | VideoDecodeError:
+def read_video_frames(path: str, indices: torch.Tensor, fps: float, *, return_timestamps: bool = False):
     """Return an explicit media failure for offline jobs; never substitute frames."""
     import av
 
@@ -38,6 +38,7 @@ def read_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.Ten
     targets = set(wanted)
     first, last = min(wanted), max(wanted)
     decoded = {}
+    timestamps = {}
     try:
         with av.open(path) as container:
             stream = container.streams.video[0]
@@ -62,6 +63,7 @@ def read_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.Ten
                     decoded[frame_index] = torch.from_numpy(
                         frame.to_ndarray(format="rgb24")
                     )
+                    timestamps[frame_index] = float((frame.pts-start_pts)*time_base)
                 if frame_index >= last:
                     break
     except (av.error.FFmpegError, OSError) as error:
@@ -75,7 +77,10 @@ def read_video_frames(path: str, indices: torch.Tensor, fps: float) -> torch.Ten
         return VideoDecodeError(
             f"video decode missed frames {missing[:8]} in {path}"
         )
-    return torch.stack([decoded[index] for index in wanted])
+    frames = torch.stack([decoded[index] for index in wanted])
+    if return_timestamps:
+        return frames, torch.tensor([timestamps[index] for index in wanted], dtype=torch.float64)
+    return frames
 
 
 def square_dino_rgb(

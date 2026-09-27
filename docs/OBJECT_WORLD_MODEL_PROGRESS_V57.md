@@ -1,9 +1,11 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-09-20
+> 更新日期：2026-09-28
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
-> 当前开发分支：`codex/grounded-motion-topk-v67`
-> 当前实现：第 15.34 节在既有轨迹上筛选 Top-50% 物体运动候选，并导出筛选前后对照；冻结机械臂角色规则
+> 当前开发分支：`codex/object-video-sequence-v69`
+> 当前实现：V69，冻结预训练视觉输入、3s/5s query-object sequence；本轮静态审查，GPU执行待单卡测试
+> 继承数据：V68 `991099e`，所有类别轨迹全局Top-75%；RoboTwin只复用旧轨迹，不重新追踪
+> 最新设计/执行：第15.43–15.44节，以及`OBJECT_VIDEO_SEQUENCE_V69_RUNBOOK.md`
 > 最新人工反馈：第 15.32 节记录物体覆盖不足、跨数据集机械臂混淆和 RoboMIND 视频来源疑问；尚未证明 teacher 可用于物体级监督
 > 历史 V66 验证提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`（V66 四卡、六源、1536 held clips G0 audit）
 > V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
@@ -3028,3 +3030,49 @@ partial展示不代表完整数据集，失败率与补位必须同质量检查�
 
 已有轨迹能满足重筛所需信息，无需再次支付采点与追踪开销。原输出目录和raw轨迹不修改，其他来源、teacher筛选及模型不变；
 缺失旧轨迹的实际数量单列，不用新RoboTwin补齐或把缺失写成完成。最早未完成项仍为G0；本轮只有静态检查，没有服务器新结果。
+
+### 15.43 2026-09-27 预训练视觉输入与3s/5s object sequence计划
+
+**What changed**
+
+用户明确history最长3秒、future最长5秒，借鉴video-gen的连续时间段、多帧条件与序列目标，不从头训练视觉基础encoder。
+审阅V68发现：视觉先验只作为teacher，Student仍用浅层CNN；固定18个global slots与query-conditioned主线不一致；
+角色/region监督关闭后归属JS仍有uniform解；future只有两个端点；当前query仍依赖full-video tracker，visibility混合unknown。
+计划用冻结DINOv3 ViT-L/16作为主要视觉输入，V-JEPA2.1-L作同量级替换对照，不叠加SigLIP；恢复current-query条件的
+Object Memory和object-token序列Dynamics。默认参考采样16帧history覆盖3秒、25个future时刻覆盖5秒，原生轨迹不降采样。
+新/未来episode按视频均匀采样，motion-richness先用原视频与逐例材料验证再启用；旧配额数据不伪称全库均匀。
+
+**Why / Impact**
+
+应复用预训练局部视觉能力，并用连续未来监督实际变化，而不是把更大的随机ViT接到未证实的slot目标上。
+保持原RGB、10秒raw轨迹、RoboTwin不重新追踪和坏视频跳过；这次只更新设计，不更改运行中的生产或提交训练。
+最早未完成项仍为G0。encoder适配、query绑定和独立object有效性先取得证据；不由公开benchmark或loss下降直接晋级。
+详细问题依据、模块输入输出、loss、证据包与执行顺序见 `docs/OBJECT_VIDEO_SEQUENCE_PLAN.md`。
+
+### 15.44 2026-09-28 V69完整Object Video Sequence实现
+
+**What changed**
+
+1. 主链路改为本地预训练且冻结的DINOv3-L原生分辨率输入，V-JEPA2.1-L作prefix-causal受控对照。
+   默认3秒16帧history、5秒25帧future；历史visual queries不读tracker或未来筛选。每query anchor+8 carriers、宽512，
+   共享27.09M Object Memory和2.12M readout；训练期12.69M Posterior提取每query4x64连续effect，51.28M Dynamics展开未来。
+   Anchor固定只是输入条件，不当identity成绩；support centers不自称物体GT。State/Dynamics分阶段，不新增action-free主线。
+2. V68已完成轨迹只读复用，按episode划分held与均匀采样；保留原始位置、75% transport池、unknown观测和独立pixel mask。
+   背景排名失效不抹除全部原始轨迹，均匀75%替代明确标记。主transport改为原生pixel距离，relative transport与latent为辅助，
+   shuffled/zero只作干预对照，不给相似motion制造负类。无RGB主loss、显式robot action、语言或部署effect selector。
+3. 完整实现单卡两阶段训练/strict resume/未中断对照/evaluator视频；held逐点逐时间绝对误差、独立人工点binding与删除干预、
+   uniform/merge-all/track-per-object评测反例、motion窗口盲评和relay/visibility校准、两encoder冻结对照。
+   Runtime只加载本地release/权重，前台执行，W&B在线；下载与Git同步独立。Checkpoint保存backbone/EMA/优化器/时间采样/RNG/W&B ID。
+
+**Why**
+
+复用视觉预训练能力并把连续object变化放回可测量的序列位置目标，同时移除future驱动query及未经证实的角色标签。
+
+**Impact / 冻结控制与下一项**
+
+继承原RGB、已有raw tracker、relay、V68来源映射；不继承旧CNN、18-slot optimizer或任一旧模型checkpoint。
+新/旧数据目录隔离，不重新追踪RoboTwin，不改正在运行的数据构建。旧V68代码仅共享decoder新增可选PTS返回，旧调用返回值保持不变。
+当前结果是静态实现与审查，尚无GPU通过、显存、学习曲线或held结论。用户尚未确认DINOv3官方源码及权重在服务器的位置。
+最早未完成项仍G0；visual affinity不升级成object GT，tracker自评不升级成真实visibility，反例评测也不等于训练loss已经排除退化解。
+下一步用户单卡跑完整工程测试并查看逐例数据证据；确认后八卡State重训，独立state证据通过后才启动Dynamics。
+完整输入输出、参数量、loss语义和所有前台独立命令见 `docs/OBJECT_VIDEO_SEQUENCE_V69_RUNBOOK.md`。
