@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 @dataclass(frozen=True)
 class ObjectVideoConfigV69:
     checkpoint_version: int = 69
-    architecture: str = "pretrained_query_object_video_sequence_v1"
+    architecture: str = "pretrained_query_object_video_sequence_v2"
     encoder: str = "dinov3_vitl16"
     perception_dim: int = 1024
     patch_size: int = 16
@@ -17,6 +17,7 @@ class ObjectVideoConfigV69:
     observation_layers: int = 4
     memory_layers: int = 4
     posterior_layers: int = 4
+    posterior_geometry: bool = True
     dynamics_layers: int = 8
     effect_tokens: int = 4
     effect_dim: int = 64

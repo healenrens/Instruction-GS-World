@@ -38,7 +38,7 @@ class ObjectSequenceReadoutV69(nn.Module):
         logits = logits.masked_fill(~state.query_valid[:, None], -torch.inf)
         return torch.cat((logits, self.unbound.float().expand(*logits.shape[:-1], 1)), -1)
 
-    def forward(self, state, coordinates, ownership, object_keep=None, local_coordinates=None):
+    def forward(self, state, coordinates, ownership, object_keep=None, local_coordinates=None, return_components=False):
         local, root, relative = self.local(state, coordinates, local_coordinates)
         hidden = self.field(torch.cat((root.float(), local.float(), position_features(relative)), -1))
         fields = {"appearance": self.appearance(hidden).float(),
@@ -49,7 +49,10 @@ class ObjectSequenceReadoutV69(nn.Module):
         if object_keep is not None:
             # Delete a component without renormalizing or asking surviving slots to replace it.
             mixture = mixture * object_keep[:, None].float()
-        return {name: (value * mixture[..., None]).sum(2) for name, value in fields.items()}
+        result = {name: (value * mixture[..., None]).sum(2) for name, value in fields.items()}
+        if return_components:
+            result["component_position"] = fields["position"]
+        return result
 
 
 @torch.no_grad()

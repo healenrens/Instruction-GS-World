@@ -1,10 +1,11 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-09-28
+> 更新日期：2026-09-29
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
 > 当前开发分支：`codex/object-video-sequence-v69`
 > 当前实现：V69，冻结预训练视觉输入、3s/5s query-object sequence；本轮静态审查，GPU执行待单卡测试
 > 最新单卡反馈：State对照后进入Dynamics，两个Dynamics路径到step10，但恢复参数比较失败；完整测试未通过，见15.45
+> 当前接口修订：V69r2 `pretrained_query_object_video_sequence_v2`，local effect routing、Posterior geometry与entity评测修正；未取得新GPU结果
 > 继承数据：V68 `991099e`，所有类别轨迹全局Top-75%；RoboTwin只复用旧轨迹，不重新追踪
 > 最新设计/执行：第15.43–15.44节，以及`OBJECT_VIDEO_SEQUENCE_V69_RUNBOOK.md`
 > 最新人工反馈：第 15.32 节记录物体覆盖不足、跨数据集机械臂混淆和 RoboMIND 视频来源疑问；尚未证明 teacher 可用于物体级监督
@@ -3110,3 +3111,27 @@ G0及teacher语义状态不变，本次不更改架构或实验学习目标；�
 迁移后的数据不应依赖原始多源数据挂载，也不能通过再次压缩或重追踪静默改变学习目标。
 本次是数据I/O契约改造，未在服务器生成实际包，未运行模型或改变G0判断；原八卡入口与默认数据路径不变。
 执行与迁移路径见`OBJECT_VIDEO_SEQUENCE_V69_RUNBOOK.md`第14节，实际可迁移规模以export_report为准，不用20k目录名称替代结果。
+
+### 15.47 2026-09-29 V69r2两层关联审阅与修正
+
+**What changed**
+
+1. 用户的结构反例成立：相同anchor下，加anchor后展平的effect集合仍对归属交换不敏感。撤回此前“加anchor即可保证绑定”表述。
+   每个block先query-local effect conditioning，再跨query interaction；不把query index提升为物体ID，也不禁止交互后的跨物体影响。
+2. Posterior除tokens/time外加入估计root相对source的位移与帧内carrier布局，避免仅local坐标丢掉translation。
+   保留`POSTERIOR_GEOMETRY=on/off`同State起点的训练对照。Grouping先合并人工entity标签下的query概率，unbound不作共同物体。
+3. 新增同物体多query共同位置读出、region/additional测点、单query替换和双effect交换、per-query/clip/entity KL及采样诊断。
+   真实object指标依赖独立标签，无标签明确未测；不强制z相等、同物体各点同位移或zero vector静止。原KL均值loss尺度保留，KL计算改FP32。
+
+**Why / 控制与证据**
+
+要分开query–object关联与effect–query关联，不能由appearance hint代替后者的接口保证，也不能让评测偏好单query集中。
+冻结encoder、native分辨率、3s/5s、latent4x64、State学习目标及数据保持不变；新增Posterior geometry为18,944参数。
+本次已实现但未运行GPU测试，无学习效果结果。第一层真实object关联仍是未解决的科学问题，只补独立诊断而不制造新pseudo-instance GT。
+当前State阶段不训练Posterior/Dynamics，因此不能把这两项修改宣称为State语义已经提升。
+
+**运行与下一步**
+
+架构名升级v2但继续使用V69脚本；旧checkpoint按原release恢复，不隐式混入新架构。未启动的八卡任务无需改命令，
+测试机发布完整release后原子更新共享`DEPLOYED_REVISION`。单卡整链路增加同anchor、tuple重排、geometry-only和multi-query数学反例，
+不放宽原resume比较。下一证据是服务器完整测试与独立少量多query标注评测。详见`OBJECT_ASSOCIATION_REVIEW_V69R2.md`。

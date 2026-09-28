@@ -4,6 +4,7 @@
 import argparse
 from collections import Counter
 from contextlib import nullcontext
+from dataclasses import replace
 import json
 import math
 import os
@@ -36,7 +37,7 @@ def main():
     args = add_v69_arguments(argparse.ArgumentParser(description=__doc__)).parse_args()
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False) if args.resume else None
     if checkpoint is not None:
-        args = argparse.Namespace(**{"deterministic": False, "resume_trace": False, **checkpoint["args"],
+        args = argparse.Namespace(**{"deterministic": False, "resume_trace": False, "posterior_geometry": "inherit", **checkpoint["args"],
                                      "resume": args.resume, "workers": args.workers, "stop_after": args.stop_after})
     numerical_mode = configure_reproducibility_v69(args.deterministic)
     context = init_torchrun()
@@ -44,6 +45,8 @@ def main():
     state_checkpoint = torch.load(args.state_checkpoint, map_location="cpu", weights_only=False) if args.stage == "dynamics" and checkpoint is None else None
     inherited = checkpoint if checkpoint is not None else state_checkpoint
     config = ObjectVideoConfigV69(**inherited["config"]) if inherited is not None else config_from_args(args)
+    if checkpoint is None and args.posterior_geometry != "inherit":
+        config = replace(config, posterior_geometry=args.posterior_geometry == "on")
     torch.manual_seed(args.seed + context.rank)
     random.seed(args.seed + context.rank)
     out = Path(args.out)

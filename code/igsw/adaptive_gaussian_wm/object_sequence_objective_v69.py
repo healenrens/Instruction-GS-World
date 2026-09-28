@@ -82,6 +82,11 @@ def object_sequence_loss_v69(output, batch, config, stage):
         latent_valid = output["queries"].valid[:, None].expand_as(latent_error) & batch["frame_valid"][:, th:, None]
         parts["future_latent_aux"] = masked_mean_v69(latent_error, latent_valid)
         parts["effect_rate"] = masked_mean_v69(output["effect"]["kl"].mean((-1, -2)), output["queries"].valid)
+        query_kl = output["effect"]["kl"].detach().float().sum((-1, -2))
+        query_valid = output["queries"].valid.float()
+        parts["effect_clip_kl_nats"] = (query_kl*query_valid).sum(-1).mean()
+        parts["effect_query_kl_nats"] = ((query_kl*query_valid).sum(-1)/query_valid.sum(-1).clamp_min(1)).mean()
+        parts["effect_valid_query_count"] = query_valid.sum(-1).mean()
         # Shuffling can exchange equivalent motions; it is an intervention, not a negative GT label.
         parts["shuffled_minus_direct_px"] = parts["shuffled_transport"]-parts["direct_transport"].detach()
         observation_target = teacher["observation"][:, th:]

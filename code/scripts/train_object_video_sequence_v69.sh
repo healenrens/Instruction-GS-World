@@ -38,6 +38,7 @@ echo "[object-video-v69] mode=foreground stage=${STAGE} processes=${NPROC_PER_NO
   --manifest "${MANIFEST:-${RUNTIME_ROOT}/data/object_video_sequence_v69/manifest.json}" --out "${OUT}" \
   --encoder "${ENCODER}" --encoder_repository "${ENCODER_REPOSITORY}" --encoder_weights "${ENCODER_WEIGHTS}" \
   --encoder_frame_batch "${ENCODER_FRAME_BATCH:-2}" --stage "${STAGE}" --state_checkpoint "${STATE_CHECKPOINT:-}" \
+  --posterior_geometry "${POSTERIOR_GEOMETRY:-inherit}" \
   --resume "${RESUME:-}" --source_revision "${SOURCE_REVISION}" --config "${MODEL_CONFIG:-}" \
   "${NUMERICAL_ARGS[@]}" \
   --batch "${BATCH_PER_GPU:-2}" --global_batch "${TARGET_GLOBAL_BATCH:-256}" --workers "${WORKERS_PER_RANK:-2}" \

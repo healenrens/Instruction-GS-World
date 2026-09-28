@@ -8,7 +8,7 @@
 
 | 级别 | 问题 | 修正后的行为 |
 |---|---|---|
-| P1 | 无归属的effect token集合会对对象间effect置换保持不变 | Dynamics将每个effect与对应query anchor绑定，且显式输入carrier位置 |
+| P1 | 无归属的effect token集合会对对象间effect置换保持不变 | r1仅加anchor仍不能排除同anchor反例；r2已改为query-local effect conditioning后再interaction |
 | P1 | Future field沿用旧全局像素坐标会改变其object-local含义 | reference时刻固定local坐标、ownership和读出偏差，随未来state读出 |
 | P1 | normalized坐标loss使高分辨率小运动梯度被缩小 | 主transport直接优化native-pixel Charbonnier，报告native EPE |
 | P1 | V-JEPA完整clip早期token或末帧缓存可包含不应有的时间信息 | 每时刻使用真实prefix；reversed/last-frame对照重新编码各自RGB |
@@ -55,3 +55,12 @@
 修订保留原容差，启用测试专用确定性计算，并比较逐步数据/RNG/posterior noise、最终optimizer/scheduler和游标。
 报告先写盘并上传W&B，再断言；八卡生产默认fast，不将训练状态恢复和数值逐位一致混为一谈。
 新代码只通过静态检查，等待服务器重跑。用户贴出的外层`)`语法错误与模型比较失败独立，重跑改成调用完整脚本。
+
+## 2026-09-29 Object Association复核
+
+用户提出的same-anchor effect交换和multi-query grouping反例成立，上一次“加anchor即保证effect归属”的表述撤回。
+r2直接按query分组注入effect，再做交互；Posterior补齐estimated relative geometry，并保留tokens-only训练对照。
+Grouping评测先合并独立entity标签下的query概率，排除unbound；增加共同位置、额外测点和对象effect干预的独立诊断。
+KL均值继续作原尺度正则，另记录FP32总KL和每query/实体KL；不强制同物体z相等、各点位移相同或zero effect静止。
+State阶段依然冻结Posterior/Dynamics，没有凭此宣布State语义已修复。新增测试均并入完整单卡入口，GPU结果待用户反馈。
+完整逐条判定见`OBJECT_ASSOCIATION_REVIEW_V69R2.md`，八卡入口与现有队列命令保持兼容。

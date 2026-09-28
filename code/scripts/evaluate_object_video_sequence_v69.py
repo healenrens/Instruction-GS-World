@@ -22,7 +22,15 @@ from igsw.adaptive_gaussian_wm.object_video_world_model_v69 import ObjectVideoWo
 from igsw.adaptive_gaussian_wm.object_sequence_evaluation_v69 import sequence_metrics_v69, independent_binding_v69, history_forecast_ablation_v69
 from igsw.adaptive_gaussian_wm.object_sequence_annotations_v69 import annotation_template_v69, independent_measurements_v69
 from igsw.adaptive_gaussian_wm.object_sequence_media_v69 import render_sequence_v69
+from igsw.adaptive_gaussian_wm.object_association_diagnostics_v69 import independent_association_v69, effect_rate_and_sampling_v69
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
+
+
+def log_diagnostic_table(run, name, columns, records):
+    import wandb
+    for start in range(0, max(1, len(records)), 5000):
+        table = wandb.Table(columns=columns, data=[[row.get(key) for key in columns] for row in records[start:start+5000]])
+        run.log({f"{name}_{start//5000:04d}": table})
 
 
 def main():
@@ -31,6 +39,7 @@ def main():
     p.add_argument("--items", type=int, default=400)
     p.add_argument("--visualize", type=int, default=40)
     p.add_argument("--annotations", default="")
+    p.add_argument("--effect_samples", type=int, default=4)
     args = p.parse_args()
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
@@ -50,7 +59,8 @@ def main():
     order = list(range(len(dataset)))
     random.Random(args.seed).shuffle(order)
     order = order[:args.items] if args.items else order
-    rows, ablations, failures, independent, templates = [], [], [], [], []
+    rows, ablations, failures, independent, templates, effect_diagnostics = [], [], [], [], [], []
+    independent_skips = []
     videos, counts = [], Counter()
     begin = time.monotonic()
     with torch.no_grad():
@@ -69,16 +79,22 @@ def main():
                 if stage == "dynamics":
                     ablation = history_forecast_ablation_v69(model, fields, output, batch, perception)
                     ablations.extend(ablation["rows"])
+                    effect_diagnostics.append(effect_rate_and_sampling_v69(model, output, batch, args.effect_samples))
                 annotation = sample["annotation"]
+                historical_frames = set(sample["frame_indices"][:config.history_frames].tolist())
                 if (annotation is not None and annotation["queries"] and annotation["tracks"]
                         and annotation["provenance"] in ("human_annotation", "simulator_ground_truth")
-                        and annotation["uses_training_tracker"] is False):
+                        and annotation["uses_training_tracker"] is False
+                        and any(q["frame_index"] in historical_frames for q in annotation["queries"])):
                     truth_batch, queries, labels = independent_measurements_v69(batch, sample["annotation"])
                     truth_batch["independent_truth"] = True
                     truth_output = model(fields, truth_batch, queries, deterministic_effect=True)
                     truth_rows = sequence_metrics_v69(truth_output, truth_batch, config, stage)
                     independent.append({"case": sample["case_id"], "metrics": independent_binding_v69(model, truth_output, truth_batch, labels),
-                                        "trajectory_rows": truth_rows})
+                                        "trajectory_rows": truth_rows,
+                                        "association": independent_association_v69(model, truth_output, truth_batch, labels, args.effect_samples)})
+                elif annotation is not None:
+                    independent_skips.append({"case": sample["case_id"], "reason": "requires independent labels, measurements and an observed-history query"})
             rows.extend(case_rows)
             append_case_records(out / "cases.jsonl", case_rows)
             counts[sample["source"]] += 1
@@ -100,6 +116,10 @@ def main():
     report = {"status": "completed", "checkpoint": args.checkpoint, "checkpoint_step": step, "stage": stage,
               "cases_by_source": dict(counts), "failed_decode": failures, "summary": summary, "history_ablations": ablations,
               "independent": independent, "independent_status": "measured" if independent else "not_measured_no_annotations",
+              "association_status": "measured" if any(c["association"]["status"] == "measured_independent_annotations" for c in independent)
+                                    else "not_measured_no_valid_independent_entity_targets",
+              "effect_diagnostics": effect_diagnostics,
+              "independent_skips": independent_skips,
               "elapsed_seconds": time.monotonic()-begin, "perception": perception.provenance,
               "future_condition": "actual-future posterior; no deployment effect selector" if stage == "dynamics" else "observed-video reconstruction",
               "held_tracker_results_are_not_object_ground_truth": True, "videos": videos}
@@ -130,6 +150,36 @@ def main():
         run.log({"evaluation/summary": summary_table,
                  "evaluation/independent_cases": len(independent), "evaluation/independent_status": report["independent_status"],
                  "evaluation/source_counts": dict(counts), "evaluation/checkpoint_step": step})
+        query_records, consistency_records, intervention_records, grouping_records, query_sample_records = [], [], [], [], []
+        for case in independent:
+            for row in case["association"]["query_reconstruction"]:
+                query_records.append({"case": case["case"], "region": row["measured_region"], **row})
+            for row in case["association"]["same_entity_common_location_consistency"]:
+                consistency_records.append({"case": case["case"], **row})
+            for row in case["association"]["query_effect_interventions"]:
+                intervention_records.append({"case": case["case"], **row,
+                                             "response_mean_px": row["response_px"]["mean"],
+                                             "response_p90_px": row["response_px"]["p90"],
+                                             "reconstruction_mean_px": row["reconstruction_px"]["mean"]})
+            for row in case["metrics"]["independent_grouping_controls"]:
+                grouping_records.append({"case": case["case"], **row, **row["brier_error"]})
+            for row in case["association"]["sampling"].get("independent_query_sampling", []):
+                query_sample_records.append({"case": case["case"], **row, **row["spread_distribution"]})
+        log_diagnostic_table(run, "association/query_reconstruction", ["case", "query", "object", "region", "count", "mean", "p50", "p90", "kl_nats"], query_records)
+        log_diagnostic_table(run, "association/common_location_consistency", ["case", "object", "query_a", "query_b", "count", "mean", "p50", "p90"], consistency_records)
+        log_diagnostic_table(run, "association/effect_interventions", ["case", "intervention", "recipient_query", "donor_query", "observed_object", "response_mean_px", "response_p90_px", "reconstruction_mean_px"], intervention_records)
+        log_diagnostic_table(run, "association/entity_grouping", ["case", "condition", "relation", "count", "mean", "p50", "p90"], grouping_records)
+        log_diagnostic_table(run, "effect/independent_query_sampling", ["case", "query", "object", "count", "mean", "p50", "p90"], query_sample_records)
+        run.log({"association/status": report["association_status"]})
+        rate_records, sample_records = [], []
+        for case in effect_diagnostics:
+            for row in case.get("rates", []):
+                for query, rate in zip(row["query_ids"], row["kl_nats_by_query"]):
+                    rate_records.append({"case": row["case"], "query": query, "kl_nats": rate,
+                                         "clip_total_kl_nats": row["clip_total_kl_nats"], "valid_queries": row["valid_queries"]})
+            sample_records.extend(case.get("sample_reconstruction", []))
+        log_diagnostic_table(run, "effect/per_query_rate", ["case", "query", "kl_nats", "clip_total_kl_nats", "valid_queries"], rate_records)
+        log_diagnostic_table(run, "effect/sample_reconstruction", ["case", "sample", "count", "mean", "p50", "p90"], sample_records)
         for video in videos:
             run.log({f"video/{video['case']}": wandb.Video(video["path"], format="mp4")})
         artifact = wandb.Artifact(args.wandb_name, type="object-video-evaluation")

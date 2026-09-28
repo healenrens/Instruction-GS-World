@@ -1,6 +1,7 @@
 """Shared execution configuration, metric records, and foreground DDP utilities."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -19,6 +20,7 @@ def add_v69_arguments(parser):
     parser.add_argument("--config", default="")
     parser.add_argument("--stage", choices=("state", "dynamics"), default="state")
     parser.add_argument("--state_checkpoint", default="")
+    parser.add_argument("--posterior_geometry", choices=("inherit", "on", "off"), default="inherit")
     parser.add_argument("--resume", default="")
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--batch", type=int, default=1)
@@ -42,7 +44,8 @@ def add_v69_arguments(parser):
 
 def config_from_args(args):
     values = json.loads(Path(args.config).read_text()) if args.config else {}
-    return ObjectVideoConfigV69(**{**values, "encoder": args.encoder})
+    config = ObjectVideoConfigV69(**{**values, "encoder": args.encoder})
+    return replace(config, posterior_geometry=args.posterior_geometry == "on") if args.posterior_geometry != "inherit" else config
 
 
 def batch_is_readable(batch, context, device):

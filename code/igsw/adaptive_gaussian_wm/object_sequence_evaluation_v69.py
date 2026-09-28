@@ -15,6 +15,20 @@ def distribution_v69(values):
             "p95": float(values.quantile(.95)) if len(values) else None}
 
 
+def known_entity_v69(name):
+    return name is not None and name not in ("unknown", "unbound", "background", "scene")
+
+
+def aggregate_query_objects_v69(ownership, query_objects):
+    """Sum duplicate queries for each independently labeled entity; do not renormalize null mass."""
+    names = sorted({name for name in query_objects if known_entity_v69(name)})
+    membership = ownership.new_tensor([[float(label == name) for name in names] for label in query_objects])
+    membership = membership.reshape(len(query_objects), len(names))
+    with torch.autocast(ownership.device.type, enabled=False):
+        grouped = ownership[..., :len(query_objects)].float() @ membership.float()
+    return grouped, names
+
+
 def sequence_metrics_v69(output, batch, config, stage):
     th = config.history_frames
     teacher = batch["teacher"]
@@ -44,32 +58,45 @@ def sequence_metrics_v69(output, batch, config, stage):
 @torch.no_grad()
 def independent_binding_v69(model, output, batch, labels):
     q_objects, p_objects = labels["query_objects"], labels["point_objects"]
-    same = torch.tensor([[q == p for q in q_objects] for p in p_objects], device=batch["rgb"].device)
+    same = torch.tensor([[q == p and known_entity_v69(p) for q in q_objects] for p in p_objects], device=batch["rgb"].device, dtype=torch.bool)
+    same &= output["queries"].valid[0, None]
     ownership = output["reference_ownership"][0, :, :len(q_objects)]
     mass = (ownership*same).sum(-1)
     eligible = same.any(-1) & batch["teacher"]["point_present"][0]
     metrics = {"independent_query_mass": distribution_v69(mass[eligible]),
                "independent_unrelated_mass": distribution_v69((ownership*(~same)).sum(-1)[eligible])}
     present = batch["teacher"]["point_present"][0]
-    object_names = sorted(set(p_objects))
+    object_probability, object_names = aggregate_query_objects_v69(output["reference_ownership"][0], q_objects)
     truth = torch.tensor([[p == q for q in object_names] for p in p_objects], device=ownership.device).float()
+    truth = truth.reshape(len(p_objects), len(object_names))
     full_ownership = output["reference_ownership"][0]
-    controls = {"student": full_ownership,
-                "human_grouping_reference": truth,
-                "uniform": torch.ones_like(full_ownership)/full_ownership.shape[-1],
-                "merge_all": ownership.new_ones((len(p_objects), 1)),
-                "track_per_object": torch.eye(len(p_objects), device=ownership.device)}
+    allowed = torch.cat((output["queries"].valid[0], output["queries"].valid.new_ones(1))).float()
+    uniform = allowed[None].expand_as(full_ownership)/allowed.sum().clamp_min(1)
+    split_queries = torch.zeros_like(full_ownership)
+    for point, label in enumerate(p_objects):
+        matching = [i for i, q in enumerate(q_objects) if q == label and bool(output["queries"].valid[0, i]) and known_entity_v69(label)]
+        split_queries[point, matching[point % len(matching)] if matching else -1] = 1
+    controls = {"student_entity_mass": object_probability,
+                "human_entity_reference": truth,
+                "same_entity_split_queries": aggregate_query_objects_v69(split_queries, q_objects)[0],
+                "uniform_queries": aggregate_query_objects_v69(uniform, q_objects)[0],
+                "merge_all_entities": ownership.new_ones((len(p_objects), 1)),
+                "all_unbound": torch.zeros_like(object_probability)}
     pair_same = torch.tensor([[a == b for b in p_objects] for a in p_objects], device=ownership.device)
-    pair_valid = present[:, None] & present[None] & torch.triu(torch.ones_like(pair_same), diagonal=1)
+    pair_valid = eligible[:, None] & eligible[None] & torch.triu(torch.ones_like(pair_same), diagonal=1)
     pair_rows = []
     for condition, probability in controls.items():
-        agreement = probability @ probability.T
+        with torch.autocast(probability.device.type, enabled=False):
+            agreement = probability.float() @ probability.float().T
         for relation, mask in (("same_entity", pair_valid & pair_same), ("different_entity", pair_valid & ~pair_same)):
             target = 1.0 if relation == "same_entity" else 0.0
             pair_rows.append({"condition": condition, "relation": relation,
                               "brier_error": distribution_v69((agreement[mask]-target).square())})
     metrics["independent_grouping_controls"] = pair_rows
-    metrics["grouping_scope"] = "human point labels; reference and degeneracies audit the evaluator, not proof the training objective excludes them"
+    metrics["independent_unbound_mass"] = distribution_v69(full_ownership[present, -1])
+    metrics["grouping_eligible_points"] = int(eligible.sum())
+    metrics["grouping_labeled_objects"] = object_names
+    metrics["grouping_scope"] = "sum query probabilities by independent entity labels; null/unknown/scene excluded, no renormalization; identical query index is not entity identity"
     source = output["source"]
     frame = model.config.history_frames-1
     reference = batch["teacher"]["xy"][:, frame]
@@ -79,13 +106,14 @@ def independent_binding_v69(model, output, batch, labels):
     base = model.readout(source, reference, current_owner)
     full_error = 1-F.cosine_similarity(base["appearance"].float(), target.float(), dim=-1)
     deletions = []
-    for object_id in sorted(set(q_objects)):
+    classified = torch.tensor([p is not None and p not in ("unknown", "unbound") for p in p_objects], device=reference.device)
+    for object_id in object_names:
         keep = torch.tensor([[q != object_id for q in q_objects]], device=reference.device)
         changed = model.readout(source, reference, current_owner, object_keep=keep)
         deleted_error = 1-F.cosine_similarity(changed["appearance"].float(), target.float(), dim=-1)
         difference = (deleted_error-full_error)[0]
         inside = torch.tensor([p == object_id for p in p_objects], device=reference.device) & current_valid
-        outside = ~inside & current_valid
+        outside = ~inside & current_valid & classified
         deletions.append({"object": object_id, "inside": distribution_v69(difference[inside]), "outside": distribution_v69(difference[outside])})
     metrics["independent_deletion"] = deletions
     metrics["deletion_measurement"] = "increase in frozen-feature reconstruction error at human-labeled current points; not a physical counterfactual"

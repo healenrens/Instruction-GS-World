@@ -1,6 +1,7 @@
 # V69 Object Video Sequence：结构、目标与执行
 
-日期：2026-09-28。开发分支：`codex/object-video-sequence-v69`。
+日期：2026-09-29。开发分支：`codex/object-video-sequence-v69`。
+当前实现为V69r2，architecture=`pretrained_query_object_video_sequence_v2`。审阅逐条处理见`OBJECT_ASSOCIATION_REVIEW_V69R2.md`。
 状态：完整实现并进行静态代码审查；GPU执行结果待用户单卡测试。本文不是实验成功报告。
 用户首轮单卡反馈：Dynamics两条路径均到step10，但resume对照在`posterior.queries`失败；整链路尚未通过。
 研究主线及历史否证记录仍在 `OBJECT_WORLD_MODEL_PROGRESS_V57.md`；设计依据在 `OBJECT_VIDEO_SEQUENCE_PLAN.md`。
@@ -62,10 +63,10 @@ Mask分工：`pixel_valid`只表示真实像素/真实采样帧；`teacher.valid
 | Frozen DINOv3-L/16 | 24层、1024宽、16 heads、patch16 | 官方约300M，实际加载后记录 | 提供已有局部视觉表征，本版不更新 |
 | Object Memory | width512、8 heads；4个visual cross-attention + 4个object-local memory attention；FFN2048 | 27,088,393 | 将history证据聚合为可持续读出的query状态 |
 | EMA Object Memory | 同上，momentum0.996 | 27,088,393 | State阶段缓慢跟随；Dynamics阶段固定观测目标 |
-| Continuous Posterior | 每query4个learned tokens；4层cross-attention；512→128分布头 | 12,687,488 | 从已发生的latent transition提取4x64连续effect |
+| Continuous Posterior | 每query4个learned tokens；4层cross-attention；36→512相对geometry输入；512→128分布头 | 12,706,432 | 从已发生的feature/estimated-geometry transition提取4x64连续effect |
 | Object Dynamics | 8个144-token interaction blocks + 8个effect cross-attention blocks；width512、8 heads | 51,290,114 | 给定source、effect与真实时间，更新未来状态 |
 | Shared compositional readout | local field MLP1042→512→512；appearance1024、position2、observation1；binding head | 2,123,306 | 读出每query对测量位置的支持、外观、位置与可观测性 |
-| Task model总计 | 含EMA，不含backbone | 120,277,694 | State阶段29,211,699可训练；Dynamics阶段63,977,602可训练 |
+| Task model总计 | 含EMA，不含backbone | 120,296,638 | State阶段29,211,699可训练；Dynamics阶段63,996,546可训练 |
 
 FFN均为4倍宽度。Dynamics不是“8层总数”：每一层组含一个interaction和一个effect cross-attention，各自有FFN。
 默认每query9 tokens，共144tokens。K=16是并行query预算，不是检测到16个物体；不同queries可能指向同一物体。
@@ -111,10 +112,10 @@ Centers是模型的support坐标，不是物体质心GT；512维只是可读出�
 
 ### Effect与未来序列怎样算
 
-Posterior只读root/carrier latent和时间，不拼RGB、真实center delta或机器人action。
+Posterior读取root/carrier latent、时间、估计root相对source的位移及帧内carrier相对root的位置，不拼RGB、tracker真实center delta或机器人action。
 输出Gaussian mean/logvar，采样后tanh成连续有界effect；KL约束的是tanh之前的Gaussian。
-Dynamics interaction在144个compact tokens间进行，并显式读取carrier的坐标；effect cross-attention读取64个effect tokens。
-每个effect token加上所属query的anchor，保留“effect属于哪个对象”的关联；不是一个交换归属后完全相同的无序effect集合。
+每层组先在`B*K`个独立组内，让每query的9个state tokens读取它自己的4个effect tokens，再在144个compact tokens间interaction。
+归属由张量分组保证，不再依赖anchor feature是否可区分；interaction后允许物体间相互影响。
 每次用请求时间与本次elapsed time更新feature/center，保留query anchor。
 Direct每次从t0预测请求时刻；rollout从前一步预测继续，**不使用真实未来state teacher forcing**。
 
@@ -141,7 +142,7 @@ Direct每次从t0预测请求时刻；rollout从前一步预测继续，**不使
 | Future latent辅助 | 预测carrier tokens与固定EMA观测tokens的LayerNorm距离 | 不单独用这个loss证明object语义 |
 | Path consistency | rollout与stop-gradient direct在同一时刻的位置一致 | 两条路径都必须受真实轨迹约束 |
 | Observability | 对known tracker证据的BCEWithLogits；unknown不参与 | tracker不可见不能解释成不存在 |
-| Effect rate | Gaussian posterior对单位Gaussian的KL | 不是离散codebook，也不单独证明effect有用 |
+| Effect rate | FP32 Gaussian KL，均值仍用于正则，额外记录clip总和/每query总和 | 不是离散codebook，也不单独证明effect有用或实际bitrate |
 
 State：appearance + weak binding + correspondence + observed transport + 0.1 observation。
 Dynamics：direct transport + rollout transport + 0.25 relative motion + 0.25 latent + 0.25 path + 0.001 KL + 0.1 observation。
@@ -165,7 +166,7 @@ Dynamics阶段冻结Object Memory/readout并继承其EMA，单独训练Posterior
 
 Encoder probe会用未来图像和对应点位置提取feature，**不是forecasting**。独立标注为空时标`not_measured`，不能拿tracker自评冒充独立GT。
 Held evaluator会生成`annotation_template.jsonl`；人填写query所属物体、稀疏点位置和visible/unknown后，独立binding、删除component、
-same/different object关系才有GT。它同时评测uniform、merge-all、track-per-object退化反例；这是评测器的否证能力，
+same/different object关系才有GT。先按独立object标签合并query概率，再评测uniform、merge-all、all-unbound反例；正确的same-object split queries不再误罚。这是评测器的否证能力，
 不是已经证明训练目标会排除这些反例。没有人工标签时不造GT。
 反转历史的V-JEPA对照会从变换后的RGB重新编码，不能用已包含完整history的缓存token。
 所有视频标出HISTORY INPUT/FUTURE TARGET；yellow是transport池，cyan是辅助/context，red是预测，不再用颜色假称物体/机械臂。

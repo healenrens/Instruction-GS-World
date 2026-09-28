@@ -8,12 +8,16 @@ def annotation_template_v69(sample):
             "provenance": "human_annotation", "uses_training_tracker": False,
             "sample_index": sample["sample_index"], "epoch": sample["epoch"], "occurrence": sample["occurrence"],
             "frame_indices": sample["frame_indices"].tolist(), "native_hw": sample["native_hw"].tolist(),
+            "case_tags": [], "suggested_case_tags": ["rigid_translation", "rigid_rotation", "similar_appearance", "separated_different_motion", "contact", "static"],
             "queries": [], "tracks": [],
             "query_fields": {"object_id": "human entity name; multiple queries may share one entity",
+                             "region_id": "optional independently named visible region, e.g. cap or body",
                              "frame_index": "observed absolute frame index", "xy_px": "native x,y"},
             "track_fields": {"object_id": "human entity name or background", "observations":
                              "list of {frame_index, xy_px:[x,y] or null, visible:true/false/null}",
                              "object_extent_px": "optional human-measured longest object extent in current image; null when unknown",
+                             "region_id": "optional region name within the human-labeled entity",
+                             "measurement_set": "primary or additional; neither enters Object Memory or Posterior",
                              "tracker_point_id": "optional original point ID, only for tracker calibration; never copy its predicted future coordinates as GT"},
             "unfilled_is_not_a_negative_label": True}
 
@@ -54,5 +58,9 @@ def independent_measurements_v69(batch, annotation):
                "valid": torch.ones((1, len(query_rows)), device=device, dtype=torch.bool)}
     labels = {"query_objects": [row["object_id"] for row in query_rows],
               "point_objects": [row["object_id"] for row in annotation["tracks"]],
+              "query_regions": [row.get("region_id") or "unspecified" for row in query_rows],
+              "point_regions": [row.get("region_id") or "unspecified" for row in annotation["tracks"]],
+              "measurement_sets": [row.get("measurement_set") or "primary" for row in annotation["tracks"]],
+              "case_tags": annotation.get("case_tags") or [],
               "object_extent_px": [row.get("object_extent_px") for row in annotation["tracks"]]}
     return {**batch, "teacher": teacher}, queries, labels

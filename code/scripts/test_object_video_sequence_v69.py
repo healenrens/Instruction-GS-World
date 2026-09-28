@@ -15,7 +15,8 @@ import torch
 from igsw.adaptive_gaussian_wm.v69_runtime import add_v69_arguments
 from igsw.adaptive_gaussian_wm.v69_config import ObjectVideoConfigV69, parameter_inventory
 from igsw.adaptive_gaussian_wm.object_video_manifest_v69 import load_object_video_manifest_v69
-from igsw.adaptive_gaussian_wm.v69_resume_diagnostics import compare_resume_v69
+from igsw.adaptive_gaussian_wm.v69_resume_diagnostics import compare_resume_v69, configure_reproducibility_v69
+from igsw.adaptive_gaussian_wm.v69_association_verification import verify_association_interfaces_v69
 from igsw.adaptive_gaussian_wm.object_video_sequence_dataset_v69 import ObjectVideoSequenceDatasetV69, collate_object_video_v69, move_batch_v69
 from igsw.adaptive_gaussian_wm.pretrained_visual_encoder_v69 import PretrainedVisualEncoderV69
 from igsw.adaptive_gaussian_wm.object_video_world_model_v69 import ObjectVideoWorldModelV69
@@ -31,6 +32,7 @@ def run_training(args, manifest, out, stage, steps, stop_after, state_checkpoint
                "--batch", "1", "--global_batch", "1", "--workers", "0", "--seed", str(args.seed),
                "--log_every", "1", "--save_every", str(steps), "--recovery_every", "1", "--wandb_mode", "disabled",
                "--deterministic", "--resume_trace",
+               "--posterior_geometry", args.posterior_geometry,
                "--source_revision", args.source_revision]
     if args.config:
         command += ["--config", args.config]
@@ -48,6 +50,7 @@ def run_training(args, manifest, out, stage, steps, stop_after, state_checkpoint
 
 def main():
     args = add_v69_arguments(argparse.ArgumentParser(description=__doc__)).parse_args()
+    configure_reproducibility_v69(True)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     run = None
@@ -151,10 +154,15 @@ def main():
             assert not any(p.requires_grad for p in perception.parameters())
             assert not any(p.requires_grad for p in model.target_encoder.parameters())
             assert output["source"].tokens.shape[1:] == (config.object_queries, config.tokens_per_object, config.width)
+        association_contract = verify_association_interfaces_v69(model, output, batch)
     inventory = parameter_inventory({"perception": perception, "object_memory": model.encoder, "EMA_memory": model.target_encoder,
                                      "readout": model.readout, "posterior": model.posterior, "dynamics": model.dynamics})
+    capacity_fields = ("perception_dim", "width", "heads", "object_queries", "local_carriers", "observation_layers",
+                       "memory_layers", "posterior_layers", "dynamics_layers", "effect_tokens", "effect_dim", "readout_width",
+                       "history_frames", "future_frames", "history_seconds", "future_seconds", "measurement_points")
+    defaults = ObjectVideoConfigV69(encoder=config.encoder)
     report = {"status": "passed_runtime_contract", "architecture": config.architecture, "config": config.to_dict(),
-              "full_capacity_model": config.to_dict() == ObjectVideoConfigV69(encoder=config.encoder).to_dict(),
+              "full_capacity_model": all(getattr(config, name) == getattr(defaults, name) for name in capacity_fields),
               "native_resolution": batch["native_hw"].cpu().tolist(), "parameter_inventory": inventory,
               "history_seconds_actual": float(batch["times"][0, th-1]-batch["times"][0, 0]),
               "future_seconds_actual": float(batch["times"][0, -1]), "history_frames": th, "future_frames": config.future_frames,
@@ -162,6 +170,7 @@ def main():
               "resume_vs_uninterrupted_parameter_max_difference": resume_differences,
               "resume_comparisons": resume_comparisons,
               "deterministic_resume_test": True,
+              "association_interfaces": association_contract,
               "execution_metrics": execution_metrics,
               "future_swap_history_max_difference": source_difference, "future_swap_query_max_difference": query_difference,
               "teacher_swap_history_max_difference": teacher_difference, "uniform_binding_target_kl": uniform_margin,
