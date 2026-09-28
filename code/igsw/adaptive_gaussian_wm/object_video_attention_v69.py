@@ -35,7 +35,7 @@ class AttentionV69(nn.Module):
             return value.reshape(value.shape[0], value.shape[1], self.heads, self.head_dim).transpose(1, 2)
         q, k, v = heads(self.q(query)), heads(self.k(context)), heads(self.v(context))
         mask = None if bias is None else bias[:, None].to(q.dtype)
-        if return_attention:
+        if return_attention or torch.are_deterministic_algorithms_enabled():
             logits = torch.matmul(q.float(), k.float().transpose(-1, -2)) / math.sqrt(self.head_dim)
             if bias is not None:
                 logits = logits + bias[:, None].float()
@@ -45,7 +45,7 @@ class AttentionV69(nn.Module):
             value = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
             attention = None
         value = self.out(value.transpose(1, 2).flatten(-2))
-        return value, None if attention is None else attention.mean(1)
+        return value, attention.mean(1) if return_attention else None
 
 
 class AttentionBlockV69(nn.Module):

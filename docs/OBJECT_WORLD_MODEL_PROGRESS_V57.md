@@ -4,6 +4,7 @@
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
 > 当前开发分支：`codex/object-video-sequence-v69`
 > 当前实现：V69，冻结预训练视觉输入、3s/5s query-object sequence；本轮静态审查，GPU执行待单卡测试
+> 最新单卡反馈：State对照后进入Dynamics，两个Dynamics路径到step10，但恢复参数比较失败；完整测试未通过，见15.45
 > 继承数据：V68 `991099e`，所有类别轨迹全局Top-75%；RoboTwin只复用旧轨迹，不重新追踪
 > 最新设计/执行：第15.43–15.44节，以及`OBJECT_VIDEO_SEQUENCE_V69_RUNBOOK.md`
 > 最新人工反馈：第 15.32 节记录物体覆盖不足、跨数据集机械臂混淆和 RoboMIND 视频来源疑问；尚未证明 teacher 可用于物体级监督
@@ -3076,3 +3077,20 @@ Object Memory和object-token序列Dynamics。默认参考采样16帧history覆�
 最早未完成项仍G0；visual affinity不升级成object GT，tracker自评不升级成真实visibility，反例评测也不等于训练loss已经排除退化解。
 下一步用户单卡跑完整工程测试并查看逐例数据证据；确认后八卡State重训，独立state证据通过后才启动Dynamics。
 完整输入输出、参数量、loss语义和所有前台独立命令见 `docs/OBJECT_VIDEO_SEQUENCE_V69_RUNBOOK.md`。
+
+### 15.45 2026-09-28 V69运行复现契约与失败证据
+
+**What changed**
+
+1. 用户反馈`ca2db53`单卡测试到Dynamics step10，`posterior.queries`未满足resume/未中断比较；日志无数值差异幅度。
+   这证明两条Dynamics路径完成了有限步运行，不证明恢复正确，更不证明object学习成功。按脚本顺序State比较已越过，完整测试失败。
+2. 数值比较改为显式deterministic执行：固定cuBLAS workspace、确定性算子、任务attention显式QKV。
+   模型/数据/loss不改，浮点容差不放宽；生产fast模式与确定性复现模式明确区分并记录到checkpoint。
+3. 测试保存逐microbatch数据、RNG、posterior noise、source与梯度；同时比较optimizer/scheduler/cursor/final RNG。
+   差异报告在断言前写盘并上传W&B。增加完整脚本重跑入口，测试机同步发布，排队八卡任务仍只读取共享release。
+
+**Why / Impact**
+
+恢复同一随机数状态不自动保证CUDA数值确定性，旧断言无法定位数据、噪声与数值计算的首次分叉。
+尚未读取服务器旧checkpoint，也未运行修订测试，因此不能把非确定性提前认定为唯一根因。
+G0及teacher语义状态不变，本次不更改架构或实验学习目标；下一步仍是用户完整单卡反馈，而不是放宽条件宣布通过。

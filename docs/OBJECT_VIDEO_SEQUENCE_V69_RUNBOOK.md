@@ -2,6 +2,7 @@
 
 日期：2026-09-28。开发分支：`codex/object-video-sequence-v69`。
 状态：完整实现并进行静态代码审查；GPU执行结果待用户单卡测试。本文不是实验成功报告。
+用户首轮单卡反馈：Dynamics两条路径均到step10，但resume对照在`posterior.queries`失败；整链路尚未通过。
 研究主线及历史否证记录仍在 `OBJECT_WORLD_MODEL_PROGRESS_V57.md`；设计依据在 `OBJECT_VIDEO_SEQUENCE_PLAN.md`。
 
 ## 1. 这次改变什么
@@ -255,6 +256,34 @@ echo "TEST_RC=${TEST_RC}  REPORT=${OUT}/test_report.json  LOG=${OUT}/test.log"
 另跑未中断版本比较模型参数，并调用一次evaluator。这个样本量只判断工程能否运行，不判断研究方法是否成立。
 W&B最终run含报告、module inventory、运行指标、evaluator视频；不上传模型checkpoint。
 后台命令、Git访问、自动下载、额外gate文件均不在这条链路里。测试失败会自然打印具体异常，SSH不会被脚本exit关闭。
+
+### Resume比较修订后的简短重跑入口
+
+单卡测试的两条路径现在都显式启用deterministic algorithms、固定cuBLAS workspace、关闭TF32/cuDNN benchmark，
+任务attention使用显式QKV计算；未缩小模型或分辨率，也未放宽原`atol=1e-6, rtol=1e-4`。
+冻结backbone不全局切换到展开全图attention的math实现，避免无谓放大原生图像显存。
+生产训练默认仍是fast kernels；strict resume指训练状态恢复，不等同于fast CUDA执行必然逐位相同。
+需要生产确定性模式时显式设置`DETERMINISTIC=1`，它随checkpoint args恢复，可能降低吞吐。
+
+测试会在每个microbatch保存case/frame/point/teacher、CPU/CUDA RNG、source state、posterior实际采样noise及梯度；
+比较模型、optimizer、scheduler、数据游标和最终RNG，并在assert之前保存、上传逐步差异。
+RNG及posterior noise要求exact equality，浮点参数沿用原阈值。报告在`state_resume_comparison.json`和`dynamics_resume_comparison.json`。
+旧日志没有差异幅度，不能仅凭它确定究竟是CUDA非确定性还是恢复错误；新报告用于区分，未提前宣称修复已通过GPU。
+
+在可联网的测试机器执行以下完整命令，无外层括号，失败不关闭交互SSH：
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
+git fetch origin refs/heads/codex/object-video-sequence-v69 &&
+git switch --detach FETCH_HEAD &&
+RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world TEST_GPU=0 \
+  bash code/scripts/prepare_and_test_object_video_sequence_v69.sh
+TEST_RC=$?
+echo "TEST_RC=${TEST_RC}"
+```
+
+此入口自动发布当前revision、复用已有manifest并使用新的test OUT，不覆盖旧测试。它只在测试机读取本地Git HEAD；
+训练入口不调用该脚本，不访问GitHub。encoder本地路径不同仍可通过`ENCODER_REPOSITORY/ENCODER_WEIGHTS`覆盖。
 
 ## 11. 八卡训练与恢复
 

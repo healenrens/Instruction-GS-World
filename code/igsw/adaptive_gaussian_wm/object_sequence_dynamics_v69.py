@@ -36,11 +36,12 @@ class ObjectSequencePosteriorV69(nn.Module):
             hidden, _ = layer(hidden, context, bias)
         mean, logvar = self.distribution(hidden.float()).chunk(2, -1)
         logvar = logvar.clamp(-6, 2)
-        sampled = mean if deterministic else mean + torch.randn_like(mean) * (.5*logvar).exp()
+        noise = torch.zeros_like(mean) if deterministic else torch.randn_like(mean)
+        sampled = mean + noise * (.5*logvar).exp()
         kl = .5 * (mean.square() + logvar.exp() - logvar - 1)
         shape = (b, k, self.config.effect_tokens, self.config.effect_dim)
         return {"value": sampled.tanh().reshape(shape), "mean": mean.reshape(shape), "logvar": logvar.reshape(shape),
-                "kl": kl.reshape(shape)}
+                "kl": kl.reshape(shape), "noise": noise.reshape(shape)}
 
 
 class ObjectSequenceDynamicsV69(nn.Module):

@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 from igsw.distributed import init_torchrun
 from igsw.adaptive_gaussian_wm.v69_config import ObjectVideoConfigV69, parameter_inventory
 from igsw.adaptive_gaussian_wm.v69_runtime import add_v69_arguments, config_from_args, batch_is_readable, case_metrics_v69, append_case_records
+from igsw.adaptive_gaussian_wm.v69_resume_diagnostics import configure_reproducibility_v69, step_inputs_v69, save_step_trace_v69
 from igsw.adaptive_gaussian_wm.episode_uniform_sampler_v69 import EpisodeUniformSamplerV69
 from igsw.adaptive_gaussian_wm.episode_uniform_sampler_v69 import episode_key
 from igsw.adaptive_gaussian_wm.object_video_sequence_dataset_v69 import ObjectVideoSequenceDatasetV69, collate_object_video_v69, move_batch_v69
@@ -32,11 +33,13 @@ from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
 
 def main():
     args = add_v69_arguments(argparse.ArgumentParser(description=__doc__)).parse_args()
-    context = init_torchrun()
-    device = torch.device(context.device)
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False) if args.resume else None
     if checkpoint is not None:
-        args = argparse.Namespace(**{**checkpoint["args"], "resume": args.resume, "workers": args.workers, "stop_after": args.stop_after})
+        args = argparse.Namespace(**{"deterministic": False, "resume_trace": False, **checkpoint["args"],
+                                     "resume": args.resume, "workers": args.workers, "stop_after": args.stop_after})
+    numerical_mode = configure_reproducibility_v69(args.deterministic)
+    context = init_torchrun()
+    device = torch.device(context.device)
     state_checkpoint = torch.load(args.state_checkpoint, map_location="cpu", weights_only=False) if args.stage == "dynamics" and checkpoint is None else None
     inherited = checkpoint if checkpoint is not None else state_checkpoint
     config = ObjectVideoConfigV69(**inherited["config"]) if inherited is not None else config_from_args(args)
@@ -90,7 +93,8 @@ def main():
                     "sampling": "one uniform clip per episode per epoch; DDP tail padding repeats episodes"}
         if checkpoint is None:
             write_json(out / "run.json", {"args": vars(args), "config": config.to_dict(), "world_size": context.world_size,
-                       "grad_accum": accum, "effective_batch": accum*args.batch*context.world_size, "sampling": sampling})
+                       "grad_accum": accum, "effective_batch": accum*args.batch*context.world_size, "sampling": sampling,
+                       "numerical_mode": numerical_mode})
         print(json.dumps({"event": "v69_model_inventory", "modules": inventory, "config": config.to_dict()}), flush=True)
     wrapped = DistributedDataParallel(model, device_ids=[context.local_rank], broadcast_buffers=False) if context.distributed else model
     run = None
@@ -103,7 +107,7 @@ def main():
                          id=checkpoint["wandb_id"] if checkpoint is not None else None,
                          resume="must" if checkpoint is not None and checkpoint["wandb_id"] else None,
                          config={**vars(args), **config.to_dict(), "model_inventory": inventory,
-                                 "effective_batch": accum*args.batch*context.world_size, "sampling": sampling})
+                                 "effective_batch": accum*args.batch*context.world_size, "sampling": sampling, "numerical_mode": numerical_mode})
     model.train()
     perception.eval()
     optimizer.zero_grad(set_to_none=True)
@@ -126,7 +130,7 @@ def main():
                      "model": model.state_dict(), "perception": perception.backbone.state_dict(), "perception_provenance": perception.provenance,
                      "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "rng": states,
                      "step": step, "epoch": epoch, "cursor": cursor, "grad_accum": accum,
-                     "world_size": context.world_size, "wandb_id": run.id if run else None}
+                     "world_size": context.world_size, "wandb_id": run.id if run else None, "numerical_mode": numerical_mode}
             temporary = out / "latest.tmp.pt"
             torch.save(value, temporary)
             temporary.replace(out / "latest.pt")
@@ -153,6 +157,7 @@ def main():
             perception_start.record()
             fields = perception(batch["rgb"], batch["pixel_valid"], batch["times"], batch["native_hw"])
             perception_end.record()
+            trace_inputs = step_inputs_v69(batch, device) if args.resume_trace else None
             pending += 1
             boundary = pending == accum
             synchronization = nullcontext() if boundary or not context.distributed else wrapped.no_sync()
@@ -161,6 +166,8 @@ def main():
                     output = wrapped(fields, batch)
                     loss = output["loss"]/accum
                 loss.backward()
+            if args.resume_trace:
+                save_step_trace_v69(out / f"resume_trace_rank{context.rank:04d}", step+1, pending, trace_inputs, output, model)
             values = torch.stack([output["loss"].detach().float(), *[p.detach().float() for p in output["parts"].values()]])
             accumulated = values if accumulated is None else accumulated+values
             if not boundary:

@@ -27,6 +27,10 @@ fi
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export PYTHONPATH="${ROOT}/code:${PYTHONPATH:-}"
+NUMERICAL_ARGS=()
+if [[ "${DETERMINISTIC:-0}" == 1 ]]; then
+  NUMERICAL_ARGS+=(--deterministic)
+fi
 mkdir -p "${OUT}"
 echo "[object-video-v69] mode=foreground stage=${STAGE} processes=${NPROC_PER_NODE} out=${OUT} code=${SOURCE_REVISION}"
 "${PY}" -m torch.distributed.run --standalone --nproc_per_node "${NPROC_PER_NODE}" \
@@ -35,6 +39,7 @@ echo "[object-video-v69] mode=foreground stage=${STAGE} processes=${NPROC_PER_NO
   --encoder "${ENCODER}" --encoder_repository "${ENCODER_REPOSITORY}" --encoder_weights "${ENCODER_WEIGHTS}" \
   --encoder_frame_batch "${ENCODER_FRAME_BATCH:-2}" --stage "${STAGE}" --state_checkpoint "${STATE_CHECKPOINT:-}" \
   --resume "${RESUME:-}" --source_revision "${SOURCE_REVISION}" --config "${MODEL_CONFIG:-}" \
+  "${NUMERICAL_ARGS[@]}" \
   --batch "${BATCH_PER_GPU:-2}" --global_batch "${TARGET_GLOBAL_BATCH:-256}" --workers "${WORKERS_PER_RANK:-2}" \
   --steps "${STEPS:-30000}" --stop_after "${STOP_AFTER:-0}" --lr "${LR:-0.0002}" --seed "${SEED:-17}" \
   --log_every "${LOG_EVERY:-20}" --save_every "${SAVE_EVERY:-2500}" --recovery_every "${RECOVERY_EVERY:-250}" \

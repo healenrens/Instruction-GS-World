@@ -26,6 +26,8 @@ def add_v69_arguments(parser):
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--steps", type=int, default=30000)
     parser.add_argument("--stop_after", type=int, default=0, help="Optional execution stop; scheduler still uses --steps.")
+    parser.add_argument("--deterministic", action="store_true", help="Deterministic kernels for controlled resume comparisons.")
+    parser.add_argument("--resume_trace", action="store_true", help="Save per-microbatch data, RNG and posterior evidence for the integration test.")
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--log_every", type=int, default=20)
     parser.add_argument("--save_every", type=int, default=2500)

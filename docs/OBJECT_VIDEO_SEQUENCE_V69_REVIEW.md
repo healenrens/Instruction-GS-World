@@ -47,3 +47,11 @@
 7. Posterior-conditioned reconstruction不是部署期effect选择，未实现selector不伪装成自主未来预测。
 
 这些是待测结论，不是静态审查可以签发的能力证明。运行及解释见`OBJECT_VIDEO_SEQUENCE_V69_RUNBOOK.md`。
+
+## 2026-09-28 Resume反馈复核
+
+用户报告`ca2db53`的Dynamics恢复/未中断路径均完成step10，但`posterior.queries`比较失败。
+静态确认旧测试未固定确定性算子，且失败前没有输出差异幅度和首次分叉证据；尚不能判断这是唯一根因。
+修订保留原容差，启用测试专用确定性计算，并比较逐步数据/RNG/posterior noise、最终optimizer/scheduler和游标。
+报告先写盘并上传W&B，再断言；八卡生产默认fast，不将训练状态恢复和数值逐位一致混为一谈。
+新代码只通过静态检查，等待服务器重跑。用户贴出的外层`)`语法错误与模型比较失败独立，重跑改成调用完整脚本。

@@ -14,6 +14,7 @@ import torch
 
 from igsw.adaptive_gaussian_wm.v69_runtime import add_v69_arguments
 from igsw.adaptive_gaussian_wm.v69_config import ObjectVideoConfigV69, parameter_inventory
+from igsw.adaptive_gaussian_wm.v69_resume_diagnostics import compare_resume_v69
 from igsw.adaptive_gaussian_wm.object_video_sequence_dataset_v69 import ObjectVideoSequenceDatasetV69, collate_object_video_v69, move_batch_v69
 from igsw.adaptive_gaussian_wm.pretrained_visual_encoder_v69 import PretrainedVisualEncoderV69
 from igsw.adaptive_gaussian_wm.object_video_world_model_v69 import ObjectVideoWorldModelV69
@@ -28,6 +29,7 @@ def run_training(args, manifest, out, stage, steps, stop_after, state_checkpoint
                "--encoder_frame_batch", str(args.encoder_frame_batch), "--steps", str(steps), "--stop_after", str(stop_after),
                "--batch", "1", "--global_batch", "1", "--workers", "0", "--seed", str(args.seed),
                "--log_every", "1", "--save_every", str(steps), "--recovery_every", "1", "--wandb_mode", "disabled",
+               "--deterministic", "--resume_trace",
                "--source_revision", args.source_revision]
     if args.config:
         command += ["--config", args.config]
@@ -36,6 +38,7 @@ def run_training(args, manifest, out, stage, steps, stop_after, state_checkpoint
     if resume:
         command += ["--resume", str(resume)]
     env = os.environ.copy()
+    env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     for name in ("RANK", "WORLD_SIZE", "LOCAL_RANK", "LOCAL_WORLD_SIZE", "GROUP_RANK", "ROLE_RANK", "ROLE_WORLD_SIZE"):
         env.pop(name, None)
     print(f"[object-video-v69-test] phase={stage} stop_after={stop_after} resume={resume}", flush=True)
@@ -46,6 +49,13 @@ def main():
     args = add_v69_arguments(argparse.ArgumentParser(description=__doc__)).parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    run = None
+    if args.wandb_mode != "disabled":
+        import wandb
+        os.environ.pop("WANDB_RUN_ID", None)
+        os.environ.pop("WANDB_RESUME", None)
+        run = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
+                         group="object-video-sequence-v69", job_type="single-gpu-integration", mode=args.wandb_mode, config=vars(args))
     manifest = json.loads(Path(args.manifest).read_text())
     grouped = defaultdict(list)
     for entry in manifest["entries"]:
@@ -56,7 +66,7 @@ def main():
     write_json(test_manifest, {**manifest, "entries": chosen, "scope": "full-resolution real-clip integration, not a scientific evaluation"})
     steps = max(2, len(chosen)*2)
     half = min(steps-1, max(1, len(chosen)//2+1))
-    resume_differences = {}
+    resume_differences, resume_comparisons = {}, {}
     execution_metrics = {}
     for stage in ("state", "dynamics"):
         stage_out = out / stage
@@ -73,12 +83,21 @@ def main():
         baseline_out = out / f"{stage}_uninterrupted"
         run_training(args, test_manifest, baseline_out, stage, steps, steps, parent)
         baseline = torch.load(baseline_out / "latest.pt", map_location="cpu", weights_only=False)
-        differences = []
-        for name, value in resumed["model"].items():
-            other = baseline["model"][name]
-            differences.append(float((value.float()-other.float()).abs().max()))
-            assert torch.allclose(value, other, atol=1e-6, rtol=1e-4), f"resume differs from uninterrupted training: {stage}/{name}"
-        resume_differences[stage] = max(differences)
+        comparison = compare_resume_v69(resumed, baseline, stage_out, baseline_out)
+        comparison["numerical_mode"] = resumed["numerical_mode"]
+        comparison_path = out / f"{stage}_resume_comparison.json"
+        write_json(comparison_path, comparison)
+        print(json.dumps({"event": "resume_comparison", "stage": stage, "report": str(comparison_path),
+                          "passed": comparison["passed"], "model_max_abs_difference": comparison["model_max_abs_difference"],
+                          "first_trace_mismatch": comparison["first_trace_mismatch"]}), flush=True)
+        if run:
+            run.summary[f"resume/{stage}"] = comparison
+            artifact = wandb.Artifact(f"{args.wandb_name}-{stage}-resume", type="resume-comparison")
+            artifact.add_file(str(comparison_path))
+            run.log_artifact(artifact)
+        assert comparison["passed"], f"resume comparison failed: {stage}; first divergence and numerical differences saved in {comparison_path}"
+        resume_comparisons[stage] = comparison
+        resume_differences[stage] = comparison["model_max_abs_difference"]
         execution_metrics[stage] = [json.loads(line) for line in (stage_out / "metrics.jsonl").read_text().splitlines()]
         assert all(not row["trainable_parameters_without_gradient"] for row in execution_metrics[stage])
         del baseline
@@ -140,6 +159,8 @@ def main():
               "future_seconds_actual": float(batch["times"][0, -1]), "history_frames": th, "future_frames": config.future_frames,
               "sources": sorted(grouped), "state_steps_with_resume": steps, "dynamics_steps_with_resume": steps,
               "resume_vs_uninterrupted_parameter_max_difference": resume_differences,
+              "resume_comparisons": resume_comparisons,
+              "deterministic_resume_test": True,
               "execution_metrics": execution_metrics,
               "future_swap_history_max_difference": source_difference, "future_swap_query_max_difference": query_difference,
               "teacher_swap_history_max_difference": teacher_difference, "uniform_binding_target_kl": uniform_margin,
@@ -148,12 +169,7 @@ def main():
               "evaluation_clip_is_not_scientific_held_evidence": True,
               "object_semantics_verified": False, "training_checkpoints_are_test_only": True}
     write_json(out / "test_report.json", report)
-    if args.wandb_mode != "disabled":
-        import wandb
-        os.environ.pop("WANDB_RUN_ID", None)
-        os.environ.pop("WANDB_RESUME", None)
-        run = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
-                         group="object-video-sequence-v69", job_type="single-gpu-integration", mode=args.wandb_mode, config=vars(args))
+    if run:
         run.summary.update(report)
         artifact = wandb.Artifact(args.wandb_name, type="object-video-runtime-test")
         artifact.add_file(str(out / "test_report.json"))
