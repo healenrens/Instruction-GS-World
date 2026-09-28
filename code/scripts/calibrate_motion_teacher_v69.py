@@ -9,7 +9,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch
-from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import read_json, write_json
+from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
+from igsw.adaptive_gaussian_wm.object_video_manifest_v69 import load_object_video_manifest_v69
 from igsw.adaptive_gaussian_wm.object_sequence_evaluation_v69 import distribution_v69
 
 
@@ -24,7 +25,7 @@ def main():
     p.add_argument("--wandb_mode", choices=("online", "offline", "disabled"), default="online")
     p.add_argument("--wandb_name", default="object_video_v69_teacher_calibration")
     args = p.parse_args()
-    manifest = read_json(args.manifest)
+    manifest = load_object_video_manifest_v69(args.manifest)
     entries = {row["case_id"]: row for row in manifest["entries"]}
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

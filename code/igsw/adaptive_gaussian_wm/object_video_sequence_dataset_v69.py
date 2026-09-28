@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .object_video_rgb_v69 import read_object_video_frames_v69
+from .object_video_manifest_v69 import load_object_video_manifest_v69, resolve_object_video_case_v69
 from .v69_config import ObjectVideoConfigV69
 from .video_file_decoder import VideoDecodeError
 from .grounded_background_motion_v68 import motion_evidence
@@ -69,7 +70,7 @@ def tracker_observations(data):
 class ObjectVideoSequenceDatasetV69(Dataset):
     def __init__(self, manifest, config=None, seed=17, partition="train", annotations=""):
         self.path = str(Path(manifest).resolve())
-        self.manifest = json.loads(Path(manifest).read_text())
+        self.manifest = load_object_video_manifest_v69(manifest)
         self.root = Path(self.manifest["root"])
         self.entries = [e for e in self.manifest["entries"] if e["partition"] == partition]
         self.config, self.seed = config or ObjectVideoConfigV69(), seed
@@ -86,7 +87,7 @@ class ObjectVideoSequenceDatasetV69(Dataset):
         index, epoch, occurrence = item if isinstance(item, tuple) else (item, 0, item)
         entry = self.entries[index]
         data = torch.load(self.root / entry["path"], map_location="cpu", weights_only=False)
-        case = data["case"]
+        case = resolve_object_video_case_v69(data["case"], self.root)
         fps = float(case["record"]["fps"])
         rng = np.random.default_rng(np.random.SeedSequence([self.seed, epoch, occurrence, index]))
         _, indices, frame_valid = temporal_indices(self.config, len(data["native"]["tracks"]), fps, rng)

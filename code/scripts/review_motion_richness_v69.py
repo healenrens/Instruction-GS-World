@@ -13,7 +13,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch
 from PIL import Image, ImageDraw
-from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import read_json, write_json, decode_case
+from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json, decode_case
+from igsw.adaptive_gaussian_wm.object_video_manifest_v69 import load_object_video_manifest_v69, resolve_object_video_case_v69
 from igsw.adaptive_gaussian_wm.tracker_visual_review_media_v67 import rgb_image, write_video
 from igsw.adaptive_gaussian_wm.video_file_decoder import VideoDecodeError
 
@@ -120,7 +121,7 @@ def main():
     p.add_argument("--wandb_mode", default="online", choices=("online", "offline", "disabled"))
     p.add_argument("--wandb_name", default="object_video_v69_motion_richness_review")
     args = p.parse_args()
-    manifest = read_json(args.manifest)
+    manifest = load_object_video_manifest_v69(args.manifest)
     root, out = Path(manifest["root"]), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     entries = list(manifest["entries"])
@@ -132,6 +133,7 @@ def main():
             "<h1>Motion evidence: raw video and measured tracks</h1><p>No composite richness score and no training sampling changes. Review raw clips before opening diagnostic numbers. Yellow is a threshold-selected candidate for this diagnostic, NOT the training top-75% pool or an object label; cyan is relay tracking.</p>"]
     for ordinal, entry in enumerate(entries):
         data = torch.load(root / entry["path"], map_location="cpu", weights_only=False)
+        data["case"] = resolve_object_video_case_v69(data["case"], root)
         fps = data["case"]["record"]["fps"]
         length = round(args.window_seconds*fps)+1
         stride = max(1, round(args.stride_seconds*fps))

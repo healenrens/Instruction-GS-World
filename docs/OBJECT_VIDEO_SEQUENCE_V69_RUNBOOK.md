@@ -456,3 +456,53 @@ ROOT="${RT}/runtime/object_video_sequence_v69/releases/${REV}"
 ```
 
 只对明确填写`tracker_point_id`的人工点测校准；没有该映射不会猜。位置和visible必须人工/仿真独立提供，不能复制tracker输出。
+
+## 14. 导出独立迁移数据包
+
+`export_portable_object_video_v69.sh`按现有V69 manifest快照导出，默认全量、四个CPU文件复制线程，不需要GPU。
+媒体按解析后的源文件路径去重，复制原视频/原RGB cache的完整文件，不转码、不降分辨率、不插值、不重跑SAM/CoTracker。
+某些MP4包含多个episode，包中会包含其中未使用的帧，文件体积可能较大；开头打印去重后的media/teacher字节数。
+默认同时产生独立目录与未压缩tar，导出盘约需两份数据空间。已有压缩视频不再用gzip重复压缩。
+
+```text
+exports/object_video_v69_portable/
+  manifest.json             root="."，包内相对路径
+  media/00000000.mp4        原始视频或RGB cache，实际扩展名保留
+  clips/00000000/teacher.pt 原始轨迹/relay/筛选等，case.record.path改为包内路径
+  export_plan.json          固定复制计划与原始路径来源记录
+  export_report.json        实际样本数、来源、字节数及缺失跳过
+  progress.json             当前复制/归档进度，仅工作目录中
+  README.md
+exports/object_video_v69_portable.tar
+```
+
+运行命令可独立执行，不访问GitHub：
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
+RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world \
+VENV_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world \
+MANIFEST=/mnt/pfs/public/xuhaoming/instruct_gs_world/data/object_video_sequence_v69/manifest.json \
+PORTABLE_OUT=/mnt/pfs/public/xuhaoming/instruct_gs_world/exports/object_video_v69_portable \
+COPY_WORKERS=4 EXPORT_ITEMS=0 PLAN_ONLY=0 CREATE_ARCHIVE=1 \
+bash code/scripts/export_portable_object_video_v69.sh
+EXPORT_RC=$?
+echo "EXPORT_RC=${EXPORT_RC}"
+```
+
+同一命令中断后重跑，复用已完成文件；未完成单个文件重新复制。复制计划第一次写入后固定，原数据新增不会混入同一包。
+需要新的快照时换`PORTABLE_OUT`。只看容量计划可设`PLAN_ONLY=1`；使用rsync迁移目录时设`CREATE_ARCHIVE=0`，避免第二份tar占用。
+缺失teacher/媒体的案例明确列出并跳过，不制造空视频。这里只复制媒体字节，不进行视频质量/解码验证；已有解码失败处理仍由loader负责。
+
+在迁移目标机器解压，例如：
+
+```bash
+mkdir -p /data/datasets
+tar -xf /data/transfers/object_video_v69_portable.tar -C /data/datasets
+export MANIFEST=/data/datasets/object_video_v69_portable/manifest.json
+```
+
+使用本次支持portable路径的V69代码，并让训练命令采用这个`MANIFEST`。新run会把解析后的数据根写进自己的manifest快照；
+不依赖原`/mnt/pfs/public/...`目录，原始路径只留在provenance中，不会作为运行输入读取。
+数据包不包含DINO权重、Python环境或训练checkpoint。若还迁移旧checkpoint，checkpoint的run OUT、dataset快照和encoder源码路径
+属于另一项恢复迁移，不能仅改新的`MANIFEST`就声称旧run完成strict resume。

@@ -14,6 +14,7 @@ import torch
 
 from igsw.adaptive_gaussian_wm.v69_runtime import add_v69_arguments
 from igsw.adaptive_gaussian_wm.v69_config import ObjectVideoConfigV69, parameter_inventory
+from igsw.adaptive_gaussian_wm.object_video_manifest_v69 import load_object_video_manifest_v69
 from igsw.adaptive_gaussian_wm.v69_resume_diagnostics import compare_resume_v69
 from igsw.adaptive_gaussian_wm.object_video_sequence_dataset_v69 import ObjectVideoSequenceDatasetV69, collate_object_video_v69, move_batch_v69
 from igsw.adaptive_gaussian_wm.pretrained_visual_encoder_v69 import PretrainedVisualEncoderV69
@@ -56,7 +57,7 @@ def main():
         os.environ.pop("WANDB_RESUME", None)
         run = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
                          group="object-video-sequence-v69", job_type="single-gpu-integration", mode=args.wandb_mode, config=vars(args))
-    manifest = json.loads(Path(args.manifest).read_text())
+    manifest = load_object_video_manifest_v69(args.manifest)
     grouped = defaultdict(list)
     for entry in manifest["entries"]:
         if entry["partition"] == "train":

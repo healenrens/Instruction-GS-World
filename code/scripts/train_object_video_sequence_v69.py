@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader
 
 from igsw.distributed import init_torchrun
 from igsw.adaptive_gaussian_wm.v69_config import ObjectVideoConfigV69, parameter_inventory
+from igsw.adaptive_gaussian_wm.object_video_manifest_v69 import load_object_video_manifest_v69
 from igsw.adaptive_gaussian_wm.v69_runtime import add_v69_arguments, config_from_args, batch_is_readable, case_metrics_v69, append_case_records
 from igsw.adaptive_gaussian_wm.v69_resume_diagnostics import configure_reproducibility_v69, step_inputs_v69, save_step_trace_v69
 from igsw.adaptive_gaussian_wm.episode_uniform_sampler_v69 import EpisodeUniformSamplerV69
@@ -50,7 +51,7 @@ def main():
     manifest = out / "dataset.json"
     if context.is_main and checkpoint is None:
         with manifest.open("x", encoding="utf-8") as stream:
-            json.dump(json.loads(Path(args.manifest).read_text()), stream)
+            json.dump(load_object_video_manifest_v69(args.manifest), stream)
         source_repository = state_checkpoint["args"]["encoder_repository"] if state_checkpoint is not None else args.encoder_repository
         shutil.copytree(source_repository, out / "encoder_source", ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
     if checkpoint is None:
