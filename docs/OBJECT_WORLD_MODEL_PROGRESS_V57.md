@@ -1,11 +1,12 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-09-29
+> 更新日期：2026-10-01
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
 > 当前开发分支：`codex/object-video-sequence-v69`
 > 当前实现：V69，冻结预训练视觉输入、3s/5s query-object sequence；本轮静态审查，GPU执行待单卡测试
 > 最新单卡反馈：State对照后进入Dynamics，两个Dynamics路径到step10，但恢复参数比较失败；完整测试未通过，见15.45
 > 当前接口修订：V69r2 `pretrained_query_object_video_sequence_v2`，local effect routing、Posterior geometry与entity评测修正；未取得新GPU结果
+> State专用变化评测：第15.48节。在线run `0oko1yhr`实际运行V69 v1 `40e4586`；评测严格复用其State模块，不加载新版未训练effect模块。
 > 继承数据：V68 `991099e`，所有类别轨迹全局Top-75%；RoboTwin只复用旧轨迹，不重新追踪
 > 最新设计/执行：第15.43–15.44节，以及`OBJECT_VIDEO_SEQUENCE_V69_RUNBOOK.md`
 > 最新人工反馈：第 15.32 节记录物体覆盖不足、跨数据集机械臂混淆和 RoboMIND 视频来源疑问；尚未证明 teacher 可用于物体级监督
@@ -3135,3 +3136,28 @@ G0及teacher语义状态不变，本次不更改架构或实验学习目标；�
 架构名升级v2但继续使用V69脚本；旧checkpoint按原release恢复，不隐式混入新架构。未启动的八卡任务无需改命令，
 测试机发布完整release后原子更新共享`DEPLOYED_REVISION`。单卡整链路增加同anchor、tuple重排、geometry-only和multi-query数学反例，
 不放宽原resume比较。下一证据是服务器完整测试与独立少量多query标注评测。详见`OBJECT_ASSOCIATION_REVIEW_V69R2.md`。
+
+### 15.48 2026-10-01 第一阶段State是否保留物体变化
+
+**What changed / hypothesis**
+
+第一阶段的主问题是已观测视频压缩成State后，能否还原物体变化。新增`evaluate_object_state_change_v69.sh`，
+冻结同一checkpoint、视觉backbone、reference point、query归属和readout，只干预continuation State。
+比较observed、同时冻结tokens/centers、打乱continuation时间、仅冻结tokens、仅冻结centers及reference copy。
+位置绝对误差与相对t=0的位移误差分别报告；按真实位移区间、时间和来源分组，先逐案例统计再汇总分位数。
+
+**Execution / inherited assets**
+
+默认各源最多80个独立held episode、每episode一个固定seed窗口，每源8个视频；最多400 clips与40组可视化。
+单卡/四卡独立前台入口，评测开始复制正在更新的latest.pt到本次独立OUT，所有rank使用同一快照。
+严格加载encoder/target_encoder/readout及冻结backbone；支持旧v1 State，不继承其optimizer或使用新版Posterior/Dynamics。
+使用既有原分辨率RGB、3s/5s、V68轨迹与原75%池，不重新追踪。W&B记录逐案例、成对干预、各源分布、视频与完整证据artifact。
+
+**Evidence / falsification / next Gate**
+
+当前W&B训练run `0oko1yhr`为v1 `40e4586`；读取到6020步。4500–5000至5500–6020的transport均值5.58px降至4.83px，
+外观0.331升至0.354、对应JS约0.0064升至0.0069；这些只是训练拟合，不能证明object validity或泛化。
+若不更新State或打乱State仍可同样还原明显运动，则“State承载变化”假设不成立。
+tokens/centers干预定位变化的存储位置，不要求只有tokens承担变化，也不把分位数或熵提升为语义分数。
+tracker仍为伪测量，raw displacement可能含相机运动；独立object grouping/删除局部性仅在人工/模拟器标签提供时测量，缺失明确未测。
+本次新增数学回归与静态审查，真实held结果待用户执行；G0 teacher/object独立有效性仍未通过，不由重建成绩自动晋级Dynamics。

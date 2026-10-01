@@ -507,3 +507,44 @@ export MANIFEST=/data/datasets/object_video_v69_portable/manifest.json
 不依赖原`/mnt/pfs/public/...`目录，原始路径只留在provenance中，不会作为运行输入读取。
 数据包不包含DINO权重、Python环境或训练checkpoint。若还迁移旧checkpoint，checkpoint的run OUT、dataset快照和encoder源码路径
 属于另一项恢复迁移，不能仅改新的`MANIFEST`就声称旧run完成strict resume。
+
+## 15. State变化表征的held评测
+
+入口`code/scripts/evaluate_object_state_change_v69.sh`只评测已观测视频到compact State的变化还原。
+评测启动时把`CHECKPOINT`的当前内容复制到`OUT/checkpoint_snapshot.pt`，记录真实step与训练revision；
+以后更新的latest不改变本次评测。旧V69 v1和V69r2都严格加载其State模块，未使用的Posterior/Dynamics不加载。
+
+每源默认80个独立held episode、固定seed选择一个window；每源8个可视化案例，不复制凑数。
+六种条件共享RGB编码、queries、历史reference点、归属和readout：实际State、冻结完整State、打乱continuation、
+冻结tokens、冻结centers、历史reference copy。干预不改history，t=0作为位移比较起点，不以参考帧零误差充当成绩。
+位置误差与位移误差分别报告，按原生pixel真实位移及1秒时间区间切片；5px只是公开报告的motion slice，不是物体标签或成功阈值。
+汇总先得到每clip的point/frame统计，再给出跨clip分布；完整逐点值保存在evidence，不用单一总均值作晋级标准。
+
+独立运行示例（不联网下载，不后台执行）：
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
+export ROOT=$PWD
+export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export VENV_ROOT="$RUNTIME_ROOT"
+export CHECKPOINT="$RUNTIME_ROOT/outputs/object_video_v69_state_seed17_40e4586_20260929_003931/latest.pt"
+export MANIFEST="$RUNTIME_ROOT/outputs/object_video_v69_state_seed17_40e4586_20260929_003931/dataset.json"
+export ENCODER_REPOSITORY="$RUNTIME_ROOT/outputs/object_video_v69_state_seed17_40e4586_20260929_003931/encoder_source"
+export SOURCE_REVISION="$(git rev-parse HEAD)"
+export EVAL_NPROC_PER_NODE=4
+export ITEMS_PER_SOURCE=80 VISUALIZE_PER_SOURCE=8
+export ENCODER_FRAME_BATCH=2
+export RUN_NAME="object_video_v69_state_change_held_$(date +%Y%m%d_%H%M%S)"
+export OUT="$RUNTIME_ROOT/outputs/$RUN_NAME"
+export WANDB_MODE=online
+export WANDB_PROJECT=instruct-gs-world
+export WANDB_ENTITY=healenrenss-university-of-chinese-acadmic-and-science
+bash "$ROOT/code/scripts/evaluate_object_state_change_v69.sh"
+```
+
+只有一张空闲卡时设`EVAL_NPROC_PER_NODE=1`，用`CUDA_VISIBLE_DEVICES`指定物理GPU；auto按当前可见卡数启动，最多4卡。
+训练继续运行时，必须在另一台有空闲GPU的测试机执行，不能把正在训练的8张卡当作评测空闲卡。
+日志`OUT/evaluate.log`，总报告`OUT/report.json`，逐案例`OUT/case_reports/`，原始测点/预测`OUT/evidence/`，
+四条件视频及query center视频`OUT/videos/`，浏览入口`OUT/index.html`。
+W&B group=`object-video-v69-state-change`，包括case/paired/summary Tables、Videos和证据artifact；快照大checkpoint不上传。
+可通过`ANNOTATIONS`加载此前生成的独立标注，未提供时object identity、grouping与真实visibility明确未测；tracker只是伪测量。
