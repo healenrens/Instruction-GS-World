@@ -33,7 +33,10 @@ def run_training(args, manifest, out, stage, steps, stop_after, state_checkpoint
                "--log_every", "1", "--save_every", str(steps), "--recovery_every", "1", "--wandb_mode", "disabled",
                "--deterministic", "--resume_trace",
                "--posterior_geometry", args.posterior_geometry,
+               "--stage2_preset", args.stage2_preset,
                "--source_revision", args.source_revision]
+    if args.dynamics_checkpoint_blocks:
+        command += ["--dynamics_checkpoint_blocks"]
     if args.config:
         command += ["--config", args.config]
     if state_checkpoint:

@@ -24,8 +24,9 @@ def verify_association_interfaces_v69(model, output, batch):
         effect = torch.linspace(-.6, .6, 3*model.config.effect_tokens*model.config.effect_dim, device=device)
         effect = effect.reshape(1, 3, model.config.effect_tokens, model.config.effect_dim)
         exchanged = effect[:, [1, 0, 2]]
-        local = model.dynamics.condition_local(source.tokens, effect, 0)
-        local_swapped = model.dynamics.condition_local(source.tokens, exchanged, 0)
+        internal = model.dynamics.input_projection(source.tokens)
+        local = model.dynamics.condition_local(internal, effect, 0)
+        local_swapped = model.dynamics.condition_local(internal, exchanged, 0)
         local_changed = float((local[:, :2]-local_swapped[:, :2]).abs().max())
         local_unchanged = float((local[:, 2:]-local_swapped[:, 2:]).abs().max())
         assert local_changed > 1e-7 and local_unchanged == 0

@@ -1,9 +1,9 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-10-01
+> 更新日期：2026-10-02
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
 > 当前开发分支：`codex/object-video-sequence-v69`
-> 当前实现：V69，冻结预训练视觉输入、3s/5s query-object sequence；本轮静态审查，GPU执行待单卡测试
+> 当前实现：V69，冻结预训练视觉输入、3s/5s query-object sequence；Stage 2扩容与迁移见15.51，GPU执行待用户单卡测试
 > 最新单卡反馈：State对照后进入Dynamics，两个Dynamics路径到step10，但恢复参数比较失败；完整测试未通过，见15.45
 > 当前接口修订：V69r2 `pretrained_query_object_video_sequence_v2`，local effect routing、Posterior geometry与entity评测修正；未取得新GPU结果
 > State专用变化评测：第15.48节。在线run `0oko1yhr`实际运行V69 v1 `40e4586`；评测严格复用其State模块，不加载新版未训练effect模块。
@@ -56,6 +56,8 @@ source object state + latent effect + delta-time -> future object state
 | G6 Selector / task A | goal、language 或 policy 是否能选择 query/effect，并在 RoboTwin task A 上产生可用预测？ | 禁止与 XR-2 混淆。 |
 
 任何实验只能推动当前最早未通过的 Gate。后面的 Gate 即使某个指标变好，也不能覆盖前面 Gate 的失败。
+
+2026-10-02用户明确批准一次冻结Stage 1的Stage 2容量/可用性实验（15.51）。此为执行顺序的显式例外，不把G0/G2/G3自动记为通过；仅检验现有表示条件下的transition建模，不作独立object语义或部署selector成功声明。
 
 ## 1. 文档用途与证据规则
 
@@ -3161,3 +3163,98 @@ G0及teacher语义状态不变，本次不更改架构或实验学习目标；�
 tokens/centers干预定位变化的存储位置，不要求只有tokens承担变化，也不把分位数或熵提升为语义分数。
 tracker仍为伪测量，raw displacement可能含相机运动；独立object grouping/删除局部性仅在人工/模拟器标签提供时测量，缺失明确未测。
 本次新增数学回归与静态审查，真实held结果待用户执行；G0 teacher/object独立有效性仍未通过，不由重建成绩自动晋级Dynamics。
+
+### 15.49 2026-10-02 State变化held结果：几何可用，object语义未测
+
+**Evidence / execution**
+
+从W&B run `gaiahhsw`实际读取完整report artifact、12个case Tables（57,600行）、paired Table（4,000行）及400行case inventory，
+不是训练曲线或summary截图。评测revision `aed14bb57e71932965f0bf5d9e55b985cb385882`；checkpoint为V69 v1 `40e4586`、
+State step 6000；单卡前台完成，五源各80个held episode、400 clips、decode failure为0。独立annotation未提供。
+有386 clips提供有效t=0与continuation配对测量，motion-active门槛5px；共557,523个运动point/frame测量。
+运行地址：https://wandb.ai/healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world/runs/gaiahhsw
+
+**Results / interpretation**
+
+下表是各clip先计算motion-active平均误差，再取跨clip的p50/p90；normalized列先逐测量除以真实位移，再在clip内平均，最后取跨clipp50。
+
+| Condition | Change error p50 / p90 (px) | Normalized change error p50 |
+| --- | --- | --- |
+| observed State | 8.825 / 29.261 | 0.300 |
+| frozen State | 44.231 / 111.132 | 1.000 |
+| shuffled State | 36.835 / 100.986 | 1.160 |
+| frozen tokens | 11.126 / 34.570 | 0.381 |
+| frozen centers | 39.771 / 100.219 | 0.958 |
+
+逐clip配对后，observed优于frozen State、shuffled State、frozen tokens的比例分别为96.63%、97.93%、87.82%。
+相对frozen的逐clip误差降幅中位数79.33%；4000次clip bootstrap CI95为77.65%--81.20%，不涵盖teacher系统偏差。
+冻结centers时还原位移幅度的clip中位数仅4.02px，observed为38.73px，真实为44.23px；运动还原主要依赖更新的geometry。
+这与readout显式使用root center、relative carrier centers及feature residual一致：冻结tokens仍改变geometry与carrier混合，
+不能把干预损失直接解释为“多少百分比信息存在feature中”。tokens更新在多数clip改善还原，但尚未验证独立pose/articulation/interaction属性。
+shuffled干预只证明State内容须对应正确观测帧，不证明history的额外价值或未观测未来预测能力。
+
+| Source | Motion clips | Observed change p50 / p90 (px) | Normalized p50 |
+| --- | --- | --- | --- |
+| Agibot | 79 | 12.81 / 28.32 | 0.390 |
+| Bridge | 71 | 6.54 / 15.72 | 0.193 |
+| HY | 78 | 3.62 / 5.59 | 0.194 |
+| RoboMIND | 79 | 14.86 / 50.45 | 0.633 |
+| RoboTwin | 79 | 11.61 / 30.29 | 0.309 |
+
+HY为424x240、Bridge为256x256，其余数据为640x480或518x518；不能仅凭pixel误差排序源质量。
+RoboMIND有10/79个motion clips的逐测量normalized误差均值超过1，observed优于frozen的比例87.34%；
+其失败不能在未看视频/独立标签前归因为数据质量或teacher错误。典型候选`robomind_ep50078_f303`，
+实际移动平均34.48px、还原误差72.74px、2,532个运动测量；不是只有一个点的统计异常。
+小运动仍差：真实位移<1px时observed clip误差中位数1.26px，freeze为0.394px；1--5px时2.322px对2.072px。
+5--20px normalized为0.527，>=50px为0.159；不能用整体运动提升掩盖静止抖动与小运动问题。
+absolute position与change误差接近相同（最大clip均值差约2.1e-5px），因有效t=0测点就是history校准reference，
+不算两条独立证据。独立object grouping、真实visibility、遮挡重现及非几何dynamic feature均未证明。
+
+**Impact / next experiment**
+
+保留当前State/readout作为“观测变化可还原”的accepted能力，不据此换encoder或回退dense reconstruction，也不宣布object State完整成立。
+下一步在同一held集合比较后续checkpoint，检查geometry改善是否保留且小运动抖动是否减轻；同时用少量独立多物体标注验证query/entity对应、
+跨部位一致运动、背景/机械臂混合及遮挡重现。现有annotation template可复用，不先增加整库标签或重训新架构。
+这是一张6000-step截面，不是饱和判定；仍不以State拟合自动晋级Dynamics。G0 teacher/object独立有效性保持未通过。
+
+### 15.50 2026-10-02 Stage handoff标准与梯度趋势
+
+**What changed**
+
+- 将“可启动Stage 2可行性实验”与“可宣称object State成立/扩展长训”分开。6000步held结果支持前者的候选资格：观测变化能还原且State干预有效；后者仍需独立entity对应证据。Stage 1不以固定步数、feature独自承担运动或gradient norm低于某常数作为毕业条件。
+- Stage 2候选应补测实际冻结EMA target/readout路径，并在同一held集合与后续checkpoint比较小运动漂移和尾部误差。冻结表示的Dynamics实验再检验正确posterior相对zero/shuffled的收益、绝对误差以及距observed-state解码上限的差距；不要求先在Stage 1证明尚未训练的预测能力。
+- W&B `0oko1yhr`本轮显示crashed，最后同步7540步（2026-10-02 15:30:26 CST）；读取3500步后全部203条记录。四个窗口3500–4500、4500–5500、5500–6500、6540–7540的preclip gradient norm中位数为8.37、18.82、69.91、155.48，最后窗口50条记录、最大364.88。对应transport均值5.851、5.313、4.918、4.772；appearance为0.329、0.337、0.371、0.392。代码裁剪阈值5，LR持续下降；这是持续梯度放大且目标改善不一致，不证明梯度导致中断。W&B文件未提供异常console日志，当前也无逐模块/逐loss梯度归因。
+
+**Why**
+
+State的任务是为后续变化建模保留足够且对应正确实体的信息，而不是无限压低训练拟合；必须用冻结表示下的实际预测检验最后一段可用性，避免把观测还原等同于未来预测。
+
+**Impact**
+
+本轮仅分析与记录，未停止、恢复或启动训练。当前r2 Stage 2为每query4x64连续effect、144个512维state tokens、8轮local effect cross-attention加global interaction，Dynamics约51.3M、Posterior约12.7M参数。现有入口全模型strict加载旧v1 State会缺少新增`posterior.geometry`参数；正式启动前需明确迁移State/EMA/readout并新建Posterior/Dynamics，不能把旧v1 checkpoint直接宣称为新版兼容resume。
+
+### 15.51 2026-10-02 冻结Stage 1，扩大Stage 2容量并明确迁移
+
+**Hypothesis / decision**
+
+用户批准开启Stage 2，不再无限延长State训练。主实验扩大transition网络内部容量，而不增加State token数、不改变teacher、不重训视觉encoder。由Sol 6.1 high实现，父任务负责设计、代码审阅、静态核对和交付。此实验回答冻结表示能否支持连续effect驱动的未来预测，不宣称已通过独立object validity。
+
+**Frozen controls / inherited assets**
+
+- 固定使用W&B `gaiahhsw`已评测的6000步State快照：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/object_video_v69_state_change_held_aed14bb_20261001_235841/checkpoint_snapshot.pt`。路径来自W&B运行配置与评测代码的快照命名，本轮未直接访问服务器文件。
+- 继承原State训练目录的`dataset.json`、冻结DINO、online State encoder、EMA encoder和readout；State仍为16 queries x 9 tokens x 512维、原生空间坐标、3秒16帧历史与5秒25帧未来。
+- 不继承旧Posterior/Dynamics、optimizer、scheduler、W&B run或数据游标。新阶段是独立初始化；只有新Stage 2自身中断后才恢复完整训练状态。
+
+**Primary change / execution**
+
+Stage 2内部1024维、16 heads，Dynamics 12轮local effect cross-attention与global object interaction；Posterior 4层，effect仍为每query4x64。独立输入/输出投影连接冻结的512维State；静态参数形状计算Posterior 51,103,872、Dynamics 305,594,882，共356,698,754，服务器model inventory将记录实际计数。保留小模型默认值以兼容旧调用，新入口显式选择large配置。长序列采用activation checkpointing控制反向显存，不裁短时间跨度。
+
+八卡前台、每卡B=2、global batch256（accum16），30000 steps、peak LR2e-4、5% warmup、floor0.1xpeak；每250步恢复checkpoint、每2500步编号保存。训练不访问GitHub、不下载模型；W&B online同步。拉取部署、单卡测试、八卡训练为三个可独立执行的步骤。
+
+**Evidence / falsification / next step**
+
+增加真实State初始化后的全容量BF16训练与保存恢复对照，测试不重新训练Stage 1。训练记录Posterior/Dynamics裁剪前梯度、实际参数量、direct/rollout/zero/shuffled误差以及冻结EMA State与current-copy还原误差。绝对误差、逐案例/来源/时间分布仍为科学评测重点；均值、工程通过或短测试不提升为语义证据。
+
+实现已完成，9个Python文件AST解析、3个新Shell及runbook中4组独立命令语法检查和git diff --check通过。测试入口默认真实6000步快照，完整16+25帧、B1、两次更新，比较恢复与连续运行；报告`test_report.json`、`dynamics_resume_comparison.json`同步W&B。新增`observed_target_transport`、`current_state_copy_transport`、`last_observation_copy_transport`明确区分EMA观测还原、冻结当前State和最后可见测点，不进入loss。
+
+本轮没有本地模型前向或GPU训练；服务器端到端测试和八卡长训由用户执行，尚无新训练结果。指令与严格resume见`OBJECT_VIDEO_STAGE2_V69_RUNBOOK.md`。若correct effect不优于zero/shuffled，或更大网络不能接近观测State的可还原水平，则容量扩展假设不成立，按实际误差定位，不据模型大小宣布成功。

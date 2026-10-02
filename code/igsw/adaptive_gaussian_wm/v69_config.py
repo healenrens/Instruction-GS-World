@@ -17,8 +17,13 @@ class ObjectVideoConfigV69:
     observation_layers: int = 4
     memory_layers: int = 4
     posterior_layers: int = 4
+    posterior_width: int | None = None
+    posterior_heads: int | None = None
     posterior_geometry: bool = True
     dynamics_layers: int = 8
+    dynamics_width: int | None = None
+    dynamics_heads: int | None = None
+    dynamics_checkpoint_blocks: bool = False
     effect_tokens: int = 4
     effect_dim: int = 64
     readout_width: int = 512
@@ -47,6 +52,22 @@ class ObjectVideoConfigV69:
     @property
     def tokens_per_object(self):
         return 1 + self.local_carriers
+
+    @property
+    def posterior_hidden_width(self):
+        return self.width if self.posterior_width is None else self.posterior_width
+
+    @property
+    def posterior_attention_heads(self):
+        return self.heads if self.posterior_heads is None else self.posterior_heads
+
+    @property
+    def dynamics_hidden_width(self):
+        return self.width if self.dynamics_width is None else self.dynamics_width
+
+    @property
+    def dynamics_attention_heads(self):
+        return self.heads if self.dynamics_heads is None else self.dynamics_heads
 
 
 def parameter_inventory(modules):

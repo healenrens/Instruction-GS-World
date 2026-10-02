@@ -20,6 +20,10 @@ def add_v69_arguments(parser):
     parser.add_argument("--config", default="")
     parser.add_argument("--stage", choices=("state", "dynamics"), default="state")
     parser.add_argument("--state_checkpoint", default="")
+    parser.add_argument("--stage2_preset", choices=("legacy", "large"), default="legacy",
+                        help="Fresh Stage2 capacity; large keeps State512 and uses Dynamics1024x12/Posterior1024x4, 16 heads.")
+    parser.add_argument("--dynamics_checkpoint_blocks", action="store_true",
+                        help="Recompute training Dynamics local/global blocks during backward, preserving RNG.")
     parser.add_argument("--posterior_geometry", choices=("inherit", "on", "off"), default="inherit")
     parser.add_argument("--resume", default="")
     parser.add_argument("--seed", type=int, default=17)
@@ -42,10 +46,45 @@ def add_v69_arguments(parser):
     return parser
 
 
-def config_from_args(args):
-    values = json.loads(Path(args.config).read_text()) if args.config else {}
-    config = ObjectVideoConfigV69(**{**values, "encoder": args.encoder})
+def config_from_args(args, state_config=None):
+    values = state_config.to_dict() if state_config is not None else {}
+    if args.config:
+        values.update(json.loads(Path(args.config).read_text()))
+    encoder = state_config.encoder if state_config is not None else args.encoder
+    config = ObjectVideoConfigV69(**{**values, "encoder": encoder})
+    if args.stage == "dynamics":
+        config = replace(config, architecture="pretrained_query_object_video_sequence_v2")
+        if args.stage2_preset == "large":
+            config = replace(config, architecture="pretrained_query_object_video_sequence_v3_stage2_large",
+                             dynamics_width=1024, dynamics_heads=16, dynamics_layers=12,
+                             posterior_width=1024, posterior_heads=16, posterior_layers=4, posterior_geometry=True)
+        if args.dynamics_checkpoint_blocks:
+            config = replace(config, dynamics_checkpoint_blocks=True)
     return replace(config, posterior_geometry=args.posterior_geometry == "on") if args.posterior_geometry != "inherit" else config
+
+
+@torch.no_grad()
+def gradient_metrics_v69(model):
+    """Preclip accumulated/DDP-synchronized gradients, including every trainable block."""
+    modules = dict(model.named_children())
+    for root in ("posterior", "dynamics"):
+        for name, module in getattr(model, root).named_children():
+            if isinstance(module, torch.nn.ModuleList):
+                modules.update({f"{root}/{name}/{index}": block for index, block in enumerate(module)})
+            else:
+                modules[f"{root}/{name}"] = module
+    records = {}
+    for name, module in modules.items():
+        gradients = [p.grad.detach().float() for p in module.parameters() if p.grad is not None]
+        if gradients:
+            records[name] = torch.stack((
+                torch.stack([torch.linalg.vector_norm(g) for g in gradients]).norm(),
+                torch.stack([g.abs().max() for g in gradients]).max(),
+                torch.stack([g.isfinite().all() for g in gradients]).all().float()))
+    values = torch.stack(list(records.values())).cpu().tolist()
+    return {f"gradient_preclip/{name}/{statistic}": value
+            for name, row in zip(records, values)
+            for statistic, value in zip(("l2", "max_abs", "finite"), row)}
 
 
 def batch_is_readable(batch, context, device):

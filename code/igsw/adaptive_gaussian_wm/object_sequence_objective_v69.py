@@ -62,6 +62,13 @@ def object_sequence_loss_v69(output, batch, config, stage):
         parts["rollout_transport"] = masked_mean_v69(roll_error, weight)
         parts["shuffled_transport"] = masked_mean_v69(shuffled_error.detach(), weight)
         parts["zero_effect_transport"] = masked_mean_v69(zero_error.detach(), weight)
+        with torch.no_grad():
+            observed_error, _ = trajectory_error_v69(output["observed_target_positions"], target, batch["native_hw"])
+            current_error, _ = trajectory_error_v69(output["current_state_copy_positions"], target, batch["native_hw"])
+            last_error, _ = trajectory_error_v69(teacher["reference_xy"][:, None].expand_as(target), target, batch["native_hw"])
+            parts["observed_target_transport"] = masked_mean_v69(observed_error, weight)
+            parts["current_state_copy_transport"] = masked_mean_v69(current_error, weight)
+            parts["last_observation_copy_transport"] = masked_mean_v69(last_error, weight)
         prediction = output["rollout_positions"]
         # Neighbor-relative displacement cancels shared translation; not a claim of 3D camera compensation.
         reference = teacher["reference_xy"]

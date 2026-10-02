@@ -110,10 +110,14 @@ class ObjectVideoWorldModelV69(nn.Module):
                 shuffled = self.render_sequence(shuffled_states, teacher["reference_xy"], ownership, offset, local)
                 zero_states = self.dynamics(history[-1], torch.zeros_like(effect["value"]), times, rollout=False)
                 zero = self.render_sequence(zero_states, teacher["reference_xy"], ownership, offset, local)
+                observed_target = self.render_sequence(targets, teacher["reference_xy"], ownership, offset, local)
+                current_copy = self.render_sequence([history[-1]], teacher["reference_xy"], ownership, offset, local)
             output.update(effect=effect,
                           target_states=targets, direct_states=direct_states, rollout_states=rollout_states,
                           direct_positions=direct["positions"], rollout_positions=rollout["positions"],
                           shuffled_positions=shuffled["positions"], zero_positions=zero["positions"],
+                          observed_target_positions=observed_target["positions"],
+                          current_state_copy_positions=current_copy["positions"].expand_as(observed_target["positions"]),
                           rollout_visibility=rollout["visibility"])
         loss, parts, epe = object_sequence_loss_v69(output, batch, self.config, self.stage)
         output.update(loss=loss, parts=parts, epe_px=epe)

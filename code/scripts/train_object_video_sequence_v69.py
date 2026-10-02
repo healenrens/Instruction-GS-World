@@ -4,7 +4,6 @@
 import argparse
 from collections import Counter
 from contextlib import nullcontext
-from dataclasses import replace
 import json
 import math
 import os
@@ -23,7 +22,8 @@ from torch.utils.data import DataLoader
 from igsw.distributed import init_torchrun
 from igsw.adaptive_gaussian_wm.v69_config import ObjectVideoConfigV69, parameter_inventory
 from igsw.adaptive_gaussian_wm.object_video_manifest_v69 import load_object_video_manifest_v69
-from igsw.adaptive_gaussian_wm.v69_runtime import add_v69_arguments, config_from_args, batch_is_readable, case_metrics_v69, append_case_records
+from igsw.adaptive_gaussian_wm.v69_runtime import add_v69_arguments, config_from_args, batch_is_readable, case_metrics_v69, append_case_records, gradient_metrics_v69
+from igsw.adaptive_gaussian_wm.state_change_evaluation_v69 import load_state_modules_v69
 from igsw.adaptive_gaussian_wm.v69_resume_diagnostics import configure_reproducibility_v69, step_inputs_v69, save_step_trace_v69
 from igsw.adaptive_gaussian_wm.episode_uniform_sampler_v69 import EpisodeUniformSamplerV69
 from igsw.adaptive_gaussian_wm.episode_uniform_sampler_v69 import episode_key
@@ -35,18 +35,23 @@ from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
 
 def main():
     args = add_v69_arguments(argparse.ArgumentParser(description=__doc__)).parse_args()
-    checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False) if args.resume else None
+    checkpoint = torch.load(args.resume, map_location="cpu", mmap=True, weights_only=False) if args.resume else None
     if checkpoint is not None:
-        args = argparse.Namespace(**{"deterministic": False, "resume_trace": False, "posterior_geometry": "inherit", **checkpoint["args"],
+        args = argparse.Namespace(**{"deterministic": False, "resume_trace": False, "posterior_geometry": "inherit",
+                                     "stage2_preset": "legacy", "dynamics_checkpoint_blocks": False, **checkpoint["args"],
                                      "resume": args.resume, "workers": args.workers, "stop_after": args.stop_after})
     numerical_mode = configure_reproducibility_v69(args.deterministic)
     context = init_torchrun()
     device = torch.device(context.device)
-    state_checkpoint = torch.load(args.state_checkpoint, map_location="cpu", weights_only=False) if args.stage == "dynamics" and checkpoint is None else None
+    state_checkpoint = torch.load(args.state_checkpoint, map_location="cpu", mmap=True, weights_only=False) if args.stage == "dynamics" and checkpoint is None else None
     inherited = checkpoint if checkpoint is not None else state_checkpoint
-    config = ObjectVideoConfigV69(**inherited["config"]) if inherited is not None else config_from_args(args)
-    if checkpoint is None and args.posterior_geometry != "inherit":
-        config = replace(config, posterior_geometry=args.posterior_geometry == "on")
+    if checkpoint is not None:
+        config = ObjectVideoConfigV69(**checkpoint["config"])
+    else:
+        state_config = ObjectVideoConfigV69(**state_checkpoint["config"]) if state_checkpoint is not None else None
+        config = config_from_args(args, state_config)
+    args.encoder = config.encoder
+    state_initialization = checkpoint.get("state_initialization") if checkpoint is not None else None
     torch.manual_seed(args.seed + context.rank)
     random.seed(args.seed + context.rank)
     out = Path(args.out)
@@ -70,8 +75,20 @@ def main():
     perception = PretrainedVisualEncoderV69(config.encoder, args.encoder_repository, args.encoder_weights,
                      args.encoder_frame_batch, history_seconds=config.history_seconds, saved_backbone=saved_backbone).to(device)
     model = ObjectVideoWorldModelV69(config, args.stage).to(device)
-    if inherited is not None:
-        model.load_state_dict(inherited["model"], strict=True)
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint["model"], strict=True)
+    elif state_checkpoint is not None:
+        loaded_modules = load_state_modules_v69(model, state_checkpoint["model"])
+        state_initialization = {"checkpoint": str(Path(args.state_checkpoint).resolve()), "step": state_checkpoint["step"],
+                                "architecture": state_checkpoint["architecture"], "config": state_checkpoint["config"],
+                                "source_revision": state_checkpoint["args"]["source_revision"],
+                                "perception_provenance": state_checkpoint["perception_provenance"],
+                                "strict_loaded_modules": loaded_modules, "saved_perception_loaded_strictly": True,
+                                "fresh_modules": ["posterior", "dynamics"], "optimizer_inherited": False}
+    if checkpoint is not None:
+        perception.provenance = checkpoint["perception_provenance"]
+    elif state_checkpoint is not None:
+        perception.provenance["saved_perception_provenance"] = state_checkpoint["perception_provenance"]
     inventory = parameter_inventory({"perception": perception, "object_memory": model.encoder, "EMA_memory": model.target_encoder,
                                      "readout": model.readout, "posterior": model.posterior, "dynamics": model.dynamics})
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=.01)
@@ -89,7 +106,8 @@ def main():
         scheduler.load_state_dict(checkpoint["scheduler"])
         step, epoch, cursor, accum = checkpoint["step"], checkpoint["epoch"], checkpoint["cursor"], checkpoint["grad_accum"]
     if context.is_main:
-        write_json(out / "model_inventory.json", {"modules": inventory, "config": config.to_dict(), "perception": perception.provenance})
+        write_json(out / "model_inventory.json", {"modules": inventory, "config": config.to_dict(), "perception": perception.provenance,
+                                                 "state_initialization": state_initialization})
         episodes = set(episode_key(entry) for entry in dataset.entries)
         sampling = {"unique_episodes": len(episodes), "source_episodes": dict(Counter(key[0] for key in episodes)),
                     "source_clips": dict(Counter(entry["source"] for entry in dataset.entries)),
@@ -98,7 +116,10 @@ def main():
         if checkpoint is None:
             write_json(out / "run.json", {"args": vars(args), "config": config.to_dict(), "world_size": context.world_size,
                        "grad_accum": accum, "effective_batch": accum*args.batch*context.world_size, "sampling": sampling,
-                       "numerical_mode": numerical_mode})
+                       "numerical_mode": numerical_mode, "state_initialization": state_initialization})
+            write_json(out / "initialization.json", {"state_initialization": state_initialization,
+                       "optimizer_state_entries": len(optimizer.state), "step": step, "epoch": epoch, "cursor": cursor,
+                       "config": config.to_dict(), "trainable_modules": [name for name, row in inventory.items() if row["trainable_parameters"]]})
         print(json.dumps({"event": "v69_model_inventory", "modules": inventory, "config": config.to_dict()}), flush=True)
     wrapped = DistributedDataParallel(model, device_ids=[context.local_rank], broadcast_buffers=False) if context.distributed else model
     run = None
@@ -111,7 +132,10 @@ def main():
                          id=checkpoint["wandb_id"] if checkpoint is not None else None,
                          resume="must" if checkpoint is not None and checkpoint["wandb_id"] else None,
                          config={**vars(args), **config.to_dict(), "model_inventory": inventory,
-                                 "effective_batch": accum*args.batch*context.world_size, "sampling": sampling, "numerical_mode": numerical_mode})
+                                 "effective_batch": accum*args.batch*context.world_size, "sampling": sampling,
+                                 "numerical_mode": numerical_mode, "state_initialization": state_initialization})
+        run.summary.update({f"parameters/{name}/{key}": value for name, row in inventory.items() for key, value in row.items()})
+        run.summary["parameters/stage2_trainable"] = sum(inventory[name]["trainable_parameters"] for name in ("posterior", "dynamics"))
     model.train()
     perception.eval()
     optimizer.zero_grad(set_to_none=True)
@@ -134,7 +158,8 @@ def main():
                      "model": model.state_dict(), "perception": perception.backbone.state_dict(), "perception_provenance": perception.provenance,
                      "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "rng": states,
                      "step": step, "epoch": epoch, "cursor": cursor, "grad_accum": accum,
-                     "world_size": context.world_size, "wandb_id": run.id if run else None, "numerical_mode": numerical_mode}
+                     "world_size": context.world_size, "wandb_id": run.id if run else None, "numerical_mode": numerical_mode,
+                     "state_initialization": state_initialization}
             temporary = out / "latest.tmp.pt"
             torch.save(value, temporary)
             temporary.replace(out / "latest.pt")
@@ -176,6 +201,8 @@ def main():
             accumulated = values if accumulated is None else accumulated+values
             if not boundary:
                 continue
+            log_step = step == 0 or (step+1) % args.log_every == 0
+            gradient_metrics = gradient_metrics_v69(model) if log_step else {}
             grad = torch.nn.utils.clip_grad_norm_(model.parameters(), 5., error_if_nonfinite=True)
             missing_gradients = [name for name, parameter in model.named_parameters() if parameter.requires_grad and parameter.grad is None]
             optimizer.step()
@@ -185,12 +212,13 @@ def main():
             step += 1
             pending = 0
             values, accumulated = accumulated/accum, None
-            if step == 1 or step % args.log_every == 0:
+            if log_step:
                 if context.distributed:
                     dist.all_reduce(values)
                     values /= context.world_size
                 metrics = dict(zip(["loss", *output["parts"]], values.cpu().tolist()))
                 perception_end.synchronize()
+                metrics.update(gradient_metrics)
                 metrics.update(step=step, lr=optimizer.param_groups[0]["lr"], gradient_norm=float(grad),
                                trainable_parameters_without_gradient=missing_gradients,
                                perception_gpu_seconds_last_microbatch=perception_start.elapsed_time(perception_end)/1000,
