@@ -134,11 +134,14 @@ def main():
     traces = sorted((stage_out / "resume_trace_rank0000").glob("*.pt"))
     assert len(traces) == steps
     tested_case_ids = set()
+    effect_dtypes = set()
     for path in traces:
         trace = torch.load(path, map_location="cpu", weights_only=False)
         tested_case_ids.update(trace["case_id"])
         assert trace["effect_value"].shape == (1, 16, 4, 64)
-        assert trace["effect_value"].dtype == torch.bfloat16
+        # Autocast may promote Gaussian sampling to FP32 after exp().
+        assert trace["effect_value"].dtype in (torch.bfloat16, torch.float32)
+        effect_dtypes.add(str(trace["effect_value"].dtype))
         assert trace["source_tokens"].shape == (1, 16, config.tokens_per_object, 512)
         assert trace["frame_indices"].shape == (1, 41)
         assert trace["effect_value"].isfinite().all()
@@ -169,7 +172,7 @@ def main():
     report = {"status": "passed_runtime_contract", "architecture": config.architecture, "config": config.to_dict(),
               "state_initialization": initialization["state_initialization"], "initialization": initialization,
               "parameter_inventory": inventory, "stage2_trainable_parameters": trainable,
-              "training_dtype": "bfloat16_autocast", "training_steps": steps,
+              "training_dtype": "bfloat16_autocast", "effect_dtypes": sorted(effect_dtypes), "training_steps": steps,
               "effect_shape": [1, 16, 4, 64], "state_shape": [1, 16, config.tokens_per_object, 512],
               "native_hw": batch["native_hw"].cpu().tolist(), "selected_sources": sorted(grouped),
               "tested_case_ids": sorted(tested_case_ids),
