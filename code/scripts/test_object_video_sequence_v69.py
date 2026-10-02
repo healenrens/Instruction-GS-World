@@ -22,6 +22,7 @@ from igsw.adaptive_gaussian_wm.pretrained_visual_encoder_v69 import PretrainedVi
 from igsw.adaptive_gaussian_wm.object_video_world_model_v69 import ObjectVideoWorldModelV69
 from igsw.adaptive_gaussian_wm.object_sequence_readout_v69 import appearance_binding_target_v69
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
+from igsw.adaptive_gaussian_wm.swanlab_tracking_v69 import start_swanlab_v69, set_results_v69, log_evidence_v69
 
 
 def run_training(args, manifest, out, stage, steps, stop_after, state_checkpoint="", resume=""):
@@ -30,7 +31,7 @@ def run_training(args, manifest, out, stage, steps, stop_after, state_checkpoint
                "--encoder", args.encoder, "--encoder_repository", args.encoder_repository, "--encoder_weights", args.encoder_weights,
                "--encoder_frame_batch", str(args.encoder_frame_batch), "--steps", str(steps), "--stop_after", str(stop_after),
                "--batch", "1", "--global_batch", "1", "--workers", "0", "--seed", str(args.seed),
-               "--log_every", "1", "--save_every", str(steps), "--recovery_every", "1", "--wandb_mode", "disabled",
+               "--log_every", "1", "--save_every", str(steps), "--recovery_every", "1", "--swanlab_mode", "disabled",
                "--deterministic", "--resume_trace",
                "--posterior_geometry", args.posterior_geometry,
                "--stage2_preset", args.stage2_preset,
@@ -56,13 +57,7 @@ def main():
     configure_reproducibility_v69(True)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    run = None
-    if args.wandb_mode != "disabled":
-        import wandb
-        os.environ.pop("WANDB_RUN_ID", None)
-        os.environ.pop("WANDB_RESUME", None)
-        run = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
-                         group="object-video-sequence-v69", job_type="single-gpu-integration", mode=args.wandb_mode, config=vars(args))
+    run = start_swanlab_v69(args, "object-video-sequence-v69", "single-gpu-integration")
     manifest = load_object_video_manifest_v69(args.manifest)
     grouped = defaultdict(list)
     for entry in manifest["entries"]:
@@ -98,10 +93,8 @@ def main():
                           "passed": comparison["passed"], "model_max_abs_difference": comparison["model_max_abs_difference"],
                           "first_trace_mismatch": comparison["first_trace_mismatch"]}), flush=True)
         if run:
-            run.summary[f"resume/{stage}"] = comparison
-            artifact = wandb.Artifact(f"{args.wandb_name}-{stage}-resume", type="resume-comparison")
-            artifact.add_file(str(comparison_path))
-            run.log_artifact(artifact)
+            set_results_v69(run, {f"resume/{stage}": comparison})
+            log_evidence_v69(run, [comparison_path], out)
         assert comparison["passed"], f"resume comparison failed: {stage}; first divergence and numerical differences saved in {comparison_path}"
         resume_comparisons[stage] = comparison
         resume_differences[stage] = comparison["model_max_abs_difference"]
@@ -117,7 +110,7 @@ def main():
                     "--manifest", str(eval_manifest), "--out", str(evaluation_out),
                     "--checkpoint", str(out / "dynamics/latest.pt"), "--items", "1", "--visualize", "1",
                     "--encoder_repository", args.encoder_repository, "--encoder_weights", args.encoder_weights,
-                    "--encoder_frame_batch", str(args.encoder_frame_batch), "--wandb_mode", "disabled"], check=True)
+                    "--encoder_frame_batch", str(args.encoder_frame_batch), "--swanlab_mode", "disabled"], check=True)
     checkpoint = torch.load(out / "state/latest.pt", map_location="cpu", weights_only=False)
     config = ObjectVideoConfigV69(**checkpoint["config"])
     device = torch.device("cuda:0")
@@ -183,14 +176,11 @@ def main():
               "object_semantics_verified": False, "training_checkpoints_are_test_only": True}
     write_json(out / "test_report.json", report)
     if run:
-        run.summary.update(report)
-        artifact = wandb.Artifact(args.wandb_name, type="object-video-runtime-test")
-        artifact.add_file(str(out / "test_report.json"))
-        artifact.add_dir(str(evaluation_out), name="evaluation_runtime")
+        set_results_v69(run, report)
+        paths = [out / "test_report.json", evaluation_out]
         for stage in ("state", "dynamics"):
-            artifact.add_file(str(out / stage / "model_inventory.json"), name=f"{stage}_model_inventory.json")
-            artifact.add_file(str(out / stage / "progress.json"), name=f"{stage}_progress.json")
-        run.log_artifact(artifact)
+            paths += [out / stage / "model_inventory.json", out / stage / "progress.json"]
+        log_evidence_v69(run, paths, out)
         run.finish()
     print(json.dumps(report), flush=True)
 

@@ -5,7 +5,6 @@ import argparse
 from collections import Counter
 import html
 import json
-import os
 from pathlib import Path
 import random
 import sys
@@ -17,6 +16,10 @@ from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json, deco
 from igsw.adaptive_gaussian_wm.object_video_manifest_v69 import load_object_video_manifest_v69, resolve_object_video_case_v69
 from igsw.adaptive_gaussian_wm.tracker_visual_review_media_v67 import rgb_image, write_video
 from igsw.adaptive_gaussian_wm.video_file_decoder import VideoDecodeError
+from igsw.adaptive_gaussian_wm.swanlab_tracking_v69 import (
+    add_swanlab_arguments, start_swanlab_v69, log_values_v69, log_table_v69,
+    log_video_v69, log_evidence_v69, set_results_v69,
+)
 
 
 def quantiles(value):
@@ -116,10 +119,7 @@ def main():
     p.add_argument("--window_seconds", type=float, default=2.)
     p.add_argument("--stride_seconds", type=float, default=2.)
     p.add_argument("--seed", type=int, default=17)
-    p.add_argument("--wandb_project", default="instruct-gs-world")
-    p.add_argument("--wandb_entity", default="healenrenss-university-of-chinese-acadmic-and-science")
-    p.add_argument("--wandb_mode", default="online", choices=("online", "offline", "disabled"))
-    p.add_argument("--wandb_name", default="object_video_v69_motion_richness_review")
+    add_swanlab_arguments(p, default_name="object_video_v69_motion_richness_review")
     args = p.parse_args()
     manifest = load_object_video_manifest_v69(args.manifest)
     root, out = Path(manifest["root"]), Path(args.out)
@@ -164,23 +164,23 @@ def main():
     write_json(out / "report.json", report)
     write_json(out / "blind_comparisons.json", {"pairs": pairs})
     (out / "index.html").write_text("\n".join(body), encoding="utf-8")
-    if args.wandb_mode != "disabled":
-        import wandb
-        os.environ.pop("WANDB_RUN_ID", None)
-        os.environ.pop("WANDB_RESUME", None)
-        run = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
-                         group="object-video-sequence-v69", job_type="motion-evidence", mode=args.wandb_mode, config=vars(args))
-        table = wandb.Table(columns=["case", "source", "window", "start_seconds", "measurable_points", "span_p90_px", "relative_span_p90", "grid_coverage", "raw", "tracks"])
+    run = start_swanlab_v69(args, group="object-video-sequence-v69", job_type="motion-evidence", config=vars(args))
+    if run is not None:
+        table_rows = []
         for row in rows:
             media = row.get("media", {})
-            table.add_data(row["case"], row["source"], row["window_id"], row["start_seconds"], row["measurable_points"],
-                           row["compensated_span_px"]["p90"], row["relative_span_image_diagonal"]["p90"], row["motion_covered_grid_fraction"],
-                           wandb.Video(media["raw"], format="mp4") if media.get("status") == "rendered" else None,
-                           wandb.Video(media["tracks"], format="mp4") if media.get("status") == "rendered" else None)
-        run.log({"motion_evidence/windows": table, "motion_evidence/sampling_modified": False})
-        artifact = wandb.Artifact(args.wandb_name, type="motion-evidence-review")
-        artifact.add_dir(str(out))
-        run.log_artifact(artifact)
+            table_rows.append([row["case"], row["source"], row["window_id"], row["start_seconds"], row["measurable_points"],
+                               row["compensated_span_px"]["p90"], row["relative_span_image_diagonal"]["p90"],
+                               row["motion_covered_grid_fraction"], media.get("raw", ""), media.get("tracks", "")])
+            if media.get("status") == "rendered":
+                for name in ("raw", "tracks", "relay"):
+                    log_video_v69(run, f"motion_evidence/{row['case']}/{row['window_id']}/{name}", media[name])
+        log_table_v69(run, "motion_evidence/windows",
+                      ["case", "source", "window", "start_seconds", "measurable_points", "span_p90_px",
+                       "relative_span_p90", "grid_coverage", "raw", "tracks"], table_rows)
+        log_values_v69(run, {"motion_evidence/sampling_modified": False})
+        set_results_v69(run, {"status": report["status"], "clip_counts": report["clip_counts"], "sampling_modified": False})
+        log_evidence_v69(run, [out / "report.json", out / "blind_comparisons.json", out / "index.html"], base_path=out)
         run.finish()
     print(f"[motion-richness-v69] review={out / 'index.html'} comparisons={out / 'blind_comparisons.json'}", flush=True)
 

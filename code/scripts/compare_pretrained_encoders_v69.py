@@ -3,7 +3,6 @@
 
 import argparse
 import gc
-import os
 from pathlib import Path
 import random
 import sys
@@ -18,6 +17,9 @@ from igsw.adaptive_gaussian_wm.pretrained_visual_encoder_v69 import PretrainedVi
 from igsw.adaptive_gaussian_wm.object_sequence_evaluation_v69 import distribution_v69
 from igsw.adaptive_gaussian_wm.object_sequence_annotations_v69 import independent_measurements_v69
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
+from igsw.adaptive_gaussian_wm.swanlab_tracking_v69 import (
+    add_swanlab_arguments, start_swanlab_v69, log_table_v69, log_evidence_v69, set_results_v69,
+)
 
 
 @torch.no_grad()
@@ -84,10 +86,7 @@ def main():
     p.add_argument("--frame_batch", type=int, default=2)
     p.add_argument("--annotations", default="")
     p.add_argument("--seed", type=int, default=17)
-    p.add_argument("--wandb_project", default="instruct-gs-world")
-    p.add_argument("--wandb_entity", default="healenrenss-university-of-chinese-acadmic-and-science")
-    p.add_argument("--wandb_mode", default="online", choices=("online", "offline", "disabled"))
-    p.add_argument("--wandb_name", default="object_video_v69_frozen_encoder_comparison")
+    add_swanlab_arguments(p, default_name="object_video_v69_frozen_encoder_comparison")
     args = p.parse_args()
     config, device = ObjectVideoConfigV69(), torch.device("cuda:0")
     out = Path(args.out)
@@ -162,21 +161,14 @@ def main():
               "failures": failures, "config": config.to_dict(), "automatic_encoder_selection": False,
               "comparison": "same native resolution, sampled times, points and nearest-feature readout; no fine-tuning"}
     write_json(out / "report.json", report)
-    if args.wandb_mode != "disabled":
-        import wandb
-        os.environ.pop("WANDB_RUN_ID", None)
-        os.environ.pop("WANDB_RESUME", None)
-        run = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
-                         group="object-video-sequence-v69", job_type="encoder-comparison", mode=args.wandb_mode, config=vars(args))
-        for start in range(0, len(all_rows), 5000):
-            table = wandb.Table(columns=["encoder", "case", "source", "seconds", "measurement_source", "count", "mean", "p50", "p90", "p95"])
-            for row in all_rows[start:start+5000]:
-                table.add_data(*[row[name] for name in table.columns])
-            run.log({f"encoder_comparison/cases_{start//5000:04d}": table})
-        run.summary.update({"probes": probes, "measured_rows": len(all_rows), "automatic_encoder_selection": False})
-        artifact = wandb.Artifact(args.wandb_name, type="frozen-encoder-comparison")
-        artifact.add_dir(str(out))
-        run.log_artifact(artifact)
+    run = start_swanlab_v69(args, group="object-video-sequence-v69", job_type="encoder-comparison",
+                            config={**vars(args), "model_config": config.to_dict()})
+    if run is not None:
+        log_table_v69(run, "encoder_comparison/cases",
+                      ["encoder", "case", "source", "seconds", "measurement_source", "count", "mean", "p50", "p90", "p95"],
+                      all_rows)
+        set_results_v69(run, {"probes": probes, "measured_rows": len(all_rows), "automatic_encoder_selection": False})
+        log_evidence_v69(run, [out], base_path=out)
         run.finish()
     print(f"[encoder-compare-v69] report={out / 'report.json'}", flush=True)
 

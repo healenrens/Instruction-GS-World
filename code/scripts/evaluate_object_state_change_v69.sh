@@ -6,7 +6,7 @@ RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 PY="${VENV_ROOT}/.venv/bin/python"
 CHECKPOINT="${CHECKPOINT:-${RUNTIME_ROOT}/outputs/object_video_v69_state_seed17_40e4586_20260929_003931/latest.pt}"
-OUT="${OUT:-${RUNTIME_ROOT}/outputs/v69_state_change_held_$(date +%Y%m%d_%H%M%S)}"
+OUT="${OUT:-${RUNTIME_ROOT}/outputs/v69_state_change_held_$(date +%Y%m%d_%H%M%S)_swanlab}"
 EVAL_NPROC_PER_NODE="${EVAL_NPROC_PER_NODE:-auto}"
 if [[ "${EVAL_NPROC_PER_NODE}" == auto ]]; then
   EVAL_NPROC_PER_NODE="$("${PY}" -c 'import torch; print(min(4, torch.cuda.device_count()))')"
@@ -29,7 +29,7 @@ echo "[state-change-v69] foreground processes=${EVAL_NPROC_PER_NODE} checkpoint=
   --out "${OUT}" --encoder_repository "${ENCODER_REPOSITORY}" --encoder_frame_batch "${ENCODER_FRAME_BATCH:-2}" \
   --items_per_source "${ITEMS_PER_SOURCE:-80}" --visualize_per_source "${VISUALIZE_PER_SOURCE:-8}" \
   --motion_threshold_px "${MOTION_THRESHOLD_PX:-5}" --annotations "${ANNOTATIONS:-}" --seed "${SEED:-17}" \
-  --source_revision "${SOURCE_REVISION}" --wandb_project "${WANDB_PROJECT:-instruct-gs-world}" \
-  --wandb_entity "${WANDB_ENTITY:-healenrenss-university-of-chinese-acadmic-and-science}" \
-  --wandb_name "${RUN_NAME:-$(basename "${OUT}")}" --wandb_mode "${WANDB_MODE:-online}" \
+  --source_revision "${SOURCE_REVISION}" --swanlab_project "${SWANLAB_PROJECT:-instruct-gs-world}" \
+  --swanlab_workspace "${SWANLAB_WORKSPACE:-}" \
+  --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" --swanlab_mode "${SWANLAB_MODE:-online}" \
   2>&1 | tee -a "${OUT}/evaluate.log"

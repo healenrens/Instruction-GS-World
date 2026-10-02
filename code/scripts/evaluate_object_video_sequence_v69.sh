@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
-OUT="${OUT:-${RUNTIME_ROOT}/outputs/object_video_v69_evaluation}"
+OUT="${OUT:-${RUNTIME_ROOT}/outputs/object_video_v69_evaluation_swanlab}"
 ENCODER="${ENCODER:-dinov3_vitl16}"
 if [[ "${ENCODER}" == vjepa2_1_vitl16 ]]; then
   ENCODER_REPOSITORY="${ENCODER_REPOSITORY:-${RUNTIME_ROOT}/third_party/vjepa2}"
@@ -21,7 +21,7 @@ mkdir -p "${OUT}"
   --checkpoint "${CHECKPOINT}" --encoder_repository "${ENCODER_REPOSITORY}" --encoder_weights "${ENCODER_WEIGHTS}" \
   --encoder_frame_batch "${ENCODER_FRAME_BATCH:-2}" --items "${ITEMS:-400}" --visualize "${VISUALIZE:-40}" \
   --effect_samples "${EFFECT_SAMPLES:-4}" \
-  --annotations "${ANNOTATIONS:-}" --seed "${SEED:-17}" --wandb_project "${WANDB_PROJECT:-instruct-gs-world}" \
-  --wandb_entity "${WANDB_ENTITY:-healenrenss-university-of-chinese-acadmic-and-science}" \
-  --wandb_mode "${WANDB_MODE:-online}" --wandb_name "${RUN_NAME:-$(basename "${OUT}")}" \
+  --annotations "${ANNOTATIONS:-}" --seed "${SEED:-17}" --swanlab_project "${SWANLAB_PROJECT:-instruct-gs-world}" \
+  --swanlab_workspace "${SWANLAB_WORKSPACE:-}" \
+  --swanlab_mode "${SWANLAB_MODE:-online}" --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" \
   2>&1 | tee -a "${OUT}/evaluate.log"

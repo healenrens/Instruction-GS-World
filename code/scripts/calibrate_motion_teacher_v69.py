@@ -3,7 +3,6 @@
 
 import argparse
 import json
-import os
 from pathlib import Path
 import sys
 
@@ -12,6 +11,9 @@ import torch
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
 from igsw.adaptive_gaussian_wm.object_video_manifest_v69 import load_object_video_manifest_v69
 from igsw.adaptive_gaussian_wm.object_sequence_evaluation_v69 import distribution_v69
+from igsw.adaptive_gaussian_wm.swanlab_tracking_v69 import (
+    add_swanlab_arguments, start_swanlab_v69, log_table_v69, log_evidence_v69, set_results_v69,
+)
 
 
 def main():
@@ -20,10 +22,7 @@ def main():
     p.add_argument("--annotations", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--thresholds_px", default="1,2,3,5,8")
-    p.add_argument("--wandb_project", default="instruct-gs-world")
-    p.add_argument("--wandb_entity", default="healenrenss-university-of-chinese-acadmic-and-science")
-    p.add_argument("--wandb_mode", choices=("online", "offline", "disabled"), default="online")
-    p.add_argument("--wandb_name", default="object_video_v69_teacher_calibration")
+    add_swanlab_arguments(p, default_name="object_video_v69_teacher_calibration")
     args = p.parse_args()
     manifest = load_object_video_manifest_v69(args.manifest)
     entries = {row["case_id"]: row for row in manifest["entries"]}
@@ -72,21 +71,13 @@ def main():
                              "false_invisible": sum(not r["first_visible"] and r["human_visible"] is True for r in known)},
               "production_threshold_modified": False, "annotation_selection_limits_population_claims": True}
     write_json(out / "report.json", report)
-    if args.wandb_mode != "disabled":
-        import wandb
-        os.environ.pop("WANDB_RUN_ID", None)
-        os.environ.pop("WANDB_RESUME", None)
-        run = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
-                         group="object-video-sequence-v69", job_type="teacher-calibration", mode=args.wandb_mode, config=vars(args))
-        for start in range(0, len(rows), 5000):
-            table = wandb.Table(columns=["case", "source", "object", "point_id", "frame", "human_visible", "first_visible", "relay_visible", "first_error_px", "relay_error_px", "agreement_error_px", "supplied_anchor"])
-            for row in rows[start:start+5000]:
-                table.add_data(*[row[key] for key in table.columns])
-            run.log({f"teacher_calibration/cases_{start//5000:04d}": table})
-        run.summary.update({"visibility": report["visibility"], "threshold_sweep": sweep, "production_threshold_modified": False})
-        artifact = wandb.Artifact(args.wandb_name, type="teacher-calibration")
-        artifact.add_file(str(out / "report.json"))
-        run.log_artifact(artifact)
+    run = start_swanlab_v69(args, group="object-video-sequence-v69", job_type="teacher-calibration", config=vars(args))
+    if run is not None:
+        log_table_v69(run, "teacher_calibration/cases",
+                      ["case", "source", "object", "point_id", "frame", "human_visible", "first_visible", "relay_visible",
+                       "first_error_px", "relay_error_px", "agreement_error_px", "supplied_anchor"], rows)
+        set_results_v69(run, {"visibility": report["visibility"], "threshold_sweep": sweep, "production_threshold_modified": False})
+        log_evidence_v69(run, [out / "report.json"], base_path=out)
         run.finish()
     print(f"[teacher-calibration-v69] report={out / 'report.json'} observations={len(rows)}", flush=True)
 

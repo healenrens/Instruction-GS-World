@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 
 from .v69_config import ObjectVideoConfigV69
+from .swanlab_tracking_v69 import add_swanlab_arguments
 
 
 def add_v69_arguments(parser):
@@ -39,11 +40,7 @@ def add_v69_arguments(parser):
     parser.add_argument("--save_every", type=int, default=2500)
     parser.add_argument("--recovery_every", type=int, default=250)
     parser.add_argument("--source_revision", default="local-unversioned")
-    parser.add_argument("--wandb_project", default="instruct-gs-world")
-    parser.add_argument("--wandb_entity", default="healenrenss-university-of-chinese-acadmic-and-science")
-    parser.add_argument("--wandb_name", default="object_video_sequence_v69")
-    parser.add_argument("--wandb_mode", choices=("online", "offline", "disabled"), default="online")
-    return parser
+    return add_swanlab_arguments(parser)
 
 
 def config_from_args(args, state_config=None):

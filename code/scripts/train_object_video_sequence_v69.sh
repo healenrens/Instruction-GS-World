@@ -5,10 +5,11 @@ ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 PY="${VENV_ROOT}/.venv/bin/python"
-SOURCE_REVISION="${SOURCE_REVISION:-$(<"${ROOT}/SOURCE_REVISION")}"
+SOURCE_REVISION="$(<"${ROOT}/SOURCE_REVISION")"
 STAGE="${STAGE:-state}"
-OUT="${OUT:-${RUNTIME_ROOT}/outputs/object_video_v69_${STAGE}_${SOURCE_REVISION:0:7}}"
+OUT="${OUT:-${RUNTIME_ROOT}/outputs/object_video_v69_${STAGE}_${SOURCE_REVISION:0:7}_swanlab}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+WORKERS_PER_RANK="${WORKERS_PER_RANK:-2}"
 ENCODER="${ENCODER:-dinov3_vitl16}"
 if [[ "${ENCODER}" == vjepa2_1_vitl16 ]]; then
   ENCODER_REPOSITORY="${ENCODER_REPOSITORY:-${RUNTIME_ROOT}/third_party/vjepa2}"
@@ -18,11 +19,12 @@ else
   ENCODER_WEIGHTS="${ENCODER_WEIGHTS:-${RUNTIME_ROOT}/models/dinov3/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth}"
 fi
 if [[ -n "${RESUME:-}" ]]; then
-  mapfile -t SAVED < <("${PY}" -c 'import sys,torch; c=torch.load(sys.argv[1],map_location="cpu",mmap=True,weights_only=False); print(c["world_size"]); print(c["args"]["source_revision"]); print(c["args"]["out"])' "${RESUME}")
+  SAVED_METADATA="$("${PY}" -c 'import sys,torch; c=torch.load(sys.argv[1],map_location="cpu",mmap=True,weights_only=False); print(c["world_size"]); print(c["args"]["out"]); print(c["args"]["workers"]); print(c["args"]["stage"])' "${RESUME}")"
+  mapfile -t SAVED <<< "${SAVED_METADATA}"
   NPROC_PER_NODE="${SAVED[0]}"
-  SOURCE_REVISION="${SAVED[1]}"
-  ROOT="${RUNTIME_ROOT}/runtime/object_video_sequence_v69/releases/${SOURCE_REVISION}"
-  OUT="${SAVED[2]}"
+  OUT="${SAVED[1]}"
+  WORKERS_PER_RANK="${SAVED[2]}"
+  STAGE="${SAVED[3]}"
 fi
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
@@ -41,10 +43,10 @@ echo "[object-video-v69] mode=foreground stage=${STAGE} processes=${NPROC_PER_NO
   --posterior_geometry "${POSTERIOR_GEOMETRY:-inherit}" \
   --resume "${RESUME:-}" --source_revision "${SOURCE_REVISION}" --config "${MODEL_CONFIG:-}" \
   "${NUMERICAL_ARGS[@]}" \
-  --batch "${BATCH_PER_GPU:-2}" --global_batch "${TARGET_GLOBAL_BATCH:-256}" --workers "${WORKERS_PER_RANK:-2}" \
+  --batch "${BATCH_PER_GPU:-2}" --global_batch "${TARGET_GLOBAL_BATCH:-256}" --workers "${WORKERS_PER_RANK}" \
   --steps "${STEPS:-30000}" --stop_after "${STOP_AFTER:-0}" --lr "${LR:-0.0002}" --seed "${SEED:-17}" \
   --log_every "${LOG_EVERY:-20}" --save_every "${SAVE_EVERY:-2500}" --recovery_every "${RECOVERY_EVERY:-250}" \
-  --wandb_project "${WANDB_PROJECT:-instruct-gs-world}" \
-  --wandb_entity "${WANDB_ENTITY:-healenrenss-university-of-chinese-acadmic-and-science}" \
-  --wandb_name "${RUN_NAME:-$(basename "${OUT}")}" --wandb_mode "${WANDB_MODE:-online}" \
+  --swanlab_project "${SWANLAB_PROJECT:-instruct-gs-world}" \
+  --swanlab_workspace "${SWANLAB_WORKSPACE:-}" \
+  --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" --swanlab_mode "${SWANLAB_MODE:-online}" \
   2>&1 | tee -a "${OUT}/train.log"

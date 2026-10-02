@@ -31,15 +31,19 @@ from igsw.adaptive_gaussian_wm.object_video_sequence_dataset_v69 import ObjectVi
 from igsw.adaptive_gaussian_wm.pretrained_visual_encoder_v69 import PretrainedVisualEncoderV69
 from igsw.adaptive_gaussian_wm.object_video_world_model_v69 import ObjectVideoWorldModelV69
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
+from igsw.adaptive_gaussian_wm.swanlab_tracking_v69 import start_swanlab_v69, log_values_v69, log_table_v69
 
 
 def main():
     args = add_v69_arguments(argparse.ArgumentParser(description=__doc__)).parse_args()
+    execution_revision = args.source_revision
+    tracking_args = {key: getattr(args, key) for key in ("swanlab_project", "swanlab_workspace", "swanlab_name", "swanlab_mode")}
     checkpoint = torch.load(args.resume, map_location="cpu", mmap=True, weights_only=False) if args.resume else None
     if checkpoint is not None:
         args = argparse.Namespace(**{"deterministic": False, "resume_trace": False, "posterior_geometry": "inherit",
                                      "stage2_preset": "legacy", "dynamics_checkpoint_blocks": False, **checkpoint["args"],
-                                     "resume": args.resume, "workers": args.workers, "stop_after": args.stop_after})
+                                     "resume": args.resume, "workers": args.workers, "stop_after": args.stop_after, **tracking_args})
+    args.execution_revision = execution_revision
     numerical_mode = configure_reproducibility_v69(args.deterministic)
     context = init_torchrun()
     device = torch.device(context.device)
@@ -123,19 +127,16 @@ def main():
         print(json.dumps({"event": "v69_model_inventory", "modules": inventory, "config": config.to_dict()}), flush=True)
     wrapped = DistributedDataParallel(model, device_ids=[context.local_rank], broadcast_buffers=False) if context.distributed else model
     run = None
-    if context.is_main and args.wandb_mode != "disabled":
-        import wandb
-        os.environ.pop("WANDB_RUN_ID", None)
-        os.environ.pop("WANDB_RESUME", None)
-        run = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
-                         group="object-video-sequence-v69", job_type=args.stage, mode=args.wandb_mode,
-                         id=checkpoint["wandb_id"] if checkpoint is not None else None,
-                         resume="must" if checkpoint is not None and checkpoint["wandb_id"] else None,
-                         config={**vars(args), **config.to_dict(), "model_inventory": inventory,
-                                 "effective_batch": accum*args.batch*context.world_size, "sampling": sampling,
-                                 "numerical_mode": numerical_mode, "state_initialization": state_initialization})
-        run.summary.update({f"parameters/{name}/{key}": value for name, row in inventory.items() for key, value in row.items()})
-        run.summary["parameters/stage2_trainable"] = sum(inventory[name]["trainable_parameters"] for name in ("posterior", "dynamics"))
+    if context.is_main:
+        run = start_swanlab_v69(args, "object-video-sequence-v69", args.stage, checkpoint=checkpoint,
+                               config={**vars(args), **config.to_dict(), "model_inventory": inventory,
+                                       "effective_batch": accum*args.batch*context.world_size, "sampling": sampling,
+                                       "numerical_mode": numerical_mode, "state_initialization": state_initialization})
+        if run:
+            counts = {f"parameters/{name}/{key}": value for name, row in inventory.items() for key, value in row.items()}
+            counts["parameters/stage2_trainable"] = sum(inventory[name]["trainable_parameters"] for name in ("posterior", "dynamics"))
+            log_values_v69(run, counts, step=step)
+    tracking = json.loads((out / "tracking.json").read_text()) if run else None
     model.train()
     perception.eval()
     optimizer.zero_grad(set_to_none=True)
@@ -158,7 +159,7 @@ def main():
                      "model": model.state_dict(), "perception": perception.backbone.state_dict(), "perception_provenance": perception.provenance,
                      "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "rng": states,
                      "step": step, "epoch": epoch, "cursor": cursor, "grad_accum": accum,
-                     "world_size": context.world_size, "wandb_id": run.id if run else None, "numerical_mode": numerical_mode,
+                     "world_size": context.world_size, "tracking": tracking, "numerical_mode": numerical_mode,
                      "state_initialization": state_initialization}
             temporary = out / "latest.tmp.pt"
             torch.save(value, temporary)
@@ -237,11 +238,10 @@ def main():
                     append_case_records(out / "metrics.jsonl", [metrics])
                     print(json.dumps(metrics), flush=True)
                     if run:
-                        table = wandb.Table(columns=["case", "source", "seconds", "valid_points", "transport_points", "all_p50", "all_p90", "transport_p50", "transport_p90", "selection_status"])
-                        for rank_rows in gathered:
-                            for row in rank_rows:
-                                table.add_data(*[row[key] for key in table.columns])
-                        run.log({**metrics, "sequence/cases": table}, step=step)
+                        log_values_v69(run, metrics, step=step)
+                        log_table_v69(run, "sequence/cases",
+                                      ["case", "source", "seconds", "valid_points", "transport_points", "all_p50", "all_p90", "transport_p50", "transport_p90", "selection_status"],
+                                      [row for rank_rows in gathered for row in rank_rows], step=step)
             if step % args.recovery_every == 0 or step % args.save_every == 0:
                 save(step % args.save_every == 0)
             if step >= finish_step:

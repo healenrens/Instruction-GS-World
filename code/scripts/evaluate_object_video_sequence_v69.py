@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Held sequence evaluation, interventions, independent truth, and W&B evidence."""
+"""Held sequence evaluation, interventions, independent truth, and SwanLab evidence."""
 
 import argparse
 from collections import Counter, defaultdict
@@ -24,13 +24,13 @@ from igsw.adaptive_gaussian_wm.object_sequence_annotations_v69 import annotation
 from igsw.adaptive_gaussian_wm.object_sequence_media_v69 import render_sequence_v69
 from igsw.adaptive_gaussian_wm.object_association_diagnostics_v69 import independent_association_v69, effect_rate_and_sampling_v69
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
+from igsw.adaptive_gaussian_wm.swanlab_tracking_v69 import (
+    start_swanlab_v69, log_values_v69, log_table_v69, log_video_v69, log_evidence_v69,
+)
 
 
 def log_diagnostic_table(run, name, columns, records):
-    import wandb
-    for start in range(0, max(1, len(records)), 5000):
-        table = wandb.Table(columns=columns, data=[[row.get(key) for key in columns] for row in records[start:start+5000]])
-        run.log({f"{name}_{start//5000:04d}": table})
+    log_table_v69(run, name, columns, records)
 
 
 def main():
@@ -133,23 +133,14 @@ def main():
         relative = Path(video["path"]).relative_to(out).as_posix()
         links.append(f"<h2>{html.escape(video['case'])}</h2><video controls style='max-width:100%' src='{html.escape(relative)}'></video>")
     (out / "index.html").write_text("\n".join(links), encoding="utf-8")
-    if args.wandb_mode != "disabled":
-        import wandb
-        os.environ.pop("WANDB_RUN_ID", None)
-        os.environ.pop("WANDB_RESUME", None)
-        run = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
-                         group="object-video-sequence-v69", job_type="held-evaluation", mode=args.wandb_mode, config={**vars(args), **config.to_dict()})
-        for start in range(0, len(rows), 5000):
-            table = wandb.Table(columns=["case", "source", "condition", "subset", "seconds", "selection_status", "count", "mean", "p50", "p90", "p95"])
-            for row in rows[start:start+5000]:
-                table.add_data(*[row[name] for name in table.columns])
-            run.log({f"evaluation/cases_{start//5000:04d}": table})
-        summary_table = wandb.Table(columns=["source", "condition", "subset", "seconds", "count", "mean", "p50", "p90", "p95", "macro_case_mean"])
-        for row in summary:
-            summary_table.add_data(*[row[name] for name in summary_table.columns])
-        run.log({"evaluation/summary": summary_table,
-                 "evaluation/independent_cases": len(independent), "evaluation/independent_status": report["independent_status"],
-                 "evaluation/source_counts": dict(counts), "evaluation/checkpoint_step": step})
+    run = start_swanlab_v69(args, "object-video-sequence-v69", "held-evaluation", config={**vars(args), **config.to_dict()})
+    if run:
+        log_table_v69(run, "evaluation/cases",
+                      ["case", "source", "condition", "subset", "seconds", "selection_status", "count", "mean", "p50", "p90", "p95"], rows)
+        log_table_v69(run, "evaluation/summary",
+                      ["source", "condition", "subset", "seconds", "count", "mean", "p50", "p90", "p95", "macro_case_mean"], summary)
+        log_values_v69(run, {"evaluation/independent_cases": len(independent), "evaluation/independent_status": report["independent_status"],
+                            "evaluation/source_counts": dict(counts), "evaluation/checkpoint_step": step})
         query_records, consistency_records, intervention_records, grouping_records, query_sample_records = [], [], [], [], []
         for case in independent:
             for row in case["association"]["query_reconstruction"]:
@@ -170,7 +161,7 @@ def main():
         log_diagnostic_table(run, "association/effect_interventions", ["case", "intervention", "recipient_query", "donor_query", "observed_object", "response_mean_px", "response_p90_px", "reconstruction_mean_px"], intervention_records)
         log_diagnostic_table(run, "association/entity_grouping", ["case", "condition", "relation", "count", "mean", "p50", "p90"], grouping_records)
         log_diagnostic_table(run, "effect/independent_query_sampling", ["case", "query", "object", "count", "mean", "p50", "p90"], query_sample_records)
-        run.log({"association/status": report["association_status"]})
+        log_values_v69(run, {"association/status": report["association_status"]})
         rate_records, sample_records = [], []
         for case in effect_diagnostics:
             for row in case.get("rates", []):
@@ -181,10 +172,8 @@ def main():
         log_diagnostic_table(run, "effect/per_query_rate", ["case", "query", "kl_nats", "clip_total_kl_nats", "valid_queries"], rate_records)
         log_diagnostic_table(run, "effect/sample_reconstruction", ["case", "sample", "count", "mean", "p50", "p90"], sample_records)
         for video in videos:
-            run.log({f"video/{video['case']}": wandb.Video(video["path"], format="mp4")})
-        artifact = wandb.Artifact(args.wandb_name, type="object-video-evaluation")
-        artifact.add_dir(str(out))
-        run.log_artifact(artifact)
+            log_video_v69(run, f"video/{video['case']}", video["path"])
+        log_evidence_v69(run, [out], out)
         run.finish()
     print(f"[object-video-v69-eval] report={out / 'report.json'} review={out / 'index.html'}", flush=True)
 

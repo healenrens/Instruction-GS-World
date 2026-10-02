@@ -23,6 +23,7 @@ from igsw.adaptive_gaussian_wm.pretrained_visual_encoder_v69 import PretrainedVi
 from igsw.adaptive_gaussian_wm.object_video_world_model_v69 import ObjectVideoWorldModelV69
 from igsw.adaptive_gaussian_wm.state_change_evaluation_v69 import observe_state_v69
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
+from igsw.adaptive_gaussian_wm.swanlab_tracking_v69 import start_swanlab_v69, log_values_v69, set_results_v69, log_evidence_v69
 
 
 ASSESSED_STATE_CHECKPOINT = (
@@ -49,7 +50,7 @@ def main():
     parser = add_v69_arguments(argparse.ArgumentParser(description=__doc__))
     parser.set_defaults(stage="dynamics", stage2_preset="large", dynamics_checkpoint_blocks=True,
                         state_checkpoint=ASSESSED_STATE_CHECKPOINT, steps=2, batch=1, global_batch=1, workers=0,
-                        deterministic=True, resume_trace=True, wandb_name="v69_stage2_large_integration")
+                        deterministic=True, resume_trace=True, swanlab_name="v69_stage2_large_integration")
     args = parser.parse_args()
     configure_reproducibility_v69(True)
     out = Path(args.out)
@@ -58,14 +59,8 @@ def main():
     assert source["args"]["stage"] == "state"
     if args.state_checkpoint == ASSESSED_STATE_CHECKPOINT:
         assert source["step"] == 6000
-    run = None
-    if args.wandb_mode != "disabled":
-        import wandb
-        os.environ.pop("WANDB_RUN_ID", None)
-        os.environ.pop("WANDB_RESUME", None)
-        run = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
-                         group="object-video-sequence-v69", job_type="stage2-large-integration",
-                         mode=args.wandb_mode, config={**vars(args), "state_step": source["step"]})
+    run = start_swanlab_v69(args, "object-video-sequence-v69", "stage2-large-integration",
+                           config={**vars(args), "state_step": source["step"]})
     manifest = load_object_video_manifest_v69(args.manifest)
     grouped = defaultdict(list)
     for entry in manifest["entries"]:
@@ -98,10 +93,7 @@ def main():
     write_json(comparison_path, comparison)
     print(json.dumps({"event": "stage2_resume_comparison", "report": str(comparison_path), **comparison}), flush=True)
     if run:
-        run.summary["resume_comparison"] = comparison
-        artifact = wandb.Artifact(args.wandb_name + "-resume", type="resume-comparison")
-        artifact.add_file(str(comparison_path))
-        run.log_artifact(artifact)
+        set_results_v69(run, {"resume_comparison": comparison})
     assert comparison["passed"], str(comparison_path)
     assert resumed["step"] == steps and resumed["scheduler"]["last_epoch"] == steps
     assert resumed["world_size"] == 1
@@ -130,7 +122,7 @@ def main():
         assert all(row[f"gradient_preclip/{module}/l2"] > 0 for module in ("posterior", "dynamics"))
         assert all(name in row for name in ("observed_target_transport", "current_state_copy_transport", "last_observation_copy_transport"))
         if run:
-            run.log({f"stage2/{key}": value for key, value in row.items() if isinstance(value, (int, float))}, step=row["step"])
+            log_values_v69(run, {f"stage2/{key}": value for key, value in row.items() if isinstance(value, (int, float))}, step=row["step"])
     traces = sorted((stage_out / "resume_trace_rank0000").glob("*.pt"))
     assert len(traces) == steps
     tested_case_ids = set()
@@ -183,12 +175,9 @@ def main():
               "training_checkpoints_are_test_only": True}
     write_json(out / "test_report.json", report)
     if run:
-        run.summary.update(report)
-        artifact = wandb.Artifact(args.wandb_name, type="object-video-stage2-runtime-test")
-        for path in (out / "test_report.json", stage_out / "model_inventory.json", stage_out / "initialization.json",
-                     stage_out / "progress.json", stage_out / "metrics.jsonl", comparison_path):
-            artifact.add_file(str(path))
-        run.log_artifact(artifact)
+        set_results_v69(run, report)
+        log_evidence_v69(run, [out / "test_report.json", stage_out / "model_inventory.json", stage_out / "initialization.json",
+                               stage_out / "progress.json", stage_out / "metrics.jsonl", comparison_path], out)
         run.finish()
     print(json.dumps(report), flush=True)
 

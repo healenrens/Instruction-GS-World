@@ -28,6 +28,9 @@ from igsw.adaptive_gaussian_wm.state_change_evaluation_v69 import (
 )
 from igsw.adaptive_gaussian_wm.state_change_media_v69 import render_state_change_v69
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
+from igsw.adaptive_gaussian_wm.swanlab_tracking_v69 import (
+    add_swanlab_arguments, start_swanlab_v69, log_values_v69, log_table_v69, log_video_v69, log_evidence_v69,
+)
 
 
 def arguments():
@@ -43,10 +46,7 @@ def arguments():
     parser.add_argument("--annotations", default="")
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--source_revision", default="local-unversioned")
-    parser.add_argument("--wandb_project", default="instruct-gs-world")
-    parser.add_argument("--wandb_entity", default="healenrenss-university-of-chinese-acadmic-and-science")
-    parser.add_argument("--wandb_name", default="v69_state_change_held")
-    parser.add_argument("--wandb_mode", choices=("online", "offline", "disabled"), default="online")
+    add_swanlab_arguments(parser, default_name="v69_state_change_held")
     return parser.parse_args()
 
 
@@ -61,23 +61,15 @@ def read_rank_records(out, world):
 
 
 def log_rows(run, name, rows, columns):
-    import wandb
-    for start in range(0, len(rows), 5000):
-        table = wandb.Table(columns=list(columns), data=[[row.get(key) for key in columns] for row in rows[start:start+5000]])
-        run.log({f"{name}_{start//5000:04d}": table})
+    log_table_v69(run, name, columns, rows)
 
 
 def start_tracker(args, config, checkpoint_metadata):
-    import wandb
-    os.environ.pop("WANDB_RUN_ID", None)
-    os.environ.pop("WANDB_RESUME", None)
-    return wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
-                      group="object-video-v69-state-change", job_type="held-state-evaluation", mode=args.wandb_mode,
-                      config={**vars(args), **checkpoint_metadata, "config": config.to_dict()})
+    return start_swanlab_v69(args, "object-video-v69-state-change", "held-state-evaluation",
+                            config={**vars(args), **checkpoint_metadata, "config": config.to_dict()})
 
 
 def publish_results(run, args, report, cases, out):
-    import wandb
     rows = [row for case in cases for row in case.get("rows", [])]
     paired = [row for case in cases for row in case.get("paired", [])]
     columns = ["case", "source", "condition", "pool", "scope", "slice"]
@@ -126,17 +118,13 @@ def publish_results(run, args, report, cases, out):
                 if stats["p50"] is not None:
                     scalar[f"state_change/{row['condition']}/{metric}_clip_p50"] = stats["p50"]
                     scalar[f"state_change/{row['condition']}/{metric}_clip_p90"] = stats["p90"]
-    run.log(scalar)
+    log_values_v69(run, scalar)
     for case in cases:
         for kind, path in case.get("videos", {}).items():
-            run.log({f"review/{case['case']}/{kind}": wandb.Video(path, format="mp4")})
-    artifact = wandb.Artifact(args.wandb_name, type="object-state-change-evaluation")
-    for name in ("report.json", "metric_definitions.json", "index.html", "annotation_template.jsonl"):
-        artifact.add_file(str(out / name))
-    for name in ("case_reports", "evidence", "videos"):
-        if (out / name).is_dir():
-            artifact.add_dir(str(out / name), name=name)
-    run.log_artifact(artifact)
+            log_video_v69(run, f"review/{case['case']}/{kind}", path)
+    paths = [out / name for name in ("report.json", "metric_definitions.json", "index.html", "annotation_template.jsonl")]
+    paths += [out / name for name in ("case_reports", "evidence") if (out / name).is_dir()]
+    log_evidence_v69(run, paths, out)
     run.finish()
 
 
@@ -177,7 +165,7 @@ def main():
     (out / "evidence").mkdir(exist_ok=True)
     begin = time.monotonic()
     rank_completed = 0
-    run = start_tracker(args, config, checkpoint_metadata) if context.is_main and args.wandb_mode != "disabled" else None
+    run = start_tracker(args, config, checkpoint_metadata) if context.is_main else None
     print(json.dumps({"event": "state_change_eval_start", **checkpoint_metadata, "loaded_modules": loaded_modules,
                       "rank": context.rank, "world": context.world_size, "selected_episodes": len(indices),
                       "cases_by_source": coverage, "out": str(out)}), flush=True)

@@ -3258,3 +3258,21 @@ Stage 2内部1024维、16 heads，Dynamics 12轮local effect cross-attention与g
 实现已完成，9个Python文件AST解析、3个新Shell及runbook中4组独立命令语法检查和git diff --check通过。测试入口默认真实6000步快照，完整16+25帧、B1、两次更新，比较恢复与连续运行；报告`test_report.json`、`dynamics_resume_comparison.json`同步W&B。新增`observed_target_transport`、`current_state_copy_transport`、`last_observation_copy_transport`明确区分EMA观测还原、冻结当前State和最后可见测点，不进入loss。
 
 本轮没有本地模型前向或GPU训练；服务器端到端测试和八卡长训由用户执行，尚无新训练结果。指令与严格resume见`OBJECT_VIDEO_STAGE2_V69_RUNBOOK.md`。若correct effect不优于zero/shuffled，或更大网络不能接近观测State的可还原水平，则容量扩展假设不成立，按实际误差定位，不据模型大小宣布成功。
+
+### 15.52 2026-10-02 V69 原生 SwanLab 接入与恢复迁移
+
+**Decision / scope**
+
+用户要求将当前实验记录从 W&B 切换为 SwanLab。修改 V69 State/Stage 2 训练、单卡端到端测试、held evaluator、encoder/motion audit 和报告上传入口；不更改模型结构、loss、teacher、数据采样或数值恢复状态。历史 W&B run 保留，不据日志后端切换生成任何新的科学结论。API key 仅由环境变量或 SDK 登录提供，不写入仓库或运行文档。
+
+**Implementation / execution**
+
+使用原生 SwanLab 0.10.1 的 init/log/id/resume；标量名称和显式训练 step 保持。逐 case 数据通过原生 ECharts Table 同步，完整 JSON/JSONL/CSV 报告按内容分段上传为 Text，HTML/图片使用对应 media；公网服务不支持 W&B Artifact 式 save。MP4 原文件保留在共享存储，上传展示转换为 GIF，不把缩放后的展示当作训练数据。
+
+checkpoint 新增 tracking 元数据，包括 backend、experiment ID、project/workspace。SwanLab checkpoint 严格恢复到同一 experiment；旧 W&B checkpoint 保留模型、optimizer、scheduler、per-rank RNG、cursor 和 batch/accum，首次迁移新建 SwanLab experiment 并记录 previous_wandb_id。原训练 source_revision 保留，新 execution_revision 单独记录实际执行的日志接入版本；resume 不返回旧 W&B release。
+
+新训练使用独立 `_swanlab` OUT，已提交任务使用的旧 immutable release 不修改。Stage 2 新启动默认每卡 B=4、八卡 global batch256、accum8；resume 仍恢复 checkpoint 的实际数值配置，不擅自改变旧 B=2/accum16。在线训练命令不拉取 GitHub 或下载模型，SDK 安装与账号登录为独立准备步骤。
+
+**Evidence / boundary**
+
+在隔离临时环境实际执行 SDK-only offline integration：标量、nullable Table、长文本分段、HTML、MP4-to-GIF 和同 experiment ID 恢复均完成。报告 `model_executed=false`；没有调用本地模型前向、训练或 GPU smoke test。云端鉴权、服务器全容量 Stage 2 端到端恢复测试和八卡长训仍需用户执行，不能用 SDK 测试代替模型验证。操作入口及独立启动/resume 指令见 `OBJECT_VIDEO_STAGE2_V69_RUNBOOK.md`。

@@ -4,12 +4,14 @@
 import argparse
 from collections import defaultdict
 import json
-import os
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import read_json, write_json
+from igsw.adaptive_gaussian_wm.swanlab_tracking_v69 import (
+    add_swanlab_arguments, start_swanlab_v69, log_values_v69, log_table_v69, log_evidence_v69, set_results_v69,
+)
 
 
 def main():
@@ -17,11 +19,9 @@ def main():
     p.add_argument("--report", required=True)
     p.add_argument("--labels", required=True)
     p.add_argument("--output", required=True)
-    p.add_argument("--wandb_project", default="instruct-gs-world")
-    p.add_argument("--wandb_entity", default="healenrenss-university-of-chinese-acadmic-and-science")
-    p.add_argument("--wandb_mode", choices=("online", "offline", "disabled"), default="online")
-    p.add_argument("--wandb_name", default="object_video_v69_human_motion_comparison")
+    add_swanlab_arguments(p, default_name="object_video_v69_human_motion_comparison")
     args = p.parse_args()
+    args.out = str(Path(args.output).parent)
     rows = {row["window_id"]: row for row in read_json(args.report)["rows"]}
     pairs = read_json(args.labels)["pairs"]
     conditions = {"relative_span_p90": lambda row: row["relative_span_image_diagonal"]["p90"],
@@ -48,19 +48,12 @@ def main():
                for (partition, source, metric), value in sorted(counts.items())]
     write_json(args.output, {"status": "human_rank_comparison", "summary": summary, "comparisons": comparisons,
                             "sampling_modified": False, "automatic_acceptance": False})
-    if args.wandb_mode != "disabled":
-        import wandb
-        os.environ.pop("WANDB_RUN_ID", None)
-        os.environ.pop("WANDB_RESUME", None)
-        run = wandb.init(project=args.wandb_project, entity=args.wandb_entity or None, name=args.wandb_name,
-                         group="object-video-sequence-v69", job_type="motion-rank-analysis", mode=args.wandb_mode, config=vars(args))
-        table = wandb.Table(columns=["partition", "source", "metric", "correct", "count", "agreement"])
-        for row in summary:
-            table.add_data(*[row[name] for name in table.columns])
-        run.log({"motion_rank/summary": table, "motion_rank/automatic_acceptance": False})
-        artifact = wandb.Artifact(args.wandb_name, type="human-motion-comparison")
-        artifact.add_file(args.output)
-        run.log_artifact(artifact)
+    run = start_swanlab_v69(args, group="object-video-sequence-v69", job_type="motion-rank-analysis", config=vars(args))
+    if run is not None:
+        log_table_v69(run, "motion_rank/summary", ["partition", "source", "metric", "correct", "count", "agreement"], summary)
+        log_values_v69(run, {"motion_rank/automatic_acceptance": False})
+        set_results_v69(run, {"status": "human_rank_comparison", "sampling_modified": False, "automatic_acceptance": False})
+        log_evidence_v69(run, [Path(args.output)], base_path=Path(args.output).parent)
         run.finish()
     print(json.dumps({"output": args.output, "summary": summary}), flush=True)
 
