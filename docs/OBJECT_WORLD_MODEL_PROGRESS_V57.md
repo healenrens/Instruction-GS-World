@@ -3276,3 +3276,9 @@ checkpoint 新增 tracking 元数据，包括 backend、experiment ID、project/
 **Evidence / boundary**
 
 在隔离临时环境实际执行 SDK-only offline integration：标量、nullable Table、长文本分段、HTML、MP4-to-GIF 和同 experiment ID 恢复均完成。报告 `model_executed=false`；没有调用本地模型前向、训练或 GPU smoke test。云端鉴权、服务器全容量 Stage 2 端到端恢复测试和八卡长训仍需用户执行，不能用 SDK 测试代替模型验证。操作入口及独立启动/resume 指令见 `OBJECT_VIDEO_STAGE2_V69_RUNBOOK.md`。
+
+### 15.53 2026-10-02 将 SwanLab 上传范围收窄为训练指标
+
+用户进一步要求“只上传训练数据”，本轮按只同步训练过程指标执行：State/Stage 2 仅上传数值型 loss、梯度、LR、显存、时间指标和训练配置；不上传逐 case Table、原始 RGB、视频、报告、数据集或 checkpoint。逐 case 测量与测试/评测结果继续正常计算并写入本地，不删减科学评测；非训练入口不创建在线 experiment，测试/评测 Shell 显式关闭 tracking。
+
+训练去掉仅为云端 Table 服务的 case-row all_gather；标量 DDP reduction、loss、模型与 optimizer/RNG/cursor 的 checkpoint 恢复保持不变。SDK regression 已通过纯标量 offline 同 ID 恢复与非训练 online 不上传检查；3 个 Python、5 个 Shell 和 7 个运行文档 Bash 块通过静态检查，不执行模型、不验证云端鉴权。这一范围覆盖并替代 15.52 的全报告/媒体上传安排；当前训练、恢复指令见 `OBJECT_VIDEO_STAGE2_V69_RUNBOOK.md`。

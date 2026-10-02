@@ -1,4 +1,4 @@
-"""Native SwanLab metrics and evidence for the V69 video experiments."""
+"""V69 training cloud metrics, plus local-only non-training evidence."""
 
 import json
 from numbers import Real
@@ -19,6 +19,9 @@ def add_swanlab_arguments(parser, default_name="object_video_sequence_v69"):
 
 
 def start_swanlab_v69(args, group, job_type, config=None, checkpoint=None):
+    if args.swanlab_mode == "online" and job_type not in ("state", "dynamics"):
+        print(f"[swanlab-v69] training-only upload; {job_type} results remain local", flush=True)
+        return None
     if args.swanlab_mode == "disabled":
         return None
     import swanlab
@@ -38,7 +41,8 @@ def start_swanlab_v69(args, group, job_type, config=None, checkpoint=None):
                        id=state["id"] if continuing else None, resume="must" if continuing else None,
                        config=config if config is not None else vars(args))
     tracking = {"backend": "swanlab", "id": run.id, "project": project, "workspace": workspace,
-                "mode": args.swanlab_mode, "start_step": checkpoint["step"] if checkpoint is not None else 0}
+                "mode": args.swanlab_mode, "upload_scope": "training_scalars_only",
+                "start_step": checkpoint["step"] if checkpoint is not None else 0}
     if args.swanlab_mode == "online":
         tracking.update(url=run.url, workspace=run.path.strip("/").split("/")[0])
     if checkpoint is not None and checkpoint.get("wandb_id"):

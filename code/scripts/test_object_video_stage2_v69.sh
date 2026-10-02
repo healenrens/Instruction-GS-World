@@ -26,5 +26,5 @@ echo "[object-video-stage2-v69-test] full_model=true stage=dynamics preset=large
   --posterior_geometry "${POSTERIOR_GEOMETRY:-inherit}" \
   --source_revision "${SOURCE_REVISION}" --swanlab_project "${SWANLAB_PROJECT:-instruct-gs-world}" \
   --swanlab_workspace "${SWANLAB_WORKSPACE:-}" \
-  --swanlab_mode "${SWANLAB_MODE:-online}" --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" \
+  --swanlab_mode disabled --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" \
   2>&1 | tee -a "${OUT}/test.log"

@@ -23,5 +23,5 @@ mkdir -p "${OUT}"
   --effect_samples "${EFFECT_SAMPLES:-4}" \
   --annotations "${ANNOTATIONS:-}" --seed "${SEED:-17}" --swanlab_project "${SWANLAB_PROJECT:-instruct-gs-world}" \
   --swanlab_workspace "${SWANLAB_WORKSPACE:-}" \
-  --swanlab_mode "${SWANLAB_MODE:-online}" --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" \
+  --swanlab_mode disabled --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" \
   2>&1 | tee -a "${OUT}/evaluate.log"

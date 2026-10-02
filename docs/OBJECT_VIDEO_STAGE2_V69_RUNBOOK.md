@@ -4,7 +4,8 @@
 
 Stage1 is complete for this handoff. These commands do not retrain State.
 Current V69 launchers use SwanLab; existing State model/training settings stay
-unchanged. Fresh run names and outputs have a `_swanlab` suffix. Stage2 uses
+unchanged. Only training scalar metrics are uploaded. Tests, evaluation,
+case tables, images, videos and reports remain local. Fresh run names and outputs have a `_swanlab` suffix. Stage2 uses
 `--stage dynamics --stage2_preset large
 --dynamics_checkpoint_blocks`: frozen State,
 EMA State and readout at width 512; internal width 1024, 16 heads, 12 Dynamics
@@ -89,9 +90,9 @@ source files or this document:
 /mnt/pfs/public/xuhaoming/instruct_gs_world/.venv/bin/swanlab login
 ```
 
-After authentication, this independent SDK-only online integration checks
-logging, media sync and same-ID resume without importing or running a model.
-It is not a launcher gate:
+This independent SDK-only offline test checks training scalar logging and
+same-ID resume without importing or running a model. It does not upload
+anything or test cloud authentication, and is not a launcher gate:
 
 ```bash
 bash <<'BASH'
@@ -99,18 +100,18 @@ set -euo pipefail
 RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
 REV="$(cat "${RUNTIME_ROOT}/runtime/object_video_sequence_v69/DEPLOYED_REVISION")"
 ROOT="${RUNTIME_ROOT}/runtime/object_video_sequence_v69/releases/${REV}"
-OUT="${RUNTIME_ROOT}/outputs/v69_swanlab_tracking_online_$(date +%Y%m%d_%H%M%S)"
+OUT="${RUNTIME_ROOT}/outputs/v69_swanlab_tracking_offline_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${OUT}"
 "${RUNTIME_ROOT}/.venv/bin/python" "${ROOT}/code/scripts/test_swanlab_tracking_v69.py" \
   --out "${OUT}" --swanlab_project instruct-gs-world --swanlab_workspace "" \
-  --swanlab_name "$(basename "${OUT}")" --swanlab_mode online \
+  --swanlab_name "$(basename "${OUT}")" --swanlab_mode offline \
   2>&1 | tee "${OUT}/test.log"
 BASH
 ```
 
-Read `OUT/test_report.json` and `OUT/tracking.json`; local media/report inputs
-are in `OUT/evidence/`. The online command must complete before claiming
-authentication, media sync and same-ID resume have passed.
+Read `OUT/test_report.json` and `OUT/tracking.json`. This test does not establish
+cloud authentication or model correctness. Production training initializes
+SwanLab normally with the configured account.
 
 Shell logging defaults are `SWANLAB_PROJECT=instruct-gs-world`,
 `SWANLAB_WORKSPACE=""` (personal workspace), `SWANLAB_MODE=online`, and
@@ -118,6 +119,8 @@ Shell logging defaults are `SWANLAB_PROJECT=instruct-gs-world`,
 `offline`, `local`, and `disabled`. Python keeps old `--wandb_*` CLI aliases
 for queued commands; `WANDB_ENTITY` is never mapped to a SwanLab workspace.
 Choose an explicit `SWANLAB_WORKSPACE` only for the intended workspace.
+Non-training online requests do not start a cloud experiment; their computed
+results are still written locally. Test/evaluation wrappers disable tracking.
 
 This publishes a new release. It does not edit old cd865/ab12 releases or
 change the code used by an already-running W&B job.
@@ -140,7 +143,7 @@ unset RUN_NAME OUT WANDB_RUN_ID WANDB_RESUME POSTERIOR_GEOMETRY
 export SWANLAB_PROJECT=instruct-gs-world
 export SWANLAB_WORKSPACE=""
 RUNTIME_ROOT="${RUNTIME_ROOT}" VENV_ROOT="${RUNTIME_ROOT}" TEST_GPU=0 \
-  SWANLAB_MODE=online ENCODER_FRAME_BATCH=2 SEED=17 \
+  SWANLAB_MODE=disabled ENCODER_FRAME_BATCH=2 SEED=17 \
   bash "${ROOT}/code/scripts/test_object_video_stage2_v69.sh"
 BASH
 ```
@@ -148,8 +151,8 @@ BASH
 The wrapper creates a timestamped test OUT below
 `/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/` and prints its full path.
 Its console log is `OUT/test.log`; results are `OUT/test_report.json` and
-`OUT/dynamics_resume_comparison.json`, whose complete contents are synced to
-SwanLab as chunked Text media and tables; the original files remain local. The default
+`OUT/dynamics_resume_comparison.json`. These results are local only and are not
+uploaded to SwanLab. The default
 test executes a two-update interrupted/resumed path and a two-update
 uninterrupted path, with full 16+25 frames and batch 1. No result is claimed
 until this command completes and the generated report is read.
@@ -246,8 +249,8 @@ Training delegates to `code/scripts/train_object_video_sequence_v69.py` with:
 
 Optional `DETERMINISTIC=1` appends `--deterministic`. Test delegates to
 `code/scripts/test_object_video_stage2_v69.py` with the same manifest,
-checkpoint, large preset, config, encoder, seed, source revision and SwanLab
-arguments. It adds `--stage dynamics` but does not take production optimizer
+checkpoint, large preset, config, encoder, seed and source revision, with
+tracking disabled. It adds `--stage dynamics` but does not take production optimizer
 settings. The Python test supplies its own short full-model execution budget.
 
 Production artifacts in the Stage2 OUT include `train.log`, `run.json`,
@@ -257,8 +260,8 @@ The last two are Stage2 checkpoints and must not be used as State baselines.
 Actual trainable parameter counts, migration evidence and complete test
 reports are runtime outputs, not results of shell syntax validation.
 
-SwanLab sync uses native `ECharts.Table` for tables, chunked Text media for
-complete JSON/JSONL report contents, Html for rendered reports, and GIF previews
-converted from MP4 videos. Public-cloud sync does not use `swanlab.save` or
-artifact uploads. Original JSON/JSONL, HTML, MP4 and checkpoint files remain
-in the local OUT; synced report contents are not merely local-path references.
+SwanLab uploads only scalar training metrics and training configuration.
+Loss components, gradients, learning rate, memory and timing metrics keep their
+original names and explicit steps. Case records stay in local JSONL files;
+there is no case-table, image, video, report, dataset or checkpoint upload.
+Training checkpoint/resume behavior and local evaluation outputs are unchanged.

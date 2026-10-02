@@ -31,7 +31,7 @@ from igsw.adaptive_gaussian_wm.object_video_sequence_dataset_v69 import ObjectVi
 from igsw.adaptive_gaussian_wm.pretrained_visual_encoder_v69 import PretrainedVisualEncoderV69
 from igsw.adaptive_gaussian_wm.object_video_world_model_v69 import ObjectVideoWorldModelV69
 from igsw.adaptive_gaussian_wm.tracker_visual_review_v67 import write_json
-from igsw.adaptive_gaussian_wm.swanlab_tracking_v69 import start_swanlab_v69, log_values_v69, log_table_v69
+from igsw.adaptive_gaussian_wm.swanlab_tracking_v69 import start_swanlab_v69, log_values_v69
 
 
 def main():
@@ -229,19 +229,12 @@ def main():
                                known_observation_fraction=float((batch["teacher"]["observation"] >= 0).float().mean()))
                 rows = case_metrics_v69(output, batch, config, args.stage)
                 append_case_records(out / f"cases_rank{context.rank:04d}.jsonl", [{"step": step, **row} for row in rows])
-                gathered = [None]*context.world_size
-                if context.distributed:
-                    dist.all_gather_object(gathered, rows)
-                else:
-                    gathered[0] = rows
                 if context.is_main:
                     append_case_records(out / "metrics.jsonl", [metrics])
                     print(json.dumps(metrics), flush=True)
                     if run:
-                        log_values_v69(run, metrics, step=step)
-                        log_table_v69(run, "sequence/cases",
-                                      ["case", "source", "seconds", "valid_points", "transport_points", "all_p50", "all_p90", "transport_p50", "transport_p90", "selection_status"],
-                                      [row for rank_rows in gathered for row in rank_rows], step=step)
+                        log_values_v69(run, {key: value for key, value in metrics.items()
+                                             if isinstance(value, (int, float))}, step=step)
             if step % args.recovery_every == 0 or step % args.save_every == 0:
                 save(step % args.save_every == 0)
             if step >= finish_step:

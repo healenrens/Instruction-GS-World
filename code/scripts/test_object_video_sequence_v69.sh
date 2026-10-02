@@ -27,5 +27,5 @@ echo "[object-video-v69-test] full_model=true device=cuda:0 log=${OUT}/test.log"
   --posterior_geometry "${POSTERIOR_GEOMETRY:-inherit}" \
   --source_revision "${SOURCE_REVISION}" --swanlab_project "${SWANLAB_PROJECT:-instruct-gs-world}" \
   --swanlab_workspace "${SWANLAB_WORKSPACE:-}" \
-  --swanlab_mode "${SWANLAB_MODE:-online}" --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" \
+  --swanlab_mode disabled --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" \
   2>&1 | tee -a "${OUT}/test.log"
