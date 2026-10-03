@@ -29,7 +29,7 @@ echo "[state-change-v69] foreground processes=${EVAL_NPROC_PER_NODE} checkpoint=
   --out "${OUT}" --encoder_repository "${ENCODER_REPOSITORY}" --encoder_frame_batch "${ENCODER_FRAME_BATCH:-2}" \
   --items_per_source "${ITEMS_PER_SOURCE:-80}" --visualize_per_source "${VISUALIZE_PER_SOURCE:-8}" \
   --motion_threshold_px "${MOTION_THRESHOLD_PX:-5}" --annotations "${ANNOTATIONS:-}" --seed "${SEED:-17}" \
-  --source_revision "${SOURCE_REVISION}" --swanlab_project "${SWANLAB_PROJECT:-instruct-gs-world}" \
+  --source_revision "${SOURCE_REVISION}" --swanlab_project "${SWANLAB_PROJ_NAME:-${SWANLAB_PROJECT:-instruct-gs-world}}" \
   --swanlab_workspace "${SWANLAB_WORKSPACE:-}" \
   --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" --swanlab_mode disabled \
   2>&1 | tee -a "${OUT}/evaluate.log"

@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import runpy
 
@@ -17,18 +18,24 @@ def main():
     audit_args = argparse.Namespace(**vars(args))
     audit_args.swanlab_mode = "online"
     assert api["start_swanlab_v69"](audit_args, "object-video-sequence-v69", "held-evaluation") is None
+    os.environ["SWANLAB_PROJECT"] = args.swanlab_project
     run = api["start_swanlab_v69"](args, "object-video-sequence-v69", "state")
+    assert "SWANLAB_PROJECT" not in os.environ
     api["log_values_v69"](run, {"loss": 1.5, "gradient_norm": 2.0, "lr": 0.0002}, step=1)
     tracking = json.loads((out / "tracking.json").read_text())
     run.finish()
     checkpoint = {"step": 1, "tracking": tracking}
+    os.environ["SWANLAB_PROJECT"] = args.swanlab_project
     resumed = api["start_swanlab_v69"](args, "object-video-sequence-v69", "state", checkpoint=checkpoint)
+    assert "SWANLAB_PROJECT" not in os.environ
     api["log_values_v69"](resumed, {"loss": 1.0, "gradient_norm": 1.5, "lr": 0.0002}, step=2)
     assert resumed.id == tracking["id"]
     resumed.finish()
     (out / "test_report.json").write_text(json.dumps({"status": "passed_sdk_logging", "run_id": tracking["id"],
                                                     "mode": args.swanlab_mode, "model_executed": False,
-                                                    "uploaded": False, "tracking_scope": "training_scalars_only"}, indent=2), encoding="utf-8")
+                                                    "uploaded": False, "tracking_scope": "training_scalars_only",
+                                                    "project": tracking["project"],
+                                                    "legacy_project_environment_compatible": True}, indent=2), encoding="utf-8")
     print(f"[swanlab-v69-test] passed mode={args.swanlab_mode} report={out / 'test_report.json'}", flush=True)
 
 

@@ -113,12 +113,16 @@ Read `OUT/test_report.json` and `OUT/tracking.json`. This test does not establis
 cloud authentication or model correctness. Production training initializes
 SwanLab normally with the configured account.
 
-Shell logging defaults are `SWANLAB_PROJECT=instruct-gs-world`,
+Shell logging defaults are `SWANLAB_PROJ_NAME=instruct-gs-world`,
 `SWANLAB_WORKSPACE=""` (personal workspace), `SWANLAB_MODE=online`, and
 `--swanlab_name` from RUN_NAME or the OUT basename. Native modes are `online`,
 `offline`, `local`, and `disabled`. Python keeps old `--wandb_*` CLI aliases
 for queued commands; `WANDB_ENTITY` is never mapped to a SwanLab workspace.
 Choose an explicit `SWANLAB_WORKSPACE` only for the intended workspace.
+`SWANLAB_PROJECT` is a structured SDK settings field, not the project-name
+variable. V69 accepts the old plain-name variable only as a legacy launcher
+alias and removes it before SDK initialization. New commands unset it and use
+`SWANLAB_PROJ_NAME`; `SWANLAB_API_KEY` remains the authentication variable.
 Non-training online requests do not start a cloud experiment; their computed
 results are still written locally. Test/evaluation wrappers disable tracking.
 
@@ -140,7 +144,8 @@ REV="$(cat "${RUNTIME_ROOT}/runtime/object_video_sequence_v69/DEPLOYED_REVISION"
 ROOT="${RUNTIME_ROOT}/runtime/object_video_sequence_v69/releases/${REV}"
 unset SOURCE_REVISION RESUME STAGE STOP_AFTER STATE_CHECKPOINT MODEL_CONFIG MANIFEST ENCODER ENCODER_REPOSITORY ENCODER_WEIGHTS
 unset RUN_NAME OUT WANDB_RUN_ID WANDB_RESUME POSTERIOR_GEOMETRY
-export SWANLAB_PROJECT=instruct-gs-world
+unset SWANLAB_PROJECT
+export SWANLAB_PROJ_NAME=instruct-gs-world
 export SWANLAB_WORKSPACE=""
 RUNTIME_ROOT="${RUNTIME_ROOT}" VENV_ROOT="${RUNTIME_ROOT}" TEST_GPU=0 \
   SWANLAB_MODE=disabled ENCODER_FRAME_BATCH=2 SEED=17 \
@@ -169,7 +174,8 @@ REV="$(cat "${RUNTIME_ROOT}/runtime/object_video_sequence_v69/DEPLOYED_REVISION"
 ROOT="${RUNTIME_ROOT}/runtime/object_video_sequence_v69/releases/${REV}"
 unset CUDA_VISIBLE_DEVICES SOURCE_REVISION RESUME STAGE STOP_AFTER STATE_CHECKPOINT MODEL_CONFIG MANIFEST
 unset ENCODER ENCODER_REPOSITORY ENCODER_WEIGHTS POSTERIOR_GEOMETRY DETERMINISTIC WANDB_RUN_ID WANDB_RESUME
-export SWANLAB_PROJECT=instruct-gs-world
+unset SWANLAB_PROJECT
+export SWANLAB_PROJ_NAME=instruct-gs-world
 export SWANLAB_WORKSPACE=""
 RUNTIME_ROOT="${RUNTIME_ROOT}" VENV_ROOT="${RUNTIME_ROOT}" \
   RUN_NAME=object_video_v69_stage2_large_seed17_state6000_swanlab \
@@ -203,7 +209,8 @@ REV="$(cat "${RUNTIME_ROOT}/runtime/object_video_sequence_v69/DEPLOYED_REVISION"
 ROOT="${RUNTIME_ROOT}/runtime/object_video_sequence_v69/releases/${REV}"
 unset CUDA_VISIBLE_DEVICES SOURCE_REVISION STOP_AFTER WANDB_RUN_ID WANDB_RESUME
 unset OUT RUN_NAME STATE_CHECKPOINT MODEL_CONFIG MANIFEST POSTERIOR_GEOMETRY
-export SWANLAB_PROJECT=instruct-gs-world
+unset SWANLAB_PROJECT
+export SWANLAB_PROJ_NAME=instruct-gs-world
 export SWANLAB_WORKSPACE=""
 export SWANLAB_MODE=online
 bash "${ROOT}/code/scripts/train_object_video_stage2_v69.sh"

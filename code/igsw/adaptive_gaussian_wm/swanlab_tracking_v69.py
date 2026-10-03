@@ -8,7 +8,7 @@ from pathlib import Path
 
 def add_swanlab_arguments(parser, default_name="object_video_sequence_v69"):
     parser.add_argument("--swanlab_project", "--wandb_project", dest="swanlab_project",
-                        default=os.environ.get("SWANLAB_PROJECT", "instruct-gs-world"))
+                        default=os.environ.get("SWANLAB_PROJ_NAME") or os.environ.get("SWANLAB_PROJECT", "instruct-gs-world"))
     parser.add_argument("--swanlab_workspace", default=os.environ.get("SWANLAB_WORKSPACE", ""))
     parser.add_argument("--swanlab_name", "--wandb_name", dest="swanlab_name", default=default_name)
     parser.add_argument("--swanlab_mode", "--wandb_mode", dest="swanlab_mode",
@@ -24,6 +24,8 @@ def start_swanlab_v69(args, group, job_type, config=None, checkpoint=None):
         return None
     if args.swanlab_mode == "disabled":
         return None
+    # Submitted V69 scripts used a plain project name in the SDK's structured settings variable.
+    os.environ.pop("SWANLAB_PROJECT", None)
     import swanlab
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

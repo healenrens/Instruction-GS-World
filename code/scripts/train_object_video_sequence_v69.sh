@@ -46,7 +46,7 @@ echo "[object-video-v69] mode=foreground stage=${STAGE} processes=${NPROC_PER_NO
   --batch "${BATCH_PER_GPU:-2}" --global_batch "${TARGET_GLOBAL_BATCH:-256}" --workers "${WORKERS_PER_RANK}" \
   --steps "${STEPS:-30000}" --stop_after "${STOP_AFTER:-0}" --lr "${LR:-0.0002}" --seed "${SEED:-17}" \
   --log_every "${LOG_EVERY:-20}" --save_every "${SAVE_EVERY:-2500}" --recovery_every "${RECOVERY_EVERY:-250}" \
-  --swanlab_project "${SWANLAB_PROJECT:-instruct-gs-world}" \
+  --swanlab_project "${SWANLAB_PROJ_NAME:-${SWANLAB_PROJECT:-instruct-gs-world}}" \
   --swanlab_workspace "${SWANLAB_WORKSPACE:-}" \
   --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" --swanlab_mode "${SWANLAB_MODE:-online}" \
   2>&1 | tee -a "${OUT}/train.log"

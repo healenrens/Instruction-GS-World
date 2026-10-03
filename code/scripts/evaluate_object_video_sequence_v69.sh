@@ -21,7 +21,7 @@ mkdir -p "${OUT}"
   --checkpoint "${CHECKPOINT}" --encoder_repository "${ENCODER_REPOSITORY}" --encoder_weights "${ENCODER_WEIGHTS}" \
   --encoder_frame_batch "${ENCODER_FRAME_BATCH:-2}" --items "${ITEMS:-400}" --visualize "${VISUALIZE:-40}" \
   --effect_samples "${EFFECT_SAMPLES:-4}" \
-  --annotations "${ANNOTATIONS:-}" --seed "${SEED:-17}" --swanlab_project "${SWANLAB_PROJECT:-instruct-gs-world}" \
+  --annotations "${ANNOTATIONS:-}" --seed "${SEED:-17}" --swanlab_project "${SWANLAB_PROJ_NAME:-${SWANLAB_PROJECT:-instruct-gs-world}}" \
   --swanlab_workspace "${SWANLAB_WORKSPACE:-}" \
   --swanlab_mode disabled --swanlab_name "${RUN_NAME:-$(basename "${OUT}")}" \
   2>&1 | tee -a "${OUT}/evaluate.log"

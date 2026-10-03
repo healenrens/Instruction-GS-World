@@ -3282,3 +3282,9 @@ checkpoint 新增 tracking 元数据，包括 backend、experiment ID、project/
 用户进一步要求“只上传训练数据”，本轮按只同步训练过程指标执行：State/Stage 2 仅上传数值型 loss、梯度、LR、显存、时间指标和训练配置；不上传逐 case Table、原始 RGB、视频、报告、数据集或 checkpoint。逐 case 测量与测试/评测结果继续正常计算并写入本地，不删减科学评测；非训练入口不创建在线 experiment，测试/评测 Shell 显式关闭 tracking。
 
 训练去掉仅为云端 Table 服务的 case-row all_gather；标量 DDP reduction、loss、模型与 optimizer/RNG/cursor 的 checkpoint 恢复保持不变。SDK regression 已通过纯标量 offline 同 ID 恢复与非训练 online 不上传检查；3 个 Python、5 个 Shell 和 7 个运行文档 Bash 块通过静态检查，不执行模型、不验证云端鉴权。这一范围覆盖并替代 15.52 的全报告/媒体上传安排；当前训练、恢复指令见 `OBJECT_VIDEO_STAGE2_V69_RUNBOOK.md`。
+
+### 15.54 2026-10-03 SwanLab 项目环境变量契约
+
+- **What changed**：项目名使用官方 `SWANLAB_PROJ_NAME`；已提交 V69 脚本的旧 `SWANLAB_PROJECT` 字符串仍作为 launcher alias 读取，但在 SDK 初始化前移除；认证继续使用 `SWANLAB_API_KEY`。
+- **Why**：SwanLab 0.10.1 将 `SWANLAB_PROJECT` 解析为结构化 `ProjectSettings`，普通项目名字符串与该字段契约冲突。
+- **Impact**：只修改日志配置入口与运行指令，不改变模型、loss、数据、batch 或 checkpoint 数值恢复；训练仍只上传标量指标。

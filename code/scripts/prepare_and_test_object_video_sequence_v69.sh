@@ -13,7 +13,8 @@ export ENCODER_FRAME_BATCH="${ENCODER_FRAME_BATCH:-2}"
 export RUN_NAME="object_video_v69_resume_fix_${SOURCE_REVISION:0:7}_$(date +%Y%m%d_%H%M%S)_swanlab"
 export OUT="${RUNTIME_ROOT}/outputs/${RUN_NAME}"
 export SWANLAB_MODE=disabled
-export SWANLAB_PROJECT="${SWANLAB_PROJECT:-instruct-gs-world}"
+export SWANLAB_PROJ_NAME="${SWANLAB_PROJ_NAME:-${SWANLAB_PROJECT:-instruct-gs-world}}"
+unset SWANLAB_PROJECT
 export SWANLAB_WORKSPACE="${SWANLAB_WORKSPACE:-}"
 unset RESUME STATE_CHECKPOINT MODEL_CONFIG STOP_AFTER WANDB_RUN_ID WANDB_RESUME
 bash "${SOURCE_ROOT}/code/scripts/deploy_object_video_sequence_v69_runtime.sh"
