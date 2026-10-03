@@ -24,8 +24,9 @@ def start_swanlab_v69(args, group, job_type, config=None, checkpoint=None):
         return None
     if args.swanlab_mode == "disabled":
         return None
-    # Submitted V69 scripts used a plain project name in the SDK's structured settings variable.
-    os.environ.pop("SWANLAB_PROJECT", None)
+    # V69 resolves these values from arguments/checkpoint, not the SDK's environment parser.
+    for name in ("SWANLAB_PROJECT", "SWANLAB_WORKSPACE", "SWANLAB_RUN_ID", "SWANLAB_RESUME"):
+        os.environ.pop(name, None)
     import swanlab
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -34,8 +35,6 @@ def start_swanlab_v69(args, group, job_type, config=None, checkpoint=None):
     if checkpoint is not None and not state and tracking_path.is_file():
         state = json.loads(tracking_path.read_text())
     continuing = state.get("backend") == "swanlab" and bool(state.get("id"))
-    for name in ("SWANLAB_RUN_ID", "SWANLAB_RESUME"):
-        os.environ.pop(name, None)
     project = state["project"] if continuing else args.swanlab_project
     workspace = state["workspace"] if continuing else args.swanlab_workspace
     run = swanlab.init(project=project, workspace=workspace or None, name=args.swanlab_name,

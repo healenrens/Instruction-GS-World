@@ -3285,6 +3285,6 @@ checkpoint 新增 tracking 元数据，包括 backend、experiment ID、project/
 
 ### 15.54 2026-10-03 SwanLab 项目环境变量契约
 
-- **What changed**：项目名使用官方 `SWANLAB_PROJ_NAME`；已提交 V69 脚本的旧 `SWANLAB_PROJECT` 字符串仍作为 launcher alias 读取，但在 SDK 初始化前移除；认证继续使用 `SWANLAB_API_KEY`。
-- **Why**：SwanLab 0.10.1 将 `SWANLAB_PROJECT` 解析为结构化 `ProjectSettings`，普通项目名字符串与该字段契约冲突。
-- **Impact**：只修改日志配置入口与运行指令，不改变模型、loss、数据、batch 或 checkpoint 数值恢复；训练仍只上传标量指标。
+- **What changed**：项目名使用官方 `SWANLAB_PROJ_NAME`；未指定 workspace 时不导出空字符串。V69 先从 CLI/environment 或 checkpoint 取得 project/workspace/id/resume，再移除 SDK 环境解析中的旧 project alias 和重复 workspace/id/resume，通过显式 `init` 参数传入；认证继续使用 `SWANLAB_API_KEY`。
+- **Why**：SwanLab 0.10.1 的 `SWANLAB_PROJECT` 是结构化 `ProjectSettings`，workspace 若指定则必须是非空字符串；普通项目名和空 workspace 的环境变量与该契约冲突。
+- **Impact**：兼容已提交脚本中的旧项目名、空 workspace；非空 workspace 和 checkpoint experiment ID 不变。仅修改日志配置入口与运行指令，不改变模型、loss、数据、batch 或 checkpoint 数值恢复；训练仍只上传标量指标。

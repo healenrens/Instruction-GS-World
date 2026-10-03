@@ -19,15 +19,23 @@ def main():
     audit_args.swanlab_mode = "online"
     assert api["start_swanlab_v69"](audit_args, "object-video-sequence-v69", "held-evaluation") is None
     os.environ["SWANLAB_PROJECT"] = args.swanlab_project
+    os.environ["SWANLAB_WORKSPACE"] = args.swanlab_workspace
+    os.environ["SWANLAB_RUN_ID"] = ""
+    os.environ["SWANLAB_RESUME"] = ""
     run = api["start_swanlab_v69"](args, "object-video-sequence-v69", "state")
-    assert "SWANLAB_PROJECT" not in os.environ
+    assert all(name not in os.environ for name in ("SWANLAB_PROJECT", "SWANLAB_WORKSPACE", "SWANLAB_RUN_ID", "SWANLAB_RESUME"))
     api["log_values_v69"](run, {"loss": 1.5, "gradient_norm": 2.0, "lr": 0.0002}, step=1)
     tracking = json.loads((out / "tracking.json").read_text())
+    assert tracking["project"] == args.swanlab_project
+    assert tracking["workspace"] == args.swanlab_workspace
     run.finish()
     checkpoint = {"step": 1, "tracking": tracking}
     os.environ["SWANLAB_PROJECT"] = args.swanlab_project
+    os.environ["SWANLAB_WORKSPACE"] = args.swanlab_workspace
+    os.environ["SWANLAB_RUN_ID"] = ""
+    os.environ["SWANLAB_RESUME"] = ""
     resumed = api["start_swanlab_v69"](args, "object-video-sequence-v69", "state", checkpoint=checkpoint)
-    assert "SWANLAB_PROJECT" not in os.environ
+    assert all(name not in os.environ for name in ("SWANLAB_PROJECT", "SWANLAB_WORKSPACE", "SWANLAB_RUN_ID", "SWANLAB_RESUME"))
     api["log_values_v69"](resumed, {"loss": 1.0, "gradient_norm": 1.5, "lr": 0.0002}, step=2)
     assert resumed.id == tracking["id"]
     resumed.finish()
@@ -35,7 +43,9 @@ def main():
                                                     "mode": args.swanlab_mode, "model_executed": False,
                                                     "uploaded": False, "tracking_scope": "training_scalars_only",
                                                     "project": tracking["project"],
-                                                    "legacy_project_environment_compatible": True}, indent=2), encoding="utf-8")
+                                                    "workspace": tracking["workspace"],
+                                                    "legacy_project_environment_compatible": True,
+                                                    "workspace_environment_compatible": True}, indent=2), encoding="utf-8")
     print(f"[swanlab-v69-test] passed mode={args.swanlab_mode} report={out / 'test_report.json'}", flush=True)
 
 
