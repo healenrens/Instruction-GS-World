@@ -74,7 +74,7 @@ This is the preparation-machine command: it fetches code and installs dependenci
   export SOURCE_REVISION="$(git rev-parse HEAD)"
   bash code/scripts/deploy_language_object_effect_v70_runtime.sh
   export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
-  "${VENV_ROOT}/.venv/bin/python" -m pip install -r "${ROOT}/code/requirements-v70.txt"
+  uv pip install --python "${VENV_ROOT}/.venv/bin/python" -r "${ROOT}/code/requirements-v70.txt"
   mkdir -p "${TEST_OUT}"
   printf 'Log: %s\n' "${TEST_OUT}/prepare_and_test.log"
   bash "${ROOT}/code/scripts/prepare_and_test_language_object_effect_v70.sh" \
@@ -90,6 +90,8 @@ The full-model GPU test has not yet been run. Its result is `${TEST_OUT}/resume_
 
 This block is for a preparation machine that may access GitHub and Hugging Face. None of the later runtime scripts fetch code or models.
 
+Use uv to manage the existing environment at `${RUNTIME_ROOT}/.venv`. The environment does not need the Python `pip` module. Do not recreate it or run `uv pip sync`, which would remove unrelated dependencies used by existing experiments. Runtime commands use the same interpreter directly and do not install packages.
+
 ```bash
 (
   cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source &&
@@ -98,7 +100,7 @@ This block is for a preparation machine that may access GitHub and Hugging Face.
   export SOURCE_REVISION="$(git rev-parse HEAD)" &&
   export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world &&
   bash code/scripts/deploy_language_object_effect_v70_runtime.sh &&
-  "${RUNTIME_ROOT}/.venv/bin/python" -m pip install -r code/requirements-v70.txt
+  uv pip install --python "${RUNTIME_ROOT}/.venv/bin/python" -r code/requirements-v70.txt
 )
 ```
 
