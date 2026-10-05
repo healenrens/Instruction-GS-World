@@ -3450,3 +3450,5 @@ HY中889条clip含多个frame task IDs（797 train、92 held）。一个具体�
 V70实现已推送至`codex/language-object-effect-v70`，代码提交`5dc062a3e917461a48317de9738ed4a6d6aef760`。SWXC从GitHub获取该提交，在8600临时目录`/tmp/v70-language-audit-5dc062a.VYql8T`原样执行`inspect_language_sources_v70.py --verified_trace ...`，exit=0、firsterror=null。实际审计17,816条、已有文本9,962、可回连7,134、缺失/排除720；teacher_files_read=0。结果写入`outputs/v70_language_audits/current_collection.json`和`.csv`。未部署runtime、未启动GPU、未导出labels或freeze checkpoint。单卡完整4B测试仍待用户执行，不能用这个CPU元数据结果代替。
 
 新diagnostic/test拆分保证V70内episode隔离，但本次尚未逐一排除历代实验已经查看过的held case。最终独立test的科学声明仍需核对既往诊断case清单；目前先在diagnostic上开发，不把重新随机分组称为洗掉历史使用记录。
+
+**Teacher选择更新（2026-10-06）**：用户要求由7,500改为8,500。SWXC只读检查确认没有`step_0008500.pt`；CPU以mmap读取`latest.pt["step"]`实际为8,750，与progress.json一致。编号快照仍只有2,500、5,000、7,500。建议改用实际8,750步，但尚未得到用户确认；未复制、覆盖或重命名checkpoint，未生成新teacher标签。此前7,500准备示例不再代表当前用户选择，待可用快照确定后更新执行命令。

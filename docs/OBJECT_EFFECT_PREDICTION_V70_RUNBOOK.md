@@ -98,6 +98,8 @@ Outputs: `current_collection.json`, a sibling CSV with per-clip evidence, and th
 
 ## 3. Fix the Teacher and Prepare Windows
 
+Teacher selection update (2026-10-06): the user requested step 8,500 instead of 7,500. The server has no `step_0008500.pt`; CPU reading of `latest.pt` returned step 8,750, matching `progress.json`. The 7,500-step path below is the earlier example, not the newly requested teacher. Do not run this preparation block until the user selects an available snapshot. No 8,500-step snapshot has been fabricated and no rolling checkpoint has been copied. Step 8,750 is the proposed alternative, pending the user's decision.
+
 Set `STAGE2_CHECKPOINT` to a specific numbered Stage 2 checkpoint. Do not leave it pointing at a moving `latest.pt`. The snapshot deliberately omits optimizer state. Its output uses exclusive creation; choose a new `DATA_ROOT` for another teacher or another language policy.
 
 ```bash
@@ -108,7 +110,7 @@ export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURC
 export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70"
 export STAGE2_MANIFEST="${RUNTIME_ROOT}/outputs/object_video_v69_state_seed17_40e4586_20260929_003931/dataset.json"
 export MODEL_PATH="${RUNTIME_ROOT}/models/Qwen3-VL-4B-Instruct"
-# Fixed numbered snapshot observed by the read-only audit, not moving latest.pt.
+# Earlier example only; see the pending teacher-selection update above.
 export STAGE2_CHECKPOINT="${RUNTIME_ROOT}/outputs/object_video_v69_stage2_large_b32_seed17_20261003_215438/step_0007500.pt"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 "${RUNTIME_ROOT}/.venv/bin/python" "${ROOT}/code/scripts/freeze_object_teacher_v70.py" \
