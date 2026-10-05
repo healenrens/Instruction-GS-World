@@ -69,13 +69,10 @@ This block is for a preparation machine that may access GitHub and Hugging Face.
 )
 ```
 
-Model download is a separate preparation action. It does not need to run again when the local model is already complete.
+Reuse the existing server model below. On 2026-10-06, a read-only check through SWXC confirmed the configuration, processor/tokenizer files, and both weight shards referenced by the index. No model download is needed. This file check is not a full GPU execution test.
 
 ```bash
-export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
-"${RUNTIME_ROOT}/.venv/bin/hf" download Qwen/Qwen3-VL-4B-Instruct \
-  --local-dir "${RUNTIME_ROOT}/models/Qwen3-VL-4B-Instruct"
+export MODEL_PATH=/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct
 ```
 
 ## 2. Read-Only Language Audit
@@ -109,7 +106,7 @@ export SOURCE_REVISION="$(cat "${RUNTIME_ROOT}/runtime/language_object_effect_v7
 export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
 export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70"
 export STAGE2_MANIFEST="${RUNTIME_ROOT}/outputs/object_video_v69_state_seed17_40e4586_20260929_003931/dataset.json"
-export MODEL_PATH="${RUNTIME_ROOT}/models/Qwen3-VL-4B-Instruct"
+export MODEL_PATH=/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct
 # Earlier example only; see the pending teacher-selection update above.
 export STAGE2_CHECKPOINT="${RUNTIME_ROOT}/outputs/object_video_v69_stage2_large_b32_seed17_20261003_215438/step_0007500.pt"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
@@ -152,7 +149,7 @@ export SOURCE_REVISION="$(cat "${RUNTIME_ROOT}/runtime/language_object_effect_v7
 export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
 export VENV_ROOT="${RUNTIME_ROOT}"
 export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70"
-export MODEL_PATH="${RUNTIME_ROOT}/models/Qwen3-VL-4B-Instruct"
+export MODEL_PATH=/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct
 export CUDA_VISIBLE_DEVICES=0
 export TEST_BATCH=1
 export TEST_OUT="${RUNTIME_ROOT}/outputs/v70_tests/full_single_gpu_$(date +%Y%m%d_%H%M%S)"
@@ -172,7 +169,7 @@ export SOURCE_REVISION="$(cat "${RUNTIME_ROOT}/runtime/language_object_effect_v7
 export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
 export VENV_ROOT="${RUNTIME_ROOT}"
 export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70"
-export MODEL_PATH="${RUNTIME_ROOT}/models/Qwen3-VL-4B-Instruct"
+export MODEL_PATH=/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct
 export MODE=flow
 export RUN_NAME=language_object_effect_v70_flow_seed17_run1
 export OUT="${RUNTIME_ROOT}/outputs/${RUN_NAME}"
