@@ -5,9 +5,9 @@ export RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world
 export VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 export DATA_ROOT="${DATA_ROOT:-${RUNTIME_ROOT}/data/language_object_effect_v70_step8750}"
 export MODEL_PATH="${MODEL_PATH:-/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export EXPORT_GPUS=1
-export TEST_BATCH=1
+export EXPORT_GPUS="${EXPORT_GPUS:-1}"
+export TEST_GPUS="${TEST_GPUS:-1}"
+export TEST_BATCH="${TEST_BATCH:-1}"
 export DINO_FRAME_BATCH="${DINO_FRAME_BATCH:-8}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
@@ -32,7 +32,7 @@ echo "[v70-prepare] phase=language_windows"
 echo "[v70-prepare] phase=label_export"
 bash "${ROOT}/code/scripts/run_language_object_effect_v70.sh" export
 
-echo "[v70-prepare] phase=single_gpu_full_test out=${TEST_OUT}"
+echo "[v70-prepare] phase=full_test world=${TEST_GPUS} out=${TEST_OUT}"
 bash "${ROOT}/code/scripts/run_language_object_effect_v70.sh" test
 printf '[v70-prepare] completed manifest=%s report=%s\n' \
   "${MANIFEST}" "${TEST_OUT}/resume_report.json"

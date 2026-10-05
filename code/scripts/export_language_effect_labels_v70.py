@@ -45,7 +45,7 @@ def main():
     entries = payload["entries"][:args.limit] if args.limit else payload["entries"]
     if args.probe_output:
         rows = []
-        for entry in entries:
+        for entry in entries[context.rank::context.world_size]:
             sample = full_window(entry)
             if "decode_error" in sample:
                 rows.append(sample)
@@ -62,6 +62,10 @@ def main():
                          "history_query_max_difference": max(float((original[key].float()-swapped[key].float()).abs().max()) for key in
                                                               ("query_xy", "query_frame_index", "query_features", "query_valid")),
                          "posterior_mean_max_difference": float((original["mean"]-swapped["mean"]).abs().max())})
+        if context.distributed:
+            gathered = [None] * context.world_size
+            torch.distributed.all_gather_object(gathered, rows)
+            rows = [row for shard in gathered for row in shard]
         if context.is_main:
             Path(args.probe_output).write_text(json.dumps({"cases": rows}, indent=2))
         if context.distributed:

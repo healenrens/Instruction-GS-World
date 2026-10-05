@@ -3458,3 +3458,5 @@ V70实现已推送至`codex/language-object-effect-v70`，代码提交`5dc062a3e
 **固定teacher与集合准备入口（2026-10-06）**：用户要求全部处理后交付除长训以外的集合命令，采用前述现存8,750步。SWXC用已推送的冻结脚本生成`data/language_object_effect_v70_step8750/teacher.pt`，CPU读回step=8750，文件2,865,329,694字节，不含optimizer；原checkpoint未修改。此项替代上文待确认状态。V70默认数据目录与全部命令同步到`language_object_effect_v70_step8750`，不追随latest。新增`prepare_and_test_language_object_effect_v70.sh`顺序执行语言审计、窗口生成、单卡标签导出与单卡完整保存/恢复测试，无八卡长训调用。已有标签可续导出，测试目录每次独立；完整GPU测试仍待执行。
 
 **环境管理约定（2026-10-06）**：按用户要求，V70准备命令使用`uv pip install --python .../.venv/bin/python`管理现有环境，不依赖环境内的pip模块、不重建共享环境。运行阶段仍直接使用该解释器，不联网安装依赖。
+
+**八卡导出与测试（2026-10-06）**：用户要求将标签生成和测试并行到八卡。标签及future-swap按窗口分片；完整测试支持`--nproc_per_node 8`，比较所有rank的采样、噪声、loss和恢复记录，而非仅rank0。语言审计与窗口枚举仍由单个CPU进程完成。准备入口不再覆盖GPU可见列表，单卡默认兼容；八卡任务命令直接用Python/torchrun，不安装依赖或访问GitHub。完整八卡CUDA执行结果待服务器测试，不将本地CPU结果当作FSDP实测。

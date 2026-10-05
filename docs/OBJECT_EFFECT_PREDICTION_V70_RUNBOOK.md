@@ -189,6 +189,50 @@ bash "${ROOT}/code/scripts/run_language_object_effect_v70.sh" test
 
 Results: `${TEST_OUT}/resume_report.json`, `teacher_future_swap.json`, and each run's `module_update_report.json`, `run.json` and traces. Full optimizer checkpoints are large; this test retains one rolling checkpoint per test run, not a second copy of the teacher. Test batch 1 is not a claim that eight-GPU training batch 4 has been measured.
 
+## 5b. Eight-GPU Export and Full Test
+
+The eight-GPU path uses the same labels and model, not eight independent training runs. Export assigns windows by rank; existing label files are reused. Future-swap probes also run by rank. The full test runs FSDP uninterrupted and resumed updates and compares traces from every rank, then checks the combined module-update report. Default test batch is 1 per GPU. It is a functional test, not a production batch-capacity measurement. Do not run another exporter concurrently into the same labels directory.
+
+After syncing and deploying on the preparation host, run this on the eight-GPU job. There is no Git, download, dependency installation or Bash-script launcher in this block. Keep all eight scheduler-assigned GPUs visible.
+
+```bash
+(
+  set -euo pipefail
+  cd /mnt/pfs/public/xuhaoming/instruct_gs_world
+  export RUNTIME_ROOT=$PWD
+  export PY="${RUNTIME_ROOT}/.venv/bin/python"
+  export SOURCE_REVISION="$(cat "${RUNTIME_ROOT}/runtime/language_object_effect_v70/DEPLOYED_REVISION")"
+  export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
+  export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70_step8750"
+  export MODEL_PATH=/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct
+  export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+  export TOKENIZERS_PARALLELISM=false
+  export TEST_OUT="${RUNTIME_ROOT}/outputs/v70_tests/eight_gpu_$(date +%Y%m%d_%H%M%S)"
+  STAGE2_MANIFEST="${RUNTIME_ROOT}/outputs/object_video_v69_state_seed17_40e4586_20260929_003931/dataset.json"
+  TRACE="${RUNTIME_ROOT}/outputs/v70_language_audits/stage2_language_full_metadata_trace_20261006.jsonl"
+  mkdir -p "${TEST_OUT}"
+  "${PY}" "${ROOT}/code/scripts/inspect_language_sources_v70.py" \
+    --manifest "${STAGE2_MANIFEST}" --verified_trace "${TRACE}" --output "${DATA_ROOT}/language_audit.json"
+  "${PY}" "${ROOT}/code/scripts/prepare_language_manifest_v70.py" \
+    --manifest "${STAGE2_MANIFEST}" --teacher_checkpoint "${DATA_ROOT}/teacher.pt" \
+    --audit "${DATA_ROOT}/language_audit.json" --verified_trace "${TRACE}" \
+    --tokenizer_path "${MODEL_PATH}" --output "${DATA_ROOT}/language_manifest.json"
+  "${PY}" -m torch.distributed.run --standalone --nproc_per_node=8 \
+    "${ROOT}/code/scripts/export_language_effect_labels_v70.py" \
+    --manifest "${DATA_ROOT}/language_manifest.json" --frame_batch 8 \
+    2>&1 | tee "${TEST_OUT}/export.log"
+  "${PY}" "${ROOT}/code/scripts/test_language_object_effect_v70.py" \
+    --manifest "${DATA_ROOT}/labeled_manifest.json" --model_path "${MODEL_PATH}" \
+    --out "${TEST_OUT}" --batch 1 --nproc_per_node 8 \
+    2>&1 | tee "${TEST_OUT}/test.log"
+  printf 'Report: %s\n' "${TEST_OUT}/resume_report.json"
+)
+EXPORT_TEST_RC=$?
+echo "EXPORT_TEST_RC=${EXPORT_TEST_RC}"
+```
+
+The shell convenience entry also accepts `EXPORT_GPUS=8 TEST_GPUS=8`; it no longer changes `CUDA_VISIBLE_DEVICES`. The full eight-GPU CUDA test remains to be run on the server.
+
 ## 6. Eight-GPU Foreground Training
 
 Submit this complete block to the eight-GPU job. It uses shared, already prepared files. It contains no Git, model download, `nohup`, or background process.

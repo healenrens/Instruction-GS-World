@@ -23,7 +23,7 @@ case "${1:-train}" in
     exec "${PY}" "${ROOT}/code/scripts/test_language_object_effect_v70.py" \
       --manifest "${MANIFEST}" --model_path "${MODEL_PATH}" \
       --out "${TEST_OUT:-${RUNTIME_ROOT}/outputs/v70_tests/$(date +%Y%m%d_%H%M%S)}" \
-      --batch "${TEST_BATCH:-1}"
+      --batch "${TEST_BATCH:-1}" --nproc_per_node "${TEST_GPUS:-1}"
     ;;
   train|resume)
     EXTRA=()
