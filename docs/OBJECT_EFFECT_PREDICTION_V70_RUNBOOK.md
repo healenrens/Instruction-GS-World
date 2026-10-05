@@ -53,6 +53,39 @@ Each usable clip yields at most four uniform legal windows. The 3s/5s sampling d
 
 Offline labels store mean/logvar, history query coordinates/features/validity, exact frame indices, teacher snapshot metadata and language provenance. Dense patches and RGB are not copied. Training rereads only the history frames.
 
+## Combined Preparation and Single-GPU Test
+
+This is the preparation-machine command: it fetches code and installs dependencies, then runs the language audit, window preparation, complete label export and single-GPU test in the foreground. It uses the fixed step-8,750 teacher prepared through SWXC. It does not start a long training run. The test itself performs a few optimizer updates to exercise save/resume. Completed label files are reused on rerun; each invocation gets a new test directory.
+
+```bash
+(
+  set -euo pipefail
+  export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+  export VENV_ROOT="${RUNTIME_ROOT}"
+  export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70_step8750"
+  export MODEL_PATH=/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct
+  export CUDA_VISIBLE_DEVICES=0
+  export DINO_FRAME_BATCH=8
+  export TEST_OUT="${RUNTIME_ROOT}/outputs/v70_tests/step8750_$(date +%Y%m%d_%H%M%S)"
+  unset RESUME MANIFEST
+  cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
+  git fetch origin refs/heads/codex/language-object-effect-v70
+  git switch --detach FETCH_HEAD
+  export SOURCE_REVISION="$(git rev-parse HEAD)"
+  bash code/scripts/deploy_language_object_effect_v70_runtime.sh
+  export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
+  "${VENV_ROOT}/.venv/bin/python" -m pip install -r "${ROOT}/code/requirements-v70.txt"
+  mkdir -p "${TEST_OUT}"
+  printf 'Log: %s\n' "${TEST_OUT}/prepare_and_test.log"
+  bash "${ROOT}/code/scripts/prepare_and_test_language_object_effect_v70.sh" \
+    2>&1 | tee "${TEST_OUT}/prepare_and_test.log"
+)
+PREPARE_TEST_RC=$?
+echo "PREPARE_TEST_RC=${PREPARE_TEST_RC}"
+```
+
+The full-model GPU test has not yet been run. Its result is `${TEST_OUT}/resume_report.json`. This combined command is not a substitute for the separate eight-GPU training command below.
+
 ## 1. Sync and Dependencies
 
 This block is for a preparation machine that may access GitHub and Hugging Face. None of the later runtime scripts fetch code or models.
@@ -95,23 +128,19 @@ Outputs: `current_collection.json`, a sibling CSV with per-clip evidence, and th
 
 ## 3. Fix the Teacher and Prepare Windows
 
-Teacher selection update (2026-10-06): the user requested step 8,500 instead of 7,500. The server has no `step_0008500.pt`; CPU reading of `latest.pt` returned step 8,750, matching `progress.json`. The 7,500-step path below is the earlier example, not the newly requested teacher. Do not run this preparation block until the user selects an available snapshot. No 8,500-step snapshot has been fabricated and no rolling checkpoint has been copied. Step 8,750 is the proposed alternative, pending the user's decision.
+Teacher selection update (2026-10-06): use the available step 8,750 after the user's request to complete preparation. There is no saved step 8,500. The fixed dependency is `data/language_object_effect_v70_step8750/teacher.pt`; subsequent window preparation, export, testing and training reuse this file, not a moving `latest.pt`.
 
-Set `STAGE2_CHECKPOINT` to a specific numbered Stage 2 checkpoint. Do not leave it pointing at a moving `latest.pt`. The snapshot deliberately omits optimizer state. Its output uses exclusive creation; choose a new `DATA_ROOT` for another teacher or another language policy.
+The snapshot deliberately omits optimizer state. Choose a new `DATA_ROOT` for another teacher or another language policy. The command below reuses the fixed teacher and does not recreate it.
 
 ```bash
 cd /mnt/pfs/public/xuhaoming/instruct_gs_world
 export RUNTIME_ROOT=$PWD
 export SOURCE_REVISION="$(cat "${RUNTIME_ROOT}/runtime/language_object_effect_v70/DEPLOYED_REVISION")"
 export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
-export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70"
+export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70_step8750"
 export STAGE2_MANIFEST="${RUNTIME_ROOT}/outputs/object_video_v69_state_seed17_40e4586_20260929_003931/dataset.json"
 export MODEL_PATH=/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct
-# Earlier example only; see the pending teacher-selection update above.
-export STAGE2_CHECKPOINT="${RUNTIME_ROOT}/outputs/object_video_v69_stage2_large_b32_seed17_20261003_215438/step_0007500.pt"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-"${RUNTIME_ROOT}/.venv/bin/python" "${ROOT}/code/scripts/freeze_object_teacher_v70.py" \
-  --checkpoint "${STAGE2_CHECKPOINT}" --output "${DATA_ROOT}/teacher.pt" &&
 "${RUNTIME_ROOT}/.venv/bin/python" "${ROOT}/code/scripts/prepare_language_manifest_v70.py" \
   --manifest "${STAGE2_MANIFEST}" --teacher_checkpoint "${DATA_ROOT}/teacher.pt" \
   --audit "${RUNTIME_ROOT}/outputs/v70_language_audits/current_collection.json" \
@@ -129,7 +158,7 @@ export RUNTIME_ROOT=$PWD
 export SOURCE_REVISION="$(cat "${RUNTIME_ROOT}/runtime/language_object_effect_v70/DEPLOYED_REVISION")"
 export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
 export VENV_ROOT="${RUNTIME_ROOT}"
-export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70"
+export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70_step8750"
 export CUDA_VISIBLE_DEVICES=0
 export EXPORT_GPUS=1
 export DINO_FRAME_BATCH=8
@@ -148,7 +177,7 @@ export RUNTIME_ROOT=$PWD
 export SOURCE_REVISION="$(cat "${RUNTIME_ROOT}/runtime/language_object_effect_v70/DEPLOYED_REVISION")"
 export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
 export VENV_ROOT="${RUNTIME_ROOT}"
-export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70"
+export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70_step8750"
 export MODEL_PATH=/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct
 export CUDA_VISIBLE_DEVICES=0
 export TEST_BATCH=1
@@ -168,7 +197,7 @@ export RUNTIME_ROOT=$PWD
 export SOURCE_REVISION="$(cat "${RUNTIME_ROOT}/runtime/language_object_effect_v70/DEPLOYED_REVISION")"
 export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
 export VENV_ROOT="${RUNTIME_ROOT}"
-export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70"
+export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70_step8750"
 export MODEL_PATH=/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct
 export MODE=flow
 export RUN_NAME=language_object_effect_v70_flow_seed17_run1
@@ -214,7 +243,7 @@ export RUNTIME_ROOT=$PWD
 export SOURCE_REVISION="$(cat "${RUNTIME_ROOT}/runtime/language_object_effect_v70/DEPLOYED_REVISION")"
 export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
 export VENV_ROOT="${RUNTIME_ROOT}"
-export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70"
+export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70_step8750"
 export RUN_NAME=language_object_effect_v70_flow_seed17_run1
 export CHECKPOINT="${RUNTIME_ROOT}/outputs/${RUN_NAME}/latest.json"
 export CUDA_VISIBLE_DEVICES=0
@@ -236,4 +265,4 @@ Local CPU integration completed with the real training loop, AdamW, DCP, sampler
 
 The server language audit above is complete. The committed CLI at `5dc062a3e917461a48317de9738ed4a6d6aef760` also ran through SWXC on the port-8600 server: exit 0, all 17,816 entries, 9,962 embedded, 7,134 joinable and 720 excluded, with zero teacher files loaded. `current_collection.json` and `.csv` already exist at the paths in section 2.
 
-The full 4B single-GPU test and eight-GPU FSDP run have **not** been executed by local CPU tests. Single-GPU memory fit, production throughput and complete CUDA numerical replay remain to be measured by section 5. The numbered 7,500-step teacher is a fixed preparation choice, not a new claim that its scientific quality is sufficient. The new diagnostic/test split isolates V70 episodes, but earlier experiments' inspected held cases have not yet been cross-checked against the candidate test set; do not call it a historically untouched test set until that check is done.
+The full 4B single-GPU test and eight-GPU FSDP run have **not** been executed by local CPU tests. Single-GPU memory fit, production throughput and complete CUDA numerical replay remain to be measured by section 5. The 8,750-step teacher is a fixed preparation choice, not a new claim that its scientific quality is sufficient. The new diagnostic/test split isolates V70 episodes, but earlier experiments' inspected held cases have not yet been cross-checked against the candidate test set; do not call it a historically untouched test set until that check is done.

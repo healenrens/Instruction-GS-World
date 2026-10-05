@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 PY="${VENV_ROOT}/.venv/bin/python"
-DATA_ROOT="${DATA_ROOT:-${RUNTIME_ROOT}/data/language_object_effect_v70}"
+DATA_ROOT="${DATA_ROOT:-${RUNTIME_ROOT}/data/language_object_effect_v70_step8750}"
 MODEL_PATH="${MODEL_PATH:-/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct}"
 MANIFEST="${MANIFEST:-${DATA_ROOT}/labeled_manifest.json}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1

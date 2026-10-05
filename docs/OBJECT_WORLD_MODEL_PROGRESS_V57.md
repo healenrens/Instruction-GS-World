@@ -3454,3 +3454,5 @@ V70实现已推送至`codex/language-object-effect-v70`，代码提交`5dc062a3e
 **Teacher选择更新（2026-10-06）**：用户要求由7,500改为8,500。SWXC只读检查确认没有`step_0008500.pt`；CPU以mmap读取`latest.pt["step"]`实际为8,750，与progress.json一致。编号快照仍只有2,500、5,000、7,500。建议改用实际8,750步，但尚未得到用户确认；未复制、覆盖或重命名checkpoint，未生成新teacher标签。此前7,500准备示例不再代表当前用户选择，待可用快照确定后更新执行命令。
 
 **VLM资产复用（2026-10-06）**：V70默认`MODEL_PATH`改为服务器现有的`/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct`，不重复下载。SWXC只读确认配置为Qwen3-VL、语言hidden size 2560/36层，processor/tokenizer配套文件可读，权重索引引用的两个分片均存在。此项只确认文件资产，不代表完整模型已通过GPU训练测试；不改变待确认的teacher选择。
+
+**固定teacher与集合准备入口（2026-10-06）**：用户要求全部处理后交付除长训以外的集合命令，采用前述现存8,750步。SWXC用已推送的冻结脚本生成`data/language_object_effect_v70_step8750/teacher.pt`，CPU读回step=8750，文件2,865,329,694字节，不含optimizer；原checkpoint未修改。此项替代上文待确认状态。V70默认数据目录与全部命令同步到`language_object_effect_v70_step8750`，不追随latest。新增`prepare_and_test_language_object_effect_v70.sh`顺序执行语言审计、窗口生成、单卡标签导出与单卡完整保存/恢复测试，无八卡长训调用。已有标签可续导出，测试目录每次独立；完整GPU测试仍待执行。
