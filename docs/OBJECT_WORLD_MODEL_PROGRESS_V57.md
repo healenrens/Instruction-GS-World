@@ -3444,3 +3444,9 @@ HY中889条clip含多个frame task IDs（797 train、92 held）。一个具体�
 本地小型CPU整链路测试使用真实训练循环、AdamW、DCP、episode sampler及scheduler，恢复后最终参数最大差0、sample/noise/tau/数值trace一致、冻结视觉参数未变、语言和expert参数更新。官方小配置Qwen接口在Transformers4.57.1及5.18.0运行；expert参数计数为实现测得。以上不是完整4B CUDA或八卡测试。完整单卡测试脚本执行真实窗口、future swap、反向更新、保存恢复和更新记录；服务器GPU部分由用户后续执行，不宣称已经通过。
 
 操作入口及独立命令见`docs/OBJECT_EFFECT_PREDICTION_V70_RUNBOOK.md`。下一项是用已审计来源生成语言窗口与固定teacher标签，再做单卡完整测试；通过真实执行反馈确定八卡batch与吞吐。语言条件预测是否有效，最终仍以同一冻结Dynamics下的逐轨迹绝对误差、运动归一化误差、静止漂移及语言干预结果判断，不以flow loss或参数数量宣布成功。
+
+**Delivery / 已提交代码的服务器执行记录**
+
+V70实现已推送至`codex/language-object-effect-v70`，代码提交`5dc062a3e917461a48317de9738ed4a6d6aef760`。SWXC从GitHub获取该提交，在8600临时目录`/tmp/v70-language-audit-5dc062a.VYql8T`原样执行`inspect_language_sources_v70.py --verified_trace ...`，exit=0、firsterror=null。实际审计17,816条、已有文本9,962、可回连7,134、缺失/排除720；teacher_files_read=0。结果写入`outputs/v70_language_audits/current_collection.json`和`.csv`。未部署runtime、未启动GPU、未导出labels或freeze checkpoint。单卡完整4B测试仍待用户执行，不能用这个CPU元数据结果代替。
+
+新diagnostic/test拆分保证V70内episode隔离，但本次尚未逐一排除历代实验已经查看过的held case。最终独立test的科学声明仍需核对既往诊断case清单；目前先在diagnostic上开发，不把重新随机分组称为洗掉历史使用记录。
