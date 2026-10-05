@@ -1,0 +1,9 @@
+torch>=2.8
+torchvision>=0.23
+transformers>=4.57.1,<6
+accelerate>=1.2
+safetensors>=0.4
+pyarrow>=14
+av>=14
+pillow>=10
+swanlab==0.10.1

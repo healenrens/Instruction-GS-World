@@ -1,23 +1,23 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
-> 更新日期：2026-10-02
+> 更新日期：2026-10-05
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
 > 当前开发分支：`codex/object-video-sequence-v69`
-> 当前实现：V69，冻结预训练视觉输入、3s/5s query-object sequence；Stage 2扩容与迁移见15.51，GPU执行待用户单卡测试
-> 最新单卡反馈：State对照后进入Dynamics，两个Dynamics路径到step10，但恢复参数比较失败；完整测试未通过，见15.45
-> 当前接口修订：V69r2 `pretrained_query_object_video_sequence_v2`，local effect routing、Posterior geometry与entity评测修正；未取得新GPU结果
-> State专用变化评测：第15.48节。在线run `0oko1yhr`实际运行V69 v1 `40e4586`；评测严格复用其State模块，不加载新版未训练effect模块。
+> 当前实现：V69 Stage 2 large，冻结6000步State，训练约356.7M Posterior/Dynamics；3s历史、5s未来
+> 最新训练证据：SwanLab `00cxvd6i`，已读取step 1–6830，数据截至2026-10-05 13:22:56 CST；见15.56，不代表此刻实时状态
+> 当前执行接口：`pretrained_query_object_video_sequence_v3_stage2_large`，执行提交`c073c3b`；历史单卡失败见15.45，不再代表当前运行状态
+> State专用变化评测：第15.48–15.49节，6000步快照支持观测变化还原；Stage 2尚无本轮held结果
 > 继承数据：V68 `991099e`，所有类别轨迹全局Top-75%；RoboTwin只复用旧轨迹，不重新追踪
-> 最新设计/执行：第15.43–15.44节，以及`OBJECT_VIDEO_SEQUENCE_V69_RUNBOOK.md`
+> 最新研究规划：第15.58节，语言/历史视频条件下预测现有effect；15.57的分段effect降为后续备选，Stage 2执行见`OBJECT_VIDEO_STAGE2_V69_RUNBOOK.md`
 > 最新人工反馈：第 15.32 节记录物体覆盖不足、跨数据集机械臂混淆和 RoboMIND 视频来源疑问；尚未证明 teacher 可用于物体级监督
 > 历史 V66 验证提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`（V66 四卡、六源、1536 held clips G0 audit）
 > V62 E0/E1 实现提交：`6fa0d63e67daf85d24654aaa649e725eb5245bfe`
 > V62 B/C/D structural audit 实现提交：`2ad1158084ff0e8b4070f43c6721261df1884485`（静态验证，待服务器执行）
-> 上次账本提交：`2e513d9d0f3f1b37a24fe5af4f1df2c95ac141f4`
-> 当前实验：V67 的 latent 语义与 teacher contract 尚未获得独立证明；下一项是原始 tracker 逐例观看与抽帧对照，仍停留在 G0
+> 当前证据边界：V69在用户批准的冻结State可行性实验内推进；历史teacher/object语义缺口未自动消失，但不再把V67逐例观看列为当前唯一任务
 > 远端代码工作区：`/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source/`  
 > 远端运行与产物根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/`  
 > W&B：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`
+> 当前训练SwanLab：`healenrens/instruct-gs-world`；仅同步训练标量，评测逐例产物保留本地
 
 ## 0. 唯一主线
 
@@ -458,6 +458,8 @@ $$
 - **下一实验唯一问题**：在不削弱 v57 binding 的前提下，让 observability、unknown 和 object support 获得不可被 student 自己关闭的外部监督。
 
 ## 11. 当前 TODO 与单向推进规则
+
+以下11.1–11.3保留原始决策上下文；2026-10-05之后的执行优先级以15.58为准。历史Gate未通过不等于已获授权的V69训练需要停止；工程运行、研究假设和成功声明分别记录。
 
 ### 11.1 当前 Gate 状态
 
@@ -3288,3 +3290,157 @@ checkpoint 新增 tracking 元数据，包括 backend、experiment ID、project/
 - **What changed**：项目名使用官方 `SWANLAB_PROJ_NAME`；未指定 workspace 时不导出空字符串。V69 先从 CLI/environment 或 checkpoint 取得 project/workspace/id/resume，再移除 SDK 环境解析中的旧 project alias 和重复 workspace/id/resume，通过显式 `init` 参数传入；认证继续使用 `SWANLAB_API_KEY`。
 - **Why**：SwanLab 0.10.1 的 `SWANLAB_PROJECT` 是结构化 `ProjectSettings`，workspace 若指定则必须是非空字符串；普通项目名和空 workspace 的环境变量与该契约冲突。
 - **Impact**：兼容已提交脚本中的旧项目名、空 workspace；非空 workspace 和 checkpoint experiment ID 不变。仅修改日志配置入口与运行指令，不改变模型、loss、数据、batch 或 checkpoint 数值恢复；训练仍只上传标量指标。
+
+### 15.55 2026-10-03 Stage 2 默认 microbatch 放大四倍
+
+- **What changed**：Stage 2 新启动默认每卡 batch 由 4 改为 16，DINO frame batch 由 2 改为 8；八卡 global batch 保持 256，梯度累积由 8 改为 2。
+- **Why**：用户反馈显存占用低、训练慢，要求放大四倍，以更大的实际 microbatch 和 encoder frame batch 执行现有计算。
+- **Impact**：模型、loss、原生分辨率、16 帧历史与 25 帧未来不变。严格 resume 继续恢复 checkpoint 原 batch/accum 和 encoder frame batch；这不是原实验的自动 rebatch。未进行本地模型前向或八卡显存/吞吐测试，不声明四倍加速。
+
+### 15.56 2026-10-05 SwanLab Stage 2 全历史读数：effect 有效，位置梯度主导
+
+- **What changed / evidence**：直接从 SwanLab API 读取 `object_video_v69_stage2_large_b32_seed17_20261003_215438`（run `00cxvd6i`）完整标量记录，共 1353 个 loss 记录点，step 1–6830；最后同步时间 2026-10-05 13:22:56 CST，状态 RUNNING。实际执行版本 `c073c3b`，每卡 B32、global batch256、DINO frame batch16、workers4；冻结6000步State快照，训练约356.7M Posterior/Dynamics参数。这里记录的是训练读数，不是 held 结果。
+- **Trend**：500–1500、3000–4000、5000–6000、6000–6830 四个窗口的 direct transport 均值分别为14.25、9.34、7.69、7.20原生像素；rollout为14.22、9.48、7.94、7.41；future latent auxiliary为0.2260、0.1982、0.1932、0.1904。最后两窗 direct 改善6.34%，不能宣布已到平台。
+- **Effect evidence**：6000–6830窗口 current-state-copy24.44px、zero-effect29.60px、shuffled41.00px、correct direct7.20px，按窗口均值分别降低70.54%、75.68%、82.44%。该窗口152个已记录batch全部correct优于这三种对照；这不是逐case胜率。Observed-target readout5.65px，只是读取真实未来后经冻结State/readout得到的比较路径，不是数学上不可突破的下界。
+- **Optimization / Why**：最后窗口裁剪前总梯度norm中位数2706.99，center_delta的平方norm占总梯度平方norm的平均99.9906%；feature_delta梯度中位数7.48、Posterior18.68。全局clip阈值5，缩放系数中位数0.001847；所有读取的finite标记均为1。早期总norm中位数4555.58，未见持续上升，不能归因为数值爆炸；但几何输出头主导更新方向，feature改善较弱。加权latent项约占loss0.30%，加权KL项约0.024%，该比例只说明数值量级，不等于梯度占比或直接调权重依据。
+- **Operational observation**：最近约20.81秒/optimizer step，rank0 PyTorch累计峰值allocated显存73.28GiB；不是瞬时NVML显存或全卡利用率。B4旧run约64.02秒/step、B16约24.42秒/step，均为短run且workers/log频率不同，只作观测，不能作为严格受控速度对比。
+- **Impact / next question**：训练支持“真实未来经Posterior压成effect后，Dynamics能还原明显优于静态复制的运动”。Posterior仍读取整个未来序列；尚不证明history-only预测、effect选择、语义可组合性或held泛化。下一次冻结checkpoint评测优先区分geometry/feature贡献、按未来时间与运动幅度的轨迹误差、held correct/zero/shuffled对照，不凭训练均值或模型大小宣布成功。本轮不改模型、不停止训练；建议8k–10k附近开展held评测。
+
+### 15.57 2026-10-05 后续研究计划：从片段编码到可复用的object transition
+
+**What changed / research claim**
+
+主线不变：从纯视频学习与当前实体对应的紧凑状态和变化条件，在object state上完成Dynamics，并减少反复预测的计算成本。下一轮不以更低训练像素误差、更大的feature梯度或更大网络作为目标。必须区分三个问题：未见视频上的变化还原、变化条件的实体归属与复用、达到同等误差时的真实成本。
+
+当前证据来自15.56的训练窗口，而非最终checkpoint评测。本轮检查当前代码，并由子任务只读审阅评测入口；没有修改模型、loss或当前训练。Geometry承载平移和支持形状是合理设计，center梯度主导不是feature无用的证明。15.49已显示State在小于5px运动上可能不如复制，而大运动表现较好，因此motion-relative与静止漂移是已有证据指向的缺口，不是新增形式指标。
+
+**Why / current structural question**
+
+`object_sequence_dynamics_v69.py`中的Posterior按query读取整个未来序列，得到每query四个64维effect tokens。Dynamics将同一组effect反复用于所有未来时间。这允许编码一段五秒轨迹，尚未要求编码具有局部时间含义或可跨上下文复用。正确effect优于zero/shuffled证明模型使用了该信息，不足以证明它表示通用变化。此处是待检验风险，不是已经发现作弊或训练失败。
+
+训练时B>1的shuffled是跨clip打乱；现有held入口B1时则在同一clip内跨query打乱。两者必须分别命名和评测。当前16个query也不等于16个已验证物体；一个实体可能有多个query，实体级干预需要对query group操作。
+
+**P0 / 固定checkpoint的变化能力评测，下一项实现任务**
+
+1. 固定当前数据、State、readout和Stage 2 checkpoint，复用400条、五源各80条的诊断集合，先确认episode与训练划分隔离。该集合用于诊断与方法选择；另留未用于选方法的episode集合做最终确认，不能反复用同一held集合选方案后仍称其为独立test。
+2. 逐track记录完整可见路径ADE、固定5s终点FDE、运动幅度、预测幅度、方向及覆盖率。每条track的相对路径误差是该track平均位置误差除以同一可见时刻、同一参考点下的平均真实位移；先track内计算，再track到clip、episode/source汇总，报告中位数、尾部及配对分布，不用整体误差均值除以整体运动均值替代。
+3. 运动低于可分辨噪声时，不用极小epsilon制造比值；单列静止漂移和绝对误差，并报告分组边界敏感性。往返轨迹终点位移接近零不等于静止；终点ratio不可定义时保留绝对FDE和全路径ratio。不可见段不插值成GT，5s不可见不以更早终点冒充5s。
+4. 参考点是每track最后有效历史观测，不保证恰在t=0；记录reference age，单列t=0可见子集。位置误差保留初始化偏差，位移变化误差从模型自己的source readout起算。像素与图像尺度归一化同时报告；CoTracker agreement仍不是独立物理真值。
+5. 在同一case比较direct/rollout的correct、zero、query-shuffled、cross-clip-shuffled，加current-state-copy、last-observation-copy和observed-target。Posterior mean与sample明确分开。冻结tokens/centers的四格干预区分readout依赖与递推依赖，不能将其直接命名为几何或语义的百分比贡献。
+
+实现复用`object_sequence_evaluation_v69.py`、`state_change_evaluation_v69.py`、`evaluate_object_video_sequence_v69.py`，不另写一套数据加载和指标定义。评测不改变训练目标，也不自动重启训练。
+
+**P1 / Object归属与effect复用，可与P0并行准备**
+
+使用一个按来源、运动幅度、遮挡与接触分层的独立实体审阅子集；只用于评测，不要求整库instance segmentation。检查默认history queries对应的实体，不能用人工指定query成绩替代自动query成绩。既测同实体多个query，也测不同实体；干预同一entity的query group，输出被干预实体到其他实体的响应矩阵。
+
+选择预先规定的、变化相容的donor/recipient pairs，比较recipient自身effect、相容donor effect、不相容donor effect和zero。保持recipient初始状态、其他实体effects及时间不变。相容性依赖独立实体与变化定义，不按评测分数挑选配对；不要求不同尺寸或接触条件下出现完全相同的像素位移。无接触场景检验无关响应，接触场景允许有效交互传播。没有配对真实后果的effect交换只能报告响应，不能称正确反事实。
+
+复用`object_association_diagnostics_v69.py`和现有annotation模板，新增跨clip配对输入。短期保持连续latent，不因可视化聚类就命名动作语义，也不强制latent向量相加具有物理意义。
+
+**P2 / 下一轮训练的首选结构假设：分段object effects**
+
+若P0显示held变化还原成立，而P1暴露effect只适用于原clip，则下一轮仅改变effect的时间组织方式：保留3s历史、5s序列目标、冻结State/readout、现有Dynamics容量与同一数据。对比A为当前整段effect；B为多个局部transition effects，连续rollout仍覆盖完整5s，不回到action-free短期预测。
+
+B的首个受控设计沿用每query共4x64的code预算，把25个未来目标分成四段，每段一个64维effect，并传入真实段时间；共享Posterior只读取该段起点与该段目标状态，共享Dynamics顺序消费各段effect。训练期Posterior可用真实局部source/target，rollout的状态输入必须来自前一段预测，不能用真实中间state重置轨迹。分段是一个待验证的时间组织假设，不代表已发现四种动作，也不宣称64维足够。总latent标量数相同不保证信息率相同，需同时比较KL分布、失真和实际时间成本。
+
+预期作用是使每个effect描述有限时间内、相对于source state的变化，而不是同一编码与绝对未来时间共同解出整条视频。时间分段本身不保证跨对象可迁移；必须由P1配对复用和未见组合的完整rollout证明。PlaySlot的逐transition inverse dynamics与object-conditioned autoregression提供先例，不提供本项目成功保证：<https://arxiv.org/html/2502.07600v2>。不直接搬用其VQ或RGB监督。
+
+若P0反而显示observed-target本身在同一批case失效，优先修正State的证据获取、query binding或小运动稳定性，不先训练B。若direct好而rollout差，优先处理预测state分布下的递推训练，不用更多posterior容量掩盖。若A已经能复用，则保留A，转向成本与selector，不为分段而分段。
+
+**P3 / 成本证据与后续部署**
+
+与P0并行建立benchmark：分开统计history perception/State编码、训练期future/Posterior、给定effect后的Dynamics、readout。比较单次预测与多次候选rollout，报告同步时间分布、吞吐、显存和实际tensor规模；144个State tokens不是端到端加速结论。
+
+先做一个小型、独立拟合的geometry-only transition对照，共享effect信息权限、时间跨度及readout，检验动态feature更新带来的精度与成本。source视觉features仍用于readout，这不是证明所有视觉信息可删。论文层面的dense-state对照需要独立训练并匹配条件信息和预算，不能仅比较token数量。
+
+当object-conditioned变化可复用且成本有收益后，下一项才是goal-conditioned effect selector，先用图像目标或演示选择effect，再讨论language和机器人控制接口。部署预测路径不读真实未来；Posterior仍是训练和演示编码工具。无需先把latent命名成自然语言动作，也不需要以RGB图像质量定义world model成功。
+
+**Impact / 执行边界**
+
+本轮完成代码审查与研究规划记录，未实现P0–P3新增代码、未推送、未修改正在运行的实验。下一实现包优先P0，P1配对规范与P3计时可并行；下一次大规模训练依照这些结果选择，不同时更换encoder、teacher、State、effect和loss。SwanLab继续仅上传已授权训练标量，评测逐例文件/视频留在共享存储。现有Gate作为证据边界，不新增启动阻断或任意单一分数晋级标准。
+
+### 15.58 2026-10-05 Stage 3规划：语言与历史视频条件下预测现有latent effect
+
+**What changed**
+
+1. 用户明确下一阶段应学习预测z，而不是先要求z跨场景复用或改成分段effect。当前Stage 2的任务仍是history-only S0加真实未来经Posterior得到的z，还原S1:25。下一阶段训练p(z | observed history, instruction)，冻结当前State、Posterior、Dynamics、readout，保持每query4x64的连续effect和3s历史/5s未来不变。15.57的motion-relative评测继续使用；分段effect不再是下一轮主改动。
+2. 推荐预训练Qwen3-VL-4B-Instruct作为视频/语言conditioner，新增约300M量级的object-conditioned flow expert。4B是已公开权重的模型规格，expert参数量只是实现预算而非实测。首版保持VLM原视觉输入接口，不把任意DINO投影假称为预训练的视觉语言对齐；DINO/State继续提供当前高分辨率object states。两个视觉计算路径是复用旧world model与引入已有语言能力的成本，不能隐去，也不代表训练两个互相竞争的object State。
+3. 补齐语言数据契约和posterior target导出，最终用预测z经过同一个冻结Dynamics后的结果评价，而不是只比较latent MSE。原始无语言视频仍可参与明确标记的无语言条件训练，但不能算作语言grounding数据。
+
+**Why / source basis**
+
+LAPA明确采用先学习latent action tokenizer，再用预训练VLM根据观测和任务描述预测latent actions的顺序；其离散VQ/分类头不直接套用于我们当前连续z。来源：<https://arxiv.org/html/2410.11758v2>。
+
+pi0采用3B PaliGemma加约300M action expert，并通过flow matching生成连续action chunks；其缓存视觉语言条件、由较小expert重复采样的结构支持本方案，但我们的输出是object effects而不是机器人关节动作。来源：<https://arxiv.org/html/2410.24164v1>。
+
+RepWAM先学视觉/变化表示，再在语言条件下生成visual/action chunks；借鉴语言条件与连续latent生成，不重新实现dense video generation。来源：<https://arxiv.org/html/2606.13674v2>。
+
+Qwen3-VL-4B-Instruct官方提供图像/视频输入与时间位置机制，可作为conditioner初始化；这不是宣称其已会预测本项目的latent。来源：<https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct>。以上资料已在本轮查阅；不依据参数规模自动声明语义能力或八卡吞吐。
+
+**Impact / proposed interfaces**
+
+- 训练标签路径：固定时间窗口与history queries，冻结Posterior读取S0及真实未来states，导出Gaussian mean/logvar、query坐标/有效性、帧时间、episode/window标识、teacher checkpoint版本。目标不能跨query顺序、时间窗口或增强变换错配；只缓存小型effect标签，不要求重造RGB或缓存所有DINO patches。
+- 条件路径：历史16帧/3s及相对时间、instruction输入VLM；历史State序列和query几何输入object adapter。VLM hidden tokens与object tokens构成expert context，不先生成文字解释或chain-of-thought。历史视觉采样/预算只依赖历史，不能由未来运动点筛选。首版VLM保留原processor的动态分辨率机制并显式记录视觉token预算；原State路径分辨率不随VLM改动。
+- 输出路径：64个带query归属的effect tokens，以每query当前State为local条件，以其他queries和VLM context为交互条件，预测[B,16,4,64]连续latent。保持history query到teacher effect的对应，不将slot编号当语义类别。模型按输入query排列输出相应effect，padding query不参与损失。
+- 首版生成对象为Posterior的pre-tanh mean u=mu，再以z=tanh(u)连接现有Dynamics，与当前deterministic posterior评测一致。它学习条件下mean-code的经验分布，不宣称拟合完整Gaussian posterior；logvar保留用于比较posterior采样影响，不把encoder噪声直接等同于多种任务未来。数据归一化统计仅从训练集得到，推理做对应逆变换。
+- Flow训练对u_target与Gaussian噪声epsilon做线性插值u_tau=(1-tau)epsilon+tau*u_target，expert根据u_tau、tau与条件预测u_target-epsilon。tau是去噪时间，不是视频时间。推理从噪声积分生成u，不输入真实u_target或真实未来。VLM/object条件每次决策编码一次，缓存供多步expert使用；跨新观测需要更新条件。
+
+**Impact / training and data plan**
+
+先完成固定Stage 2 checkpoint的posterior reference评测和标签生成，再训练conditioner adapters及effect expert。首版冻结VLM视觉塔，对语言/多模态Transformer做LoRA适配，expert完整训练；不是从零训练4B，也不因VLM冻结大部分参数而把其预训练能力说成不存在。现有约16k独立episode规模来自上一轮manifest，不能当作足够全量微调4B的证据。全量微调或8B扩展仅在语言失败定位与数据覆盖支持后考虑；八卡显存/吞吐待具体实现测量，旧Stage 2 B32不直接沿用。
+
+主训练先仅使用flow objective。暂不同时解冻Posterior/Dynamics，也不对每个随机生成的未来都强制拟合同一条GT轨迹，避免压掉合法多样性；是否增加decoder-aware细调在预测latent经Dynamics的误差定位后决定。用同一conditioner的确定性mean-regression头作一项对照，检验连续分布建模是否实际获益，不并行堆叠多个无关模型。
+
+本地代码确认`ObjectVideoSequenceDatasetV69.__getitem__`返回RGB、时间、teacher、case/source等字段，但没有标准instruction输出；case原始metadata是否保留源语言、各源完整性尚未核验。需按source/episode/task/timestamp回连源instruction，记录instruction来源、时间范围、类型和缺失状态。episode级任务指令是允许输入，不能假称每个5s窗口都有精确子任务。不得用task ID代替可理解语言，也不得把未来路径细节写进输入描述。仅有整段目标与具有时间标注的子任务分别报告；若后续从完整视频生成伪描述，应明确是合成监督而非部署时已知意图，独立指令评测不使用它作为唯一真值。
+
+按episode划分训练/验证/最终test，另设未见指令措辞、object-action组合与场景；同episode多窗口或语言改写不能跨集合泄漏。教师标签生成可离线并行，Stage 3训练不读取未来RGB。保留原始数据与现有采样轨迹，不先追加重型tracker/SAM流程。
+
+**Impact / evaluation and delivery scope**
+
+核心对比在相同case和同一冻结Dynamics下进行：posterior mean z、视频+正确语言生成z、视频无语言生成z、视频+明确冲突语言生成z、静态复制。绝对/运动归一化轨迹误差、分时间/来源/幅度分布沿用15.57；latent误差只作辅助。无语言与错误语言都只能作为解释性对照，若历史已唯一决定运动，语言收益不一定明显，需含真实指令歧义的场景。
+
+主成绩报告单样本或固定采样规则下的期望表现；best-of-N仅说明覆盖能力，必须标为使用真实后果挑选的oracle指标，不得代替部署精度。instruction干预通过独立entity/目标关系评价，不把冲突指令的合理输出与原视频GT距离变大当作失败。视频历史顺序、对象归属与语言改写对照共同检查条件是否被使用。还需报告包括VLM视频编码、effect采样与Dynamics的完整延迟，不能只报小expert的速度。
+
+本轮仅制定方案并更新本节，尚未实现Stage 3、未推送、未修改当前Stage 2任务。下一开发包是language manifest连接、固定posterior标签导出、VLM conditioner、object effect flow expert，以及复用Dynamics的paired evaluator。原stage2保留为独立可复现实验；分段effect和机器人action decoder均后置。
+
+### 15.59 2026-10-06 V70实现与真实语言覆盖审计
+
+**Decision / 覆盖此前建议**
+
+用户批准V70：Qwen3-VL-4B-Instruct冻结视觉塔及merger，完整训练语言Transformer、embedding及final norm，不使用LoRA。新增12层、1024维、16 heads、SwiGLU4096的连续effect expert，实例化参数计数308,660,288。目标为固定Stage 2 Posterior的pre-tanh mean `[B,16,4,64]`；以原tanh和同一个冻结Dynamics/readout解码。四个effect tokens共同编码五秒，不改成四个时间段。只用已有片段和可靠原始语言，不引入机器人动作或重造tracking。
+
+用户随后将工程测试从四卡改成**单卡**；正式训练仍为八卡FSDP FULL_SHARD。默认每卡4、累积8、global batch256、10k optimizer steps。默认值尚不是80GB显存实测结论。SwanLab仅上传训练标量；评测与视频留本地。同步/下载与前台训练分开，训练不访问GitHub或模型下载。
+
+**Observed / 先审计实际集合，再使用语言**
+
+经用户授权，在SWXC现有Codex对话“配置 port 8600 的 HF checkpoint”中，通过port8600读取服务器元数据。没有启动训练、占用GPU或修改现有数据。当前Stage 2 `object_video_v69_stage2_large_b32_seed17_20261003_215438/run.json`实际指向`outputs/object_video_v69_state_seed17_40e4586_20260929_003931/dataset.json`。集合为17,816条clip/独立episode，而非目录名暗示的20,000条；train16,034、held1,782。
+
+| 来源 | 实际clip | 原始文本及来源回连数量 | 其中train / held | 本步不计入 |
+|---|---:|---:|---:|---:|
+| Agibot | 4,000 | 4,000 | 3,600 / 400 | 0 |
+| Bridge | 2,075 | 2,002 | 1,800 / 202 | 73 |
+| HY | 4,000 | 3,393 | 3,053 / 340 | 607 |
+| RoboMIND | 4,000 | 3,960 | 3,565 / 395 | 40 |
+| RoboTwin | 3,741 | 3,741 | 3,367 / 374 | 0 |
+| 合计 | 17,816 | 17,096 | 15,385 / 1,711 | 720 |
+
+9,962条已在当前group携带文本且与原始episodes.tasks精确一致；HY/RoboTwin另7,134条从原始元数据回连。Bridge排除unknown task67、人工复核的明显乱码5、过短take1；RoboMIND排除xxxx20和无法确认完整指令的putegg20。HY591条无相同视频起始偏移、16条视频偏移匹配但episode长度等不一致；table_002共512、table_004共95。没有使用最近episode、任务编号或文件名生成描述来补齐。
+
+RoboTwin从缓存episode_source_index.json回连原始video_path、video_from_timestamp、原episode及dataset范围；3,741条均有原始任务文本。HY通过回连的3,393条又核对clip范围data Parquet的frame_index/task_index和tasks表，帧记录完整。
+
+**Important limit / 有文本不等于有正确的五秒指令**
+
+HY中889条clip含多个frame task IDs（797 train、92 held）。一个具体例子`hy_embodied_ep10026_f648`的episode文本为“把收纳盒的盖子盖上”，帧级task295文本为“Put the ring back into the 3rd slot of the storage box.”，两者不是同一句话的翻译。因此17,096只表示文本存在并有metadata来源，不是已视觉核验的训练指令数量。V70准备使用精确history anchor的帧级任务文本，记录连续有效帧段和原episode文本；不强行合并这些描述，不声称该子任务覆盖全部五秒未来。其余来源首版保留明确的episode级目标粒度。Agibot3,986条还有与clip重叠的action_text，但“重叠”不等于整个窗口被该动作标注覆盖。
+
+原始报告位于运行根目录下`outputs/v70_language_audits/stage2_language_full_metadata_trace_20261006.json`和`.jsonl`，后者为17,816条逐clip来源证据。最终可用窗口数量需进一步经过8秒窗口、语言选择、token长度和实际decode，不能直接用覆盖数量乘4声称训练样本量。
+
+**Implementation / 链路与测试证据**
+
+新增独立V70语言manifest、离线label exporter、冻结history runtime、官方Qwen conditioner、query-local effect expert、FSDP训练/DCP恢复与paired evaluator。训练只读取16帧history；offline Posterior才读取未来；query次序与mean/logvar绑定同一窗口。保留每query每帧9个State tokens，不先全局平均。最多4个均匀合法窗口，按episode采样；原held按episode固定拆diagnostic/test，未使用评测成绩选划分。
+
+固定教师示例选已列出的`step_0007500.pt`，准备时剥离optimizer并保存独立teacher.pt；不跟随latest。实际还列出了2500、5000步快照，各原文件约5.72GB；本次只检查文件元信息，没有重新评价这些checkpoint能力。修改teacher或语言策略应使用新数据目录，不能把旧标签复用于新窗口。
+
+本地小型CPU整链路测试使用真实训练循环、AdamW、DCP、episode sampler及scheduler，恢复后最终参数最大差0、sample/noise/tau/数值trace一致、冻结视觉参数未变、语言和expert参数更新。官方小配置Qwen接口在Transformers4.57.1及5.18.0运行；expert参数计数为实现测得。以上不是完整4B CUDA或八卡测试。完整单卡测试脚本执行真实窗口、future swap、反向更新、保存恢复和更新记录；服务器GPU部分由用户后续执行，不宣称已经通过。
+
+操作入口及独立命令见`docs/OBJECT_EFFECT_PREDICTION_V70_RUNBOOK.md`。下一项是用已审计来源生成语言窗口与固定teacher标签，再做单卡完整测试；通过真实执行反馈确定八卡batch与吞吐。语言条件预测是否有效，最终仍以同一冻结Dynamics下的逐轨迹绝对误差、运动归一化误差、静止漂移及语言干预结果判断，不以flow loss或参数数量宣布成功。

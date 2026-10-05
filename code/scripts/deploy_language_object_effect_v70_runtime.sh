@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
+BASE="${RUNTIME_ROOT}/runtime/language_object_effect_v70"
+RELEASE="${BASE}/releases/${SOURCE_REVISION}"
+mkdir -p "${RELEASE}/code" "${RELEASE}/docs"
+cp -a "${SOURCE_ROOT}/code/igsw" "${RELEASE}/code/"
+cp -a "${SOURCE_ROOT}/code/scripts" "${RELEASE}/code/"
+cp "${SOURCE_ROOT}/code/requirements-v70.txt" "${RELEASE}/code/"
+cp "${SOURCE_ROOT}/docs/OBJECT_EFFECT_PREDICTION_V70_RUNBOOK.md" "${RELEASE}/docs/"
+printf '%s\n' "${SOURCE_REVISION}" > "${RELEASE}/SOURCE_REVISION"
+printf '%s\n' "${SOURCE_REVISION}" > "${BASE}/DEPLOYED_REVISION.$$.tmp"
+mv "${BASE}/DEPLOYED_REVISION.$$.tmp" "${BASE}/DEPLOYED_REVISION"
+echo "[language-effect-v70] release=${RELEASE}"
