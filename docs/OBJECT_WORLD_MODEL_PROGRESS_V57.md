@@ -3460,3 +3460,5 @@ V70实现已推送至`codex/language-object-effect-v70`，代码提交`5dc062a3e
 **环境管理约定（2026-10-06）**：按用户要求，V70准备命令使用`uv pip install --python .../.venv/bin/python`管理现有环境，不依赖环境内的pip模块、不重建共享环境。运行阶段仍直接使用该解释器，不联网安装依赖。
 
 **八卡导出与测试（2026-10-06）**：用户要求将标签生成和测试并行到八卡。标签及future-swap按窗口分片；完整测试支持`--nproc_per_node 8`，比较所有rank的采样、噪声、loss和恢复记录，而非仅rank0。语言审计与窗口枚举仍由单个CPU进程完成。准备入口不再覆盖GPU可见列表，单卡默认兼容；八卡任务命令直接用Python/torchrun，不安装依赖或访问GitHub。完整八卡CUDA执行结果待服务器测试，不将本地CPU结果当作FSDP实测。
+
+**标签导出吞吐（2026-10-06）**：导出改为每rank批量窗口推理、CPU多worker解码和预取；默认每卡4窗口、4 workers、prefetch=1，DINO每次32帧。同原生分辨率窗口组批，DINO帧batch可跨clip，State/Posterior同步批处理；不缩小图像、不改变窗口或teacher。旧Stage 2感知入口默认路径不变。输出仍一窗口一标签并复用已完成文件，写入时复制单样本张量，避免保存整个batch底层storage。新增实际batch与解码等待/推理/写盘分项时间，GPU吞吐与显存占用待实测。

@@ -17,7 +17,9 @@ case "${1:-train}" in
   export)
     exec "${PY}" -m torch.distributed.run --standalone --nproc_per_node="${EXPORT_GPUS:-1}" \
       "${ROOT}/code/scripts/export_language_effect_labels_v70.py" \
-      --manifest "${DATA_ROOT}/language_manifest.json" --frame_batch "${DINO_FRAME_BATCH:-8}"
+      --manifest "${DATA_ROOT}/language_manifest.json" --frame_batch "${DINO_FRAME_BATCH:-32}" \
+      --batch "${EXPORT_BATCH_PER_GPU:-4}" --workers "${EXPORT_WORKERS_PER_RANK:-4}" \
+      --prefetch "${EXPORT_PREFETCH:-1}"
     ;;
   test)
     exec "${PY}" "${ROOT}/code/scripts/test_language_object_effect_v70.py" \

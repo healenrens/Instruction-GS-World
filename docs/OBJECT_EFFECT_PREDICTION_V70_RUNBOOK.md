@@ -65,7 +65,7 @@ This is the preparation-machine command: it fetches code and installs dependenci
   export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70_step8750"
   export MODEL_PATH=/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct
   export CUDA_VISIBLE_DEVICES=0
-  export DINO_FRAME_BATCH=8
+  export DINO_FRAME_BATCH=32
   export TEST_OUT="${RUNTIME_ROOT}/outputs/v70_tests/step8750_$(date +%Y%m%d_%H%M%S)"
   unset RESUME MANIFEST
   cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
@@ -163,11 +163,16 @@ export VENV_ROOT="${RUNTIME_ROOT}"
 export DATA_ROOT="${RUNTIME_ROOT}/data/language_object_effect_v70_step8750"
 export CUDA_VISIBLE_DEVICES=0
 export EXPORT_GPUS=1
-export DINO_FRAME_BATCH=8
+export EXPORT_BATCH_PER_GPU=4 EXPORT_WORKERS_PER_RANK=4 EXPORT_PREFETCH=1
+export DINO_FRAME_BATCH=32
 bash "${ROOT}/code/scripts/run_language_object_effect_v70.sh" export
 ```
 
 Successful files can be reused after an interrupted export. Decode failures are listed; `labeled_manifest.json` includes only windows with label files. The language report and final labeled counts are separate. This is label preparation, not a model-capability result.
+
+Export uses a per-rank DataLoader with spawn workers, pinned CPU buffers and prefetch. `--batch` is windows per loader batch; decoded windows of different native sizes are split into separate inference groups, without resizing. `--frame_batch` is DINO frames per encoder call and can span clips of the same native size. State and Posterior also run on the grouped batch. Every label is cloned out of batch storage before writing, so one file does not retain other windows' tensors. Decode failures do not discard valid windows from the same batch. `v70_label_batch` logs actual batch size, data wait, inference and write times; these settings are not a measured 80GB capacity limit.
+
+CPU integration `test_batched_label_export_v70.py` used two real decode workers, two video resolutions and a small explicit teacher fixture with the actual State/Posterior implementations. Five labels were written, one missing video skipped, existing labels left unchanged on rerun, and serial-versus-batch maximum difference was `5.96e-7`. This is not a pretrained-DINO CUDA throughput measurement.
 
 ## 5. Single-GPU Full Test
 
@@ -219,7 +224,8 @@ After syncing and deploying on the preparation host, run this on the eight-GPU j
     --tokenizer_path "${MODEL_PATH}" --output "${DATA_ROOT}/language_manifest.json"
   "${PY}" -m torch.distributed.run --standalone --nproc_per_node=8 \
     "${ROOT}/code/scripts/export_language_effect_labels_v70.py" \
-    --manifest "${DATA_ROOT}/language_manifest.json" --frame_batch 8 \
+    --manifest "${DATA_ROOT}/language_manifest.json" \
+    --batch 4 --workers 4 --prefetch 1 --frame_batch 32 \
     2>&1 | tee "${TEST_OUT}/export.log"
   "${PY}" "${ROOT}/code/scripts/test_language_object_effect_v70.py" \
     --manifest "${DATA_ROOT}/labeled_manifest.json" --model_path "${MODEL_PATH}" \

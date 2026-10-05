@@ -8,7 +8,7 @@ export MODEL_PATH="${MODEL_PATH:-/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B
 export EXPORT_GPUS="${EXPORT_GPUS:-1}"
 export TEST_GPUS="${TEST_GPUS:-1}"
 export TEST_BATCH="${TEST_BATCH:-1}"
-export DINO_FRAME_BATCH="${DINO_FRAME_BATCH:-8}"
+export DINO_FRAME_BATCH="${DINO_FRAME_BATCH:-32}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 export MANIFEST="${DATA_ROOT}/labeled_manifest.json"

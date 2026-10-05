@@ -26,6 +26,7 @@ class PretrainedVisualEncoderV69(nn.Module):
     def __init__(self, kind, repository, weights, frame_batch=2, dtype=torch.bfloat16, history_seconds=3.0, saved_backbone=None):
         super().__init__()
         self.kind, self.frame_batch, self.dtype = kind, frame_batch, dtype
+        self.batch_across_samples = False
         self.history_seconds = history_seconds
         self.provenance = {"kind": kind, "repository": str(Path(repository).resolve()),
                            "weights": str(Path(weights).resolve()), "pretrained": True,
@@ -55,6 +56,8 @@ class PretrainedVisualEncoderV69(nn.Module):
 
     @torch.no_grad()
     def forward(self, rgb, pixel_valid, times, native_hw):
+        if self.kind == "dinov3_vitl16" and self.batch_across_samples:
+            return self._forward_dino_batch(rgb, pixel_valid, times, native_hw)
         b, t = rgb.shape[:2]
         grids = torch.div(native_hw + 15, 16, rounding_mode="floor")
         max_tokens = int(grids.prod(-1).max())
@@ -90,6 +93,37 @@ class PretrainedVisualEncoderV69(nn.Module):
                             clip = torch.cat((clip[:1], clip), 0)
                         encoded = self.backbone(clip.permute(1, 0, 2, 3)[None])
                         features[item, frame, :n] = encoded[0, -n:].to(self.dtype)
+        return PerceptionSequenceV69(features, coordinates, valid, times, native_hw, grids)
+
+    def _forward_dino_batch(self, rgb, pixel_valid, times, native_hw):
+        b, t = rgb.shape[:2]
+        shapes = native_hw.tolist()
+        grids = torch.div(native_hw + 15, 16, rounding_mode="floor")
+        max_tokens = int(grids.prod(-1).max())
+        features = torch.zeros((b, t, max_tokens, 1024), device=rgb.device, dtype=self.dtype)
+        valid = torch.zeros((b, t, max_tokens), device=rgb.device, dtype=torch.bool)
+        coordinates = torch.zeros((b, max_tokens, 2), device=rgb.device)
+        groups = {}
+        for item, (h, w) in enumerate(shapes):
+            groups.setdefault((h, w), []).append(item)
+        for (h, w), members in groups.items():
+            gh, gw = (h + 15) // 16, (w + 15) // 16
+            n = gh * gw
+            yy, xx = torch.meshgrid(torch.arange(gh, device=rgb.device), torch.arange(gw, device=rgb.device), indexing="ij")
+            xy = torch.stack((xx, yy), -1).flatten(0, 1).float() * 16 + 7.5
+            coordinates[members, :n] = xy / xy.new_tensor([w - 1, h - 1]).clamp_min(1) * 2 - 1
+            # Normalize only the current frame microbatch, not the whole RGB batch.
+            items = torch.tensor(members, device=rgb.device).repeat_interleave(t)
+            frames = torch.arange(t, device=rgb.device).repeat(len(members))
+            for first in range(0, len(items), self.frame_batch):
+                ii, tt = items[first:first+self.frame_batch], frames[first:first+self.frame_batch]
+                images = rgb[ii, tt, :, :h, :w].float() / 255.0
+                images = F.pad((images - self.mean) / self.std, (0, gw * 16 - w, 0, gh * 16 - h))
+                pixels = F.pad(pixel_valid[ii, tt, None, :h, :w].float(), (0, gw * 16 - w, 0, gh * 16 - h))
+                valid[ii, tt, :n] = F.avg_pool2d(pixels, 16, 16)[:, 0].flatten(1) > .5
+                with torch.autocast(rgb.device.type, dtype=self.dtype, enabled=rgb.is_cuda):
+                    encoded = self.backbone.forward_features(images)["x_norm_patchtokens"]
+                features[ii, tt, :n] = encoded.to(self.dtype)
         return PerceptionSequenceV69(features, coordinates, valid, times, native_hw, grids)
 
 
