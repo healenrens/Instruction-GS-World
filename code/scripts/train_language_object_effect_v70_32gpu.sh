@@ -4,8 +4,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export RUNTIME_ROOT="${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}"
 export VENV_ROOT="${VENV_ROOT:-${RUNTIME_ROOT}}"
 export SOURCE_REVISION="$(cat "${ROOT}/SOURCE_REVISION")"
-export NNODES="${NNODES:-4}" NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-# The scheduler supplies NODE_RANK, MASTER_ADDR and MASTER_PORT on every node.
+export NNODES="${NNODES:-${WORLD_SIZE:-4}}" NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+# Baige supplies WORLD_SIZE (node count), RANK (node index), MASTER_ADDR/PORT.
+# The launcher also accepts explicit NNODES/NODE_RANK from other schedulers.
 # The default name is shared across nodes; do not derive it from local clocks.
 export RUN_NAME="${RUN_NAME:-language_object_effect_v70_flow_32gpu_from500_${SOURCE_REVISION:0:7}}"
 export OUT="${OUT:-${RUNTIME_ROOT}/outputs/${RUN_NAME}}"

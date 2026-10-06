@@ -3461,6 +3461,8 @@ V70实现已推送至`codex/language-object-effect-v70`，代码提交`5dc062a3e
 
 **32卡执行与无机器人action评测（2026-10-06）**
 
+启动契约修订：实际四节点任务未注入`NODE_RANK`，旧launcher在进入Python前退出。用户提供百舸官方启动接口：父进程`WORLD_SIZE`为节点数、`RANK`为节点编号；launcher映射到torchrun的`--nnodes`和`--node_rank`，继续使用平台`MASTER_ADDR/MASTER_PORT`，兼容显式`NNODES/NODE_RANK`。训练子进程的`WORLD_SIZE/RANK/LOCAL_RANK`由torchrun重新注入，不与平台节点变量混用。模型、数据、初始化和global batch不变；本次失败不产生新的训练结果，G0及后续科学结论不变。
+
 - **What changed**：用户确认4节点各8卡、标准torchrun变量。保持已有teacher8750、manifest、模型、flow目标、每卡batch4及实际学习率text=`1e-5`/expert=`2e-5`；累积8改2，global batch仍256。新增独立32卡前台入口，支持从旧run已保存step500以原生DCP仅加载模型权重，optimizer、schedule、cursor、RNG及SwanLab重新开始，不称为跨卡数严格resume；保留旧资产。执行revision进入run及checkpoint记录。
 - **Why**：本轮唯一训练侧假设是扩大并行可缩短相同global batch的墙钟时间，不以增加batch或改loss混淆吞吐与学习效果。多机通信和共享I/O可能限制收益；不预报四倍加速。
 - **Impact / evidence**：旧八卡正式run已记录到step510、保存step500，独立八卡测试的optimizer恢复仍失败。本地CPU完整训练/DCP测试中model-only加载最大参数差0、重启step/cursor正确，普通CPU严格resume差0；原生torchrun两agent、四CPU worker rendezvous/all-reduce通过，全局rank为0--3。不能据此宣称32卡FSDP硬件或恢复通过。32卡尚未运行，科学结果为空，G0独立teacher/object有效性和语言条件能力不晋级。下一项是确认新job真实world_size=32与吞吐，以及使用同一冻结Dynamics做正确语言/无语言/冲突语言的held比较。

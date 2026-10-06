@@ -269,7 +269,7 @@ All eight visible GPUs must be provided by the scheduler. Do not inherit `CUDA_V
 
 ## 6b. Four Nodes, Eight GPUs Per Node
 
-This is one 32-rank FSDP training job, not four standalone jobs. The scheduler runs the same foreground command once on each node and supplies `NODE_RANK=0..3`, `MASTER_ADDR` and `MASTER_PORT`. All nodes mount the same runtime, data and model paths. Keep the scheduler's GPU visibility. Do not put a per-node timestamp in `RUN_NAME`.
+This is one 32-rank FSDP training job, not four standalone jobs. The scheduler runs the same foreground command once on each node. Before torchrun, Baige supplies `WORLD_SIZE=4` (node count), `RANK=0..3` (node index), `MASTER_ADDR` and `MASTER_PORT`. The launcher maps those to `--nnodes`, `--node_rank`, `--master_addr` and `--master_port`; explicit `NNODES`/`NODE_RANK` remain supported. Inside the training workers, torchrun replaces `WORLD_SIZE` with 32 and `RANK` with the global worker index 0..31, and sets `LOCAL_RANK=0..7`. Do not overwrite the scheduler's `RANK` or set its `WORLD_SIZE` to 32. All nodes mount the same runtime, data and model paths. Keep the scheduler's GPU visibility. Do not put a per-node timestamp in `RUN_NAME`. Startup prints the resolved node rank and master endpoint.
 
 The 32-GPU entry keeps the actual eight-GPU run's model, loss, data, teacher, peak learning rates (`1e-5` text, `2e-5` expert), workers (4 per rank), 40,000-step schedule and 5% warmup. Batch stays 4 per GPU; accumulation changes from 8 to 2, so global batch stays 256. Full sharding and per-microbatch synchronization are unchanged. Cross-node bandwidth and shared video storage can limit scaling; four times the GPU count is not a measured fourfold speedup.
 

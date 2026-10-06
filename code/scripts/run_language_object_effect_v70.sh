@@ -31,18 +31,21 @@ case "${1:-train}" in
     EXTRA=()
     if [ -n "${RESUME:-}" ]; then EXTRA+=(--resume "${RESUME}"); fi
     if [ -n "${INIT_FROM:-}" ]; then EXTRA+=(--init_from "${INIT_FROM}"); fi
-    NNODES="${NNODES:-1}"
+    NNODES="${NNODES:-${WORLD_SIZE:-1}}"
     NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
     LAUNCH=(--nproc_per_node="${NPROC_PER_NODE}" --max_restarts=0)
     if [ "${NNODES}" -eq 1 ]; then
       LAUNCH+=(--standalone)
     else
+      # The scheduler's RANK is a node index; torchrun sets worker ranks later.
+      NODE_RANK="${NODE_RANK:-${RANK}}"
       LAUNCH+=(--nnodes="${NNODES}" --node_rank="${NODE_RANK}" \
         --master_addr="${MASTER_ADDR}" --master_port="${MASTER_PORT}" \
         --rdzv_id="${RUN_NAME}")
+      echo "[language-effect-v70] node_rank=${NODE_RANK} master=${MASTER_ADDR}:${MASTER_PORT} id=${RUN_NAME}"
     fi
     mkdir -p "${OUT}"
-    echo "[language-effect-v70] nodes=${NNODES} node_rank=${NODE_RANK:-0} gpus_per_node=${NPROC_PER_NODE} out=${OUT}"
+    echo "[language-effect-v70] nodes=${NNODES} gpus_per_node=${NPROC_PER_NODE} out=${OUT}"
     exec "${PY}" -m torch.distributed.run "${LAUNCH[@]}" \
       --log_dir "${OUT}/torchrun" --tee 3 \
       "${ROOT}/code/scripts/train_language_object_effect_v70.py" \
