@@ -3459,6 +3459,13 @@ V70实现已推送至`codex/language-object-effect-v70`，代码提交`5dc062a3e
 
 **环境管理约定（2026-10-06）**：按用户要求，V70准备命令使用`uv pip install --python .../.venv/bin/python`管理现有环境，不依赖环境内的pip模块、不重建共享环境。运行阶段仍直接使用该解释器，不联网安装依赖。
 
+**32卡执行与无机器人action评测（2026-10-06）**
+
+- **What changed**：用户确认4节点各8卡、标准torchrun变量。保持已有teacher8750、manifest、模型、flow目标、每卡batch4及实际学习率text=`1e-5`/expert=`2e-5`；累积8改2，global batch仍256。新增独立32卡前台入口，支持从旧run已保存step500以原生DCP仅加载模型权重，optimizer、schedule、cursor、RNG及SwanLab重新开始，不称为跨卡数严格resume；保留旧资产。执行revision进入run及checkpoint记录。
+- **Why**：本轮唯一训练侧假设是扩大并行可缩短相同global batch的墙钟时间，不以增加batch或改loss混淆吞吐与学习效果。多机通信和共享I/O可能限制收益；不预报四倍加速。
+- **Impact / evidence**：旧八卡正式run已记录到step510、保存step500，独立八卡测试的optimizer恢复仍失败。本地CPU完整训练/DCP测试中model-only加载最大参数差0、重启step/cursor正确，普通CPU严格resume差0；原生torchrun两agent、四CPU worker rendezvous/all-reduce通过，全局rank为0--3。不能据此宣称32卡FSDP硬件或恢复通过。32卡尚未运行，科学结果为空，G0独立teacher/object有效性和语言条件能力不晋级。下一项是确认新job真实world_size=32与吞吐，以及使用同一冻结Dynamics做正确语言/无语言/冲突语言的held比较。
+- **Evaluation boundary**：参考PlaySlot与FLAM时明确区分“从真实未来取得latent再重建”和“仅历史+语言生成latent”；SlotFormer的外部object/event评测比图像美观更贴合目标。LAPA/RepWAM的下游机器人成功率含action适配，不能直接搬来声称本系统可控制机器人。逐轨迹绝对/运动归一化误差为主，语言关系目标、独立人工复核和单样本/期望/best-of-N分栏为辅；具体来源、未实现项及命令记于`OBJECT_EFFECT_PREDICTION_V70_RUNBOOK.md`。不重新生成标签、不改变旧Stage 2、不为FVD另加RGB decoder。
+
 **八卡导出与测试（2026-10-06）**：用户要求将标签生成和测试并行到八卡。标签及future-swap按窗口分片；完整测试支持`--nproc_per_node 8`，比较所有rank的采样、噪声、loss和恢复记录，而非仅rank0。语言审计与窗口枚举仍由单个CPU进程完成。准备入口不再覆盖GPU可见列表，单卡默认兼容；八卡任务命令直接用Python/torchrun，不安装依赖或访问GitHub。完整八卡CUDA执行结果待服务器测试，不将本地CPU结果当作FSDP实测。
 
 **标签导出吞吐（2026-10-06）**：导出改为每rank批量窗口推理、CPU多worker解码和预取；默认每卡4窗口、4 workers、prefetch=1，DINO每次32帧。同原生分辨率窗口组批，DINO帧batch可跨clip，State/Posterior同步批处理；不缩小图像、不改变窗口或teacher。旧Stage 2感知入口默认路径不变。输出仍一窗口一标签并复用已完成文件，写入时复制单样本张量，避免保存整个batch底层storage。新增实际batch与解码等待/推理/写盘分项时间，GPU吞吐与显存占用待实测。

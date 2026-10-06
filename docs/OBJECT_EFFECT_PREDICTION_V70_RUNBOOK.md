@@ -267,6 +267,45 @@ echo "TRAIN_RC=${TRAIN_RC}"
 
 All eight visible GPUs must be provided by the scheduler. Do not inherit `CUDA_VISIBLE_DEVICES=0` from a single-GPU testing shell. Effective batch is `4 * 8 * 8 = 256`. The regression control uses the same complete block with `MODE=regression` and a distinct run/output name.
 
+## 6b. Four Nodes, Eight GPUs Per Node
+
+This is one 32-rank FSDP training job, not four standalone jobs. The scheduler runs the same foreground command once on each node and supplies `NODE_RANK=0..3`, `MASTER_ADDR` and `MASTER_PORT`. All nodes mount the same runtime, data and model paths. Keep the scheduler's GPU visibility. Do not put a per-node timestamp in `RUN_NAME`.
+
+The 32-GPU entry keeps the actual eight-GPU run's model, loss, data, teacher, peak learning rates (`1e-5` text, `2e-5` expert), workers (4 per rank), 40,000-step schedule and 5% warmup. Batch stays 4 per GPU; accumulation changes from 8 to 2, so global batch stays 256. Full sharding and per-microbatch synchronization are unchanged. Cross-node bandwidth and shared video storage can limit scaling; four times the GPU count is not a measured fourfold speedup.
+
+Default initialization is **model-only warm start** from the confirmed eight-GPU `step_0000500`. DCP loads/reshards model weights; optimizer, schedule, data cursor, RNG and SwanLab identity start fresh. The saved model configuration, fixed teacher and labeled manifest are inherited. This is a new experiment, not exact continuation. The old run and labels are not modified. Keep the source checkpoint available until all new ranks have loaded it; do not run old rolling-checkpoint deletion against it during migration.
+
+Preparation host only, with Git access:
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source &&
+git fetch origin refs/heads/codex/language-object-effect-v70 &&
+git switch --detach FETCH_HEAD &&
+export SOURCE_REVISION="$(git rev-parse HEAD)" &&
+export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world &&
+bash code/scripts/deploy_language_object_effect_v70_runtime.sh
+```
+
+Run on **all four nodes** through the scheduler. No Git, installation or model download occurs. Pin the same `SOURCE_REVISION` in the job environment when submitting; otherwise the shared deployment pointer is read at startup and must not change during launch. `SWANLAB_API_KEY` remains a scheduler environment secret.
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world
+export RUNTIME_ROOT=$PWD
+export SOURCE_REVISION="${SOURCE_REVISION:-$(cat "${RUNTIME_ROOT}/runtime/language_object_effect_v70/DEPLOYED_REVISION")}"
+export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
+export NNODES=4 NPROC_PER_NODE=8
+export BATCH_PER_GPU=4 GRAD_ACCUM=2
+export RUN_NAME="language_object_effect_v70_flow_32gpu_from500_${SOURCE_REVISION:0:7}"
+export OUT="${RUNTIME_ROOT}/outputs/${RUN_NAME}"
+unset RESUME
+export INIT_FROM="${RUNTIME_ROOT}/outputs/language_object_effect_v70_flow_teacher8750_seed17_20261006_042956/step_0000500"
+exec "${ROOT}/code/scripts/train_language_object_effect_v70_32gpu.sh"
+```
+
+The new script is executable. It expands the full training settings and invokes torchrun in the foreground. Native per-rank stdout/stderr are under `${OUT}/torchrun`; checkpoint metadata and `run.json` now record the execution revision. An explicitly empty `INIT_FROM=` starts from pretrained Qwen plus a fresh expert instead. Use a distinct shared `RUN_NAME` for each new run. For an eight-GPU single-node job, the original entry still defaults to `NNODES=1`, `NPROC_PER_NODE=8` and standalone rendezvous.
+
+Verification boundary: the local CPU integration tested real DCP model loading, fresh optimizer/cursor initialization, ordinary training and same-topology CPU resume. A separate native torchrun exercise uses two local agents/four CPU workers to test rendezvous/global ranks. These do not establish 32-GPU CUDA performance or FSDP resume correctness. The earlier full-model eight-GPU test failed in optimizer-state restore; this model-only migration does not claim to fix that separate strict-resume failure.
+
 ## 7. Explicit Resume
 
 ```bash
@@ -286,6 +325,8 @@ echo "TRAIN_RC=${TRAIN_RC}"
 ```
 
 The checkpoint restores numerical settings, model path, dataset, optimizer, scheduler, cursor, rank RNG and SwanLab run. Use the same eight-GPU topology. Changing topology or numerical settings is a separate experiment, not equivalent resume. New runs do not infer resume from old output contents.
+
+Observed limitation (2026-10-06): the full eight-GPU test reached DCP optimizer restore and failed with `Missing key ... optimizer.param_groups`. The command above describes the intended contract, not a successful hardware verification. Do not use eight-GPU `RESUME` for the 32-GPU migration; section 6b uses model-only `INIT_FROM`.
 
 ## 8. Local Paired Evaluation
 
@@ -310,6 +351,26 @@ Read `${EVAL_OUT}/index.html`, `report.json`, and `trajectories.jsonl`. Videos: 
 Primary result is one fixed-seed sample. Expected error over four fixed samples and best-of-four oracle coverage are separate. Ratios are computed per trajectory only when its measured motion is at least `motion_floor_px` (default 1 native pixel, an explicit reporting floor, not a calibrated visibility threshold). An invisible final target has no endpoint error; no earlier frame substitutes for it.
 
 Optional `CONFLICTS` is a local JSONL keyed by `window_id`, containing a different `instruction` and independently specified `targets`: `point_id`, `target_xy_px`, `tolerance_px`. Without those targets, conflict predictions are saved but have no success claim. Original-video error is not the score for a conflicting instruction. Run the deterministic regression experiment through this same evaluator before claiming a benefit from distribution modeling.
+
+### Evaluation Without Robot Actions
+
+The task is language-conditioned prediction of visible object changes, not robot-control success. No robot action labels are required to score future paths or externally specified relations. Future observations may be used by the evaluator and Posterior reference, never by the history/language generator.
+
+- [PlaySlot, section 4.2](https://arxiv.org/html/2502.07600v2#S4.SS2) evaluates generated frames with PSNR/SSIM/LPIPS, but its latent-conditioned comparison infers latents from the ground-truth sequence. That measures posterior-conditioned reconstruction, not a history-only selector.
+- [FLAM, section 5.1](https://arxiv.org/html/2602.16229#S5.SS1) similarly infers actions from held future frames before rollout, reports PSNR/SSIM/LPIPS/FVD and includes the frozen codec's reconstruction as a reference. Its entity-specific interventions motivate testing whether changing one query's effect changes the relevant entity rather than the whole scene. Neither interventions nor learned query indices alone establish independent object semantics.
+- [SlotFormer, sections 4.2--4.3](https://arxiv.org/html/2210.05861) compares predicted boxes/masks against external truth and evaluates predictive questions/contact. This supports scoring object changes and observable events without making image quality the primary criterion. Our current model has no validated segmentation decoder, so mask scores are not an implemented capability.
+- [AdaWorld, section 3.1](https://arxiv.org/html/2503.18938v4#S3.SS1) transfers inferred actions between paired videos and uses FVD, I3D embedding similarity and human judgment. Cross-context effect transfer is useful as a secondary diagnostic, but a language-only selector and a demonstration-conditioned transfer system have different inputs.
+- [LAPA](https://arxiv.org/html/2410.11758v2) and [RepWAM](https://arxiv.org/html/2606.13674v2) use robot-action adaptation for downstream control evaluations. Their robot success scores cannot be claimed for this action-free interface without adding and testing an action decoder/controller.
+
+Our evaluation recommendation, not a new training objective:
+
+1. Keep separate rows for the measured future, frozen-State/readout reconstruction where available, Posterior-mean effect rollout, history+correct-language generation, no-language generation, shuffled-language generation, and static copy. Posterior is a future-informed reference, not a deployable method or a mathematical upper bound.
+2. Main prediction scores are absolute path/endpoint error at 1/3/5 seconds, per-track motion-normalized error and static drift. Retain per-case results, median/tails, source and motion bins, and episode-cluster uncertainty. Tracker-derived labels stay labeled as pseudo-measurements; a small manually reviewed held subset supplies independent checks of identity, visibility and trajectory location.
+3. Language use is tested with the same history and noise. Correct-language and no-language compare with the recorded future. Conflicting instructions need independently specified entity/relation targets, not the original future as an automatic negative label. Episode goals may not be completed within five seconds; distinguish progress, completion and insufficient evidence.
+4. The main stochastic result uses one predeclared noise seed per case. Also report expected error across fixed samples and separately report best-of-N as oracle coverage. The deterministic regression control uses the same data and decoder. Error to one recorded future does not test every plausible future or establish calibration.
+5. Begin with a fixed, source-stratified diagnostic set (up to 400 available held clips, no duplicates to fill quotas). Independent manual review and terminal visibility determine which semantic statements can be scored. Keep final test episodes out of method selection. Log end-to-end latency including both visual encoders, sampling and Dynamics; do not claim efficiency from latent token count alone.
+
+The existing evaluator implements paired trajectory paths and explicitly targeted conflicts; independent object/event annotations, query-local interventions and a trained deterministic control remain evaluation work, not claimed completed results. We do not add an RGB decoder solely to produce FVD.
 
 ## Verification Status
 

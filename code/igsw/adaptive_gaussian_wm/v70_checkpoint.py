@@ -78,7 +78,7 @@ def save_checkpoint_v70(out, model, optimizer, scheduler, *, step, epoch, cursor
             "format": "language_object_effect_v70_dcp", "step": step,
             "args": dict(vars(args)), "config": config, "world_size": world,
             "fixed_teacher": teacher, "model_path": args.model_path,
-            "tracking": tracking,
+            "tracking": tracking, "source_revision": os.environ.get("SOURCE_REVISION", ""),
             "snapshot": bool(snapshot_every and step % snapshot_every == 0),
         })
     dist.barrier()
@@ -119,7 +119,7 @@ def load_checkpoint_v70(path, model, optimizer, scheduler):
 
 
 def load_model_checkpoint_v70(model, path):
-    """Model-only inference load, including unwrapped/single-rank and resharded models.
+    """Model-only inference or warm start, including resharded models.
 
     Construct the model from metadata's model_path/config first. All ranks of an
     initialized evaluation process group call this helper. No optimizer/RNG is read.

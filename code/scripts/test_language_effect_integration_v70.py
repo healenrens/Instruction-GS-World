@@ -98,6 +98,20 @@ def main():
     assert all(torch.equal(value, full_model.conditioner.visual.state_dict()[name]) for name, value in frozen.items())
     assert not torch.equal(initial.conditioner.text.weight, full_model.conditioner.text.weight)
     assert not torch.equal(initial.expert.effect_output.weight, full_model.expert.effect_output.weight)
+    # A topology-change warm start loads only weights, not optimizer/cursor/RNG.
+    warm = deepcopy(base)
+    warm.out, warm.init_from = str(out/"warm_start"), str(out/"uninterrupted/latest.json")
+    warm.steps, warm.batch, warm.accum = 1, 1, 1
+    warm.lr_text, warm.lr_expert = 0., 0.
+    warm_model, warm_events = deepcopy(initial), []
+    train_v70(warm, model=warm_model, dataset=FixtureDataset(), history_encoder=FixtureHistory(),
+              device="cpu", fsdp=False, trace_callback=warm_events.append)
+    warm_difference = max(float((a.detach()-b.detach()).abs().max())
+                          for a, b in zip(full_model.parameters(), warm_model.parameters()))
+    assert warm_difference == 0, warm_difference
+    assert warm_events[0]["step"] == 1 and warm_events[0]["cursor"] == 0
+    warm_metadata = json.loads((out/"warm_start/step_0000001/metadata.json").read_text())
+    assert warm_metadata["step"] == 1 and warm_metadata["args"]["accum"] == 1
     # Query permutations must permute effects, not change their meaning by slot index.
     batch = torch.utils.data.default_collate([FixtureDataset()[(0, 0, 0)]])
     history = FixtureHistory()(batch)
@@ -114,6 +128,8 @@ def main():
     permutation_difference = float((predicted[:, permutation]-other).abs().max())
     assert torch.allclose(predicted[:, permutation], other, atol=.03, rtol=.03), permutation_difference
     report = {"test": "cpu_tiny_wiring_not_full_model", "resume_parameter_max_difference": difference,
+              "warm_start_parameter_max_difference": warm_difference,
+              "warm_start_new_step_and_cursor": True,
               "resume_trace_equal": True, "frozen_vision_unchanged": True, "text_and_expert_updated": True,
               "bf16_query_permutation_max_difference": permutation_difference}
     out.mkdir(parents=True, exist_ok=True)

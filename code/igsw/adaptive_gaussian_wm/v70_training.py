@@ -25,8 +25,8 @@ from torch.utils.data import DataLoader
 from igsw.distributed import read_torchrun_context
 from .episode_uniform_sampler_v69 import EpisodeUniformSamplerV69
 from .v70_checkpoint import (
-    capture_rng_v70, load_checkpoint_v70, read_checkpoint_metadata_v70, restore_rng_v70,
-    save_checkpoint_v70,
+    capture_rng_v70, load_checkpoint_v70, load_model_checkpoint_v70,
+    read_checkpoint_metadata_v70, resolve_checkpoint_v70, restore_rng_v70, save_checkpoint_v70,
 )
 from .v70_tracking import (
     add_tracking_arguments_v70, finish_tracking_v70,
@@ -59,7 +59,9 @@ def add_training_arguments_v70(parser):
     parser.add_argument("--snapshot_every", type=int, default=2500)
     parser.add_argument("--retain", type=int, default=2)
     parser.add_argument("--log_every", type=int, default=10)
-    parser.add_argument("--resume", default="")
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument("--resume", default="")
+    initialization.add_argument("--init_from", default="")
     parser.add_argument("--stop_after", type=int, default=0)
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--trace_values", type=int, default=8)
@@ -187,6 +189,14 @@ def train_v70(args, *, model=None, dataset=None, collate_fn=None, history_encode
     The caller owns process-group shutdown.
     """
     args, metadata = restore_training_arguments_v70(args)
+    initialization = None
+    if metadata is None and args.init_from:
+        args.init_from = str(resolve_checkpoint_v70(args.init_from))
+        initialization = read_checkpoint_metadata_v70(args.init_from)
+        # Reuse the model and its fixed label space, but start a new optimizer/run.
+        for name in ("manifest", "model_path", "teacher_checkpoint", "mode",
+                     "expert_kwargs", "visual_tokens", "text_tokens"):
+            setattr(args, name, initialization["args"][name])
     context = read_torchrun_context()
     device = torch.device(device or context.device)
     world = metadata["world_size"] if metadata is not None else context.world_size
@@ -229,6 +239,8 @@ def train_v70(args, *, model=None, dataset=None, collate_fn=None, history_encode
     random.seed(args.seed)
     np.random.seed(args.seed)
     config = metadata["config"] if metadata is not None else model_config_v70(args)
+    if initialization is not None:
+        config = initialization["config"]
     if dataset is None:
         from .language_effect_dataset_v70 import LanguageEffectDatasetV70, collate_language_effect_v70
         dataset = LanguageEffectDatasetV70(args.manifest, partition="train")
@@ -244,7 +256,8 @@ def train_v70(args, *, model=None, dataset=None, collate_fn=None, history_encode
         if not args.teacher_checkpoint:
             args.teacher_checkpoint = json.loads(Path(args.manifest).read_text())["teacher_checkpoint"]
         history_encoder = FrozenHistoryStateV70(args.teacher_checkpoint, device, args.frame_batch)
-    teacher = metadata["fixed_teacher"] if metadata is not None else history_encoder.teacher
+    source_metadata = metadata if metadata is not None else initialization
+    teacher = source_metadata["fixed_teacher"] if source_metadata is not None else history_encoder.teacher
     history_encoder.requires_grad_(False).to(device).eval()
     conditioner_counts = _parameter_counts(model.conditioner)
     inventory = {"model": _parameter_counts(model), "conditioner": conditioner_counts,
@@ -254,6 +267,13 @@ def train_v70(args, *, model=None, dataset=None, collate_fn=None, history_encode
                  "frozen_history": _parameter_counts(history_encoder),
                  "frozen_vision": [_parameter_counts(module) for module in model.fsdp_ignored_modules]}
     wrapped = wrap_model_fsdp_v70(model, device, block_classes) if fsdp else model.to(device)
+    if initialization is not None:
+        load_model_checkpoint_v70(wrapped, args.init_from)
+        if rank == 0:
+            print(json.dumps({"event": "v70_model_warm_start", "checkpoint": args.init_from,
+                              "source_step": initialization["step"],
+                              "source_world_size": initialization["world_size"],
+                              "world_size": world, "optimizer_restored": False}), flush=True)
     optimizer = make_optimizer_v70(model, args)
     optimizer_parameters = {id(p) for group in optimizer.param_groups for p in group["params"]}
     exclusions = {
@@ -267,7 +287,12 @@ def train_v70(args, *, model=None, dataset=None, collate_fn=None, history_encode
         record = {"args": vars(args), "config": config, "world_size": world,
                   "effective_batch": args.batch * args.accum * world,
                   "inventory": inventory, "optimizer_exclusions": exclusions,
-                  "fixed_teacher": teacher}
+                  "fixed_teacher": teacher,
+                  "source_revision": os.environ.get("SOURCE_REVISION", ""),
+                  "initialization": ({"checkpoint": args.init_from,
+                      "source_step": initialization["step"],
+                      "source_world_size": initialization["world_size"]}
+                      if initialization is not None else None)}
         with (out / "run.json").open("x" if metadata is None else "w", encoding="utf-8") as stream:
             json.dump(record, stream, indent=2)
         print(json.dumps({"event": "v70_inventory", "inventory": inventory,
