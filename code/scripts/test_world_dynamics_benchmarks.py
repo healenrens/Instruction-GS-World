@@ -164,6 +164,8 @@ def main():
         if config["benchmark"] == "physion":
             assert len({row["stimulus_name"] for row in manifest["rows"]}) == 2
             assert all(row["time_basis"]["measured_clock"] is False for row in manifest["rows"])
+            assert all(row["times"][-1] == 1.2 and row["time_basis"]["paper_observed_prefix_seconds"] == 1.5
+                       for row in manifest["rows"])
         for model in ("dino", "vjepa2", "state", "state_z"):
             export_features(config, model)
             # Run the normal exporter twice: completed cache entries are retained.

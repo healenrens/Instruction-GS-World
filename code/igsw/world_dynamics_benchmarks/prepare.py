@@ -166,7 +166,10 @@ def physion_manifest(config):
                              "times": [i / data["fps"] for i in indices], "native_hw": [image.height, image.width],
                              "time_basis": {"kind": "nominal_frame_time", "nominal_fps": data["fps"],
                                             "measured_clock": False,
-                                            "provenance": "config-selected scale; official Dataset.run default and model BASE_FPS are 30; batch clock unverified"},
+                                            "source": "https://arxiv.org/html/2106.08261v3",
+                                            "paper_reported_movie_fps": 30,
+                                            "paper_observed_prefix_seconds": 1.5,
+                                            "provenance": "paper section2.2 reports movies rendered at30fps; times use configured frame-position scale, not HDF5 timestamps; custom prefix is not paper observed1.5s"},
                              "input_boundary": data["prefix_source"], "last_allowed_frame": indices[-1]})
     # Dev comes only from readout training, stratified within scenario and outcome.
     stratified_development(rows, data["dev_fraction"], config["seed"])

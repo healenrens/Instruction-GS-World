@@ -13,9 +13,9 @@ data:
   download_limit: 32
   dev_fraction: 0.2
   input_frame_indices: [0, 5, 10, 15, 20, 25, 30, 36]
-  fps: 30.0  # Nominal frame-time scale, not a measured clock for the downloaded batch.
-  prefix_source: physics-models pDEIT input STATE_LEN=7 SUBSAMPLE_FACTOR=6; matched sample ends at frame36
-  time_basis: nominal 30 based on official generator default and model BASE_FPS; downloaded batch clock unverified
+  fps: 30.0  # Paper-reported movie FPS; no timestamps measured from this HDF5 batch.
+  prefix_source: custom pDEIT-derived frame0..36 prefix (nominal last time 1.2s at paper FPS); NOT the paper observed 1.5s protocol
+  time_basis: Physion arXiv2106.08261v3 section2.2 reports30fps; frame-position time inferred, not HDF5-measured
   image_variant: S3 readout training declared redyellow by official README; testing HDF5 coloring unconfirmed until sample review
 export:
   frames: 16

@@ -31,7 +31,9 @@
 
 **Impact**：Physion per-scenario linear reference 与新 matched token-attention protocol 分开报告；首轮 pilot 和正式分区结果不能混称。MOVi 只保留独立 object validity 诊断规划；仍不声称16个query等于16个物体。历史 promotion chain 保留为旧实验证据边界，而非把本轮外部 frozen probe 阻断或误记为所有 gate 通过。
 
-**2026-10-08真实数据契约补充**：8600首次HDF5反馈表明 `static/stimulus_name` 是局部序号，不能作为唯一样本身份；manifest改用scenario/original-split/relative-file-path，保留原始名称。官方generator默认与模型可视化约定均为30，下载样本没有timestamp/FPS元数据，所以当前使用nominal frame-time而非真实秒数；不得以此推断已核验的物理时长。首个sample的red/yellow已确认，但不能推广到全部split。变更后重新生成manifest并使用新attempt，不混用旧cache。
+**2026-10-08真实数据契约补充**：8600首次HDF5反馈表明 `static/stimulus_name` 是局部序号，不能作为唯一样本身份；manifest改用scenario/original-split/relative-file-path，保留原始名称。[Physion正文2.2](https://arxiv.org/html/2106.08261v3)给出movie30fps，testing段给出observed1.5s；本实现仍是pDEIT-derived custom frame0..36 prefix，名义末帧时间1.2s，不是论文1.5s协议。下载HDF5没有timestamp/FPS元数据，时间为paper-based推定，不是文件实测。首个sample的red/yellow已确认，但不能推广到全部split。变更后重新生成manifest并使用新attempt，不混用旧cache。父助手反馈8600 CPU/CUDA fixture均exit0，首份约25MB Collide HDF5已取得；这是远端reported receipt，不是本实现者重新核验，尚无科学benchmark scores，不涉及8732或新增模型结论。
+
+本轮本地CPU整链测试exit0：`/tmp/igsw-benchmark-integration-paper-time-20261008/integration_result.json`，完整log为`/tmp/igsw-benchmark-integration-paper-time-20261008.log`；resume差异0.0，trace/prefix-future-swap完全一致，使用fixture而非真实预训练评测。最新远端反馈（尚未读取具体结果路径）：Physion PID173180 live，252/512约28.53GB，至Drape testing，代理正确；CPU/CUDA fixture passed。SSv2分片1完整，分片2约7.32GB处curl92后SWXC续传并获取labels。下载未全部完成，未据此推出benchmark能力结论。
 
 从本文档此次更新开始，版本号只表示实现迭代，不再表示研究方向重启。项目只保留以下一条主线：
 
