@@ -352,6 +352,71 @@ Primary result is one fixed-seed sample. Expected error over four fixed samples 
 
 Optional `CONFLICTS` is a local JSONL keyed by `window_id`, containing a different `instruction` and independently specified `targets`: `point_id`, `target_xy_px`, `tolerance_px`. Without those targets, conflict predictions are saved but have no success claim. Original-video error is not the score for a conflicting instruction. Run the deterministic regression experiment through this same evaluator before claiming a benefit from distribution modeling.
 
+### Paired 2500 / 5000 Evaluation (2026-10-07)
+
+`evaluate_language_object_effect_v70_pair.sh` evaluates the two retained numbered snapshots from
+`language_object_effect_v70_flow_32gpu_from500_daca36e`. It does not use `latest`, start training,
+load optimizer state, upload to SwanLab, download models or invoke Git. The running training release
+is unchanged. Wait for `step_0005000` to be published by the training checkpoint writer before launching.
+
+- Default: one four-GPU node, 256 diagnostic episodes, one window per episode, source-interleaved;
+  up to four fixed noise samples, ten Euler steps, 24 video cases per checkpoint. `EVAL_GPUS=1` runs
+  the same cases sequentially. No held/test promotion is implied by this diagnostic set.
+- The first evaluation writes `selection.json`; the second reads it. Window selection, distinct-episode
+  language donors, measurement point IDs and per-case sample seeds are stable across checkpoints/ranks.
+  Each GPU loads its own inference model and only reads the model portion of the existing DCP shards.
+- Primary: `correct_language/sample_0`. Controls: no language, shuffled language from a different episode
+  (preferably same source), fixed Posterior mean, static reference. Shuffled language tests sensitivity;
+  it does not provide independently labeled alternative intentions. Optional `CONFLICTS` retains its
+  independently specified target semantics. No new deterministic regression model is claimed trained.
+- Absolute per-track path and endpoint error, motion-normalized error, static drift and 1/3/5-second
+  point error remain separate. Ratios below one native pixel of mean motion are undefined, not zero.
+  Invisible endpoints are undefined; the nearest requested timestamp is used only within half a sample
+  interval, without searching for an earlier visible frame. Actual times are recorded. Motion is relative
+  to each track's last reliable history observation, which may precede t0; report that subset separately.
+- Store all trajectory rows, per-case metrics, source/motion subsets, median/tails, expected sample error
+  and explicitly oracle best-of-four. Comparison averages within each episode before a 2,000-resample
+  paired episode bootstrap. Negative `second minus first` means improvement. This interval addresses
+  diagnostic episode sampling, not tracker bias or every possible future.
+- Auxiliary only: generated pre-tanh/tanh effect MSE and fixed-noise teacher-forced flow MSE at
+  tau=0.1/0.5/0.9. These do not replace pure-noise generation followed by frozen Dynamics.
+
+Preparation host, after fetching the current branch and selecting the desired commit:
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source &&
+git fetch origin refs/heads/codex/language-object-effect-v70 &&
+git switch --detach FETCH_HEAD &&
+export SOURCE_REVISION="$(git rev-parse HEAD)" &&
+export RUNTIME_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world &&
+bash code/scripts/deploy_language_object_effect_v70_runtime.sh
+```
+
+Independent foreground evaluation command, on one GPU job node after step 5000 is saved:
+
+```bash
+cd /mnt/pfs/public/xuhaoming/instruct_gs_world
+export RUNTIME_ROOT=$PWD
+export VENV_ROOT="${RUNTIME_ROOT}"
+export SOURCE_REVISION="$(cat "${RUNTIME_ROOT}/runtime/language_object_effect_v70/DEPLOYED_REVISION")"
+export ROOT="${RUNTIME_ROOT}/runtime/language_object_effect_v70/releases/${SOURCE_REVISION}"
+export TRAIN_OUT="${RUNTIME_ROOT}/outputs/language_object_effect_v70_flow_32gpu_from500_daca36e"
+export FIRST_CHECKPOINT="${TRAIN_OUT}/step_0002500"
+export SECOND_CHECKPOINT="${TRAIN_OUT}/step_0005000"
+export MANIFEST="${RUNTIME_ROOT}/data/language_object_effect_v70_step8750/labeled_manifest.json"
+export EVAL_GPUS=4 EVAL_CASES=256 EVAL_SAMPLES=4 EVAL_VIDEOS=24 EVAL_SEED=17
+export FLOW_STEPS=10 DINO_FRAME_BATCH=8 MOTION_FLOOR_PX=1.0
+export EVAL_OUT="${RUNTIME_ROOT}/outputs/v70_evaluation/paired_2500_5000_${SOURCE_REVISION:0:7}"
+exec "${ROOT}/code/scripts/evaluate_language_object_effect_v70_pair.sh"
+```
+
+Main results: `${EVAL_OUT}/SUMMARY.md`, `comparison.json`; each `first/` and `second/` contains
+`report.json`, `selection.json`, `trajectories.jsonl`, `index.html` and local prediction/measurement videos.
+Red points are predictions; green points are tracker measurements, not independent semantic object truth.
+The test `test_language_effect_evaluation_v70.py` covers tiny actual flow sampling, model-only DCP load,
+pixel/relative metrics, invisible endpoints, stable selection, report comparison and video writing on CPU.
+It is not a full Qwen/DINO/CUDA or four-GPU execution.
+
 ### Evaluation Without Robot Actions
 
 The task is language-conditioned prediction of visible object changes, not robot-control success. No robot action labels are required to score future paths or externally specified relations. Future observations may be used by the evaluator and Posterior reference, never by the history/language generator.

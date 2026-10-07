@@ -3468,6 +3468,12 @@ V70实现已推送至`codex/language-object-effect-v70`，代码提交`5dc062a3e
 - **Impact / evidence**：旧八卡正式run已记录到step510、保存step500，独立八卡测试的optimizer恢复仍失败。本地CPU完整训练/DCP测试中model-only加载最大参数差0、重启step/cursor正确，普通CPU严格resume差0；原生torchrun两agent、四CPU worker rendezvous/all-reduce通过，全局rank为0--3。不能据此宣称32卡FSDP硬件或恢复通过。32卡尚未运行，科学结果为空，G0独立teacher/object有效性和语言条件能力不晋级。下一项是确认新job真实world_size=32与吞吐，以及使用同一冻结Dynamics做正确语言/无语言/冲突语言的held比较。
 - **Evaluation boundary**：参考PlaySlot与FLAM时明确区分“从真实未来取得latent再重建”和“仅历史+语言生成latent”；SlotFormer的外部object/event评测比图像美观更贴合目标。LAPA/RepWAM的下游机器人成功率含action适配，不能直接搬来声称本系统可控制机器人。逐轨迹绝对/运动归一化误差为主，语言关系目标、独立人工复核和单样本/期望/best-of-N分栏为辅；具体来源、未实现项及命令记于`OBJECT_EFFECT_PREDICTION_V70_RUNBOOK.md`。不重新生成标签、不改变旧Stage 2、不为FVD另加RGB decoder。
 
+**2026-10-07 / 5k配对评测决策**
+
+- **Observed**：直接读取SwanLab `9618wzrs`全部455个已上传日志点，截至北京时间10:09/step4540。实际配置batch8、accum1、global256、text LR峰值1e-5、expert峰值5e-5，使用daca36e及step500模型warm start。loss均值在3001--3500/3501--4000/4001--4500为0.24043/0.22973/0.21959；末区间grad norm均值0.5035，最新expert LR4.9506e-5，上传数值无NaN/Inf。结论是收益递减但未停止优化，不能据此宣称生成未来有效或已过拟合。
+- **What changed / Why**：新增2500/5000固定编号checkpoint配对评测，用相同诊断episode、窗口、测量点、噪声和冻结Dynamics判断loss下降是否转化为未来运动改善。默认256 episode、4卡按case分片；正确语言/无语言/跨episode打乱语言/Posterior mean/静态reference分别报告，固定单样本为主，4样本期望和oracle独立标注。主要测量是逐轨迹绝对/运动归一化误差、1/3/5s位置误差、静止漂移；按episode配对bootstrap，不把所有轨迹当作独立样本。
+- **Impact / next**：不改训练入口、数据或旧release，评测不上传SwanLab。报告、逐例预测和视频保存本地。本地CPU小模型集成已通过实际flow采样、只读DCP恢复、固定计划/噪声、像素与相对误差、不可见终点、视频写入和比较报告；不是完整Qwen/DINO/CUDA结果。tau分桶flow loss及effect MSE仅辅助定位，不替代解码后指标。G0独立teacher/object有效性仍未通过；当前tracker测量不能变成独立object真值。先等待5k快照并执行此评测，再决定继续训练是否有科学收益；不是自动停止或自动晋级。单卡/四卡正式模型执行结果待用户运行。
+
 **八卡导出与测试（2026-10-06）**：用户要求将标签生成和测试并行到八卡。标签及future-swap按窗口分片；完整测试支持`--nproc_per_node 8`，比较所有rank的采样、噪声、loss和恢复记录，而非仅rank0。语言审计与窗口枚举仍由单个CPU进程完成。准备入口不再覆盖GPU可见列表，单卡默认兼容；八卡任务命令直接用Python/torchrun，不安装依赖或访问GitHub。完整八卡CUDA执行结果待服务器测试，不将本地CPU结果当作FSDP实测。
 
 **标签导出吞吐（2026-10-06）**：导出改为每rank批量窗口推理、CPU多worker解码和预取；默认每卡4窗口、4 workers、prefetch=1，DINO每次32帧。同原生分辨率窗口组批，DINO帧batch可跨clip，State/Posterior同步批处理；不缩小图像、不改变窗口或teacher。旧Stage 2感知入口默认路径不变。输出仍一窗口一标签并复用已完成文件，写入时复制单样本张量，避免保存整个batch底层storage。新增实际batch与解码等待/推理/写盘分项时间，GPU吞吐与显存占用待实测。
