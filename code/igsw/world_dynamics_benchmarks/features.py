@@ -80,7 +80,10 @@ class FrozenRepresentation(nn.Module):
                 self.posterior.load_state_dict(module_state(saved, "posterior"))
             self.provenance.update({"teacher": settings["teacher_checkpoint"], "step": saved["step"],
                                    "teacher_config": saved["config"], "posterior_scope": "observed intervals only",
-                                   "state_time_anchor": "last_observed_frame_zero"})
+                                   "state_time_anchor": "last_observed_frame_zero",
+                                   "state_query_reference": "all allowed observed history",
+                                   "effect_query_reference": "segment-specific source-prefix history; targets retain source queries",
+                                   "effect_time_anchor": "segment source zero; target elapsed times positive"})
         self.requires_grad_(False).to(config["device"]).eval()
 
     def trim(self, part, budget, group_size=1):
@@ -89,6 +92,20 @@ class FrozenRepresentation(nn.Module):
                               "discarded_fraction": 1 - len(selected["tokens"]) / len(part["tokens"]),
                               "atomic_group_tokens": group_size})
         return selected
+
+    @torch.no_grad()
+    def observed_effect(self, perception, movie_times, first, stop):
+        source_prefix = perception.prefix(first + 1)
+        source_prefix.times = movie_times[:, :first + 1] - movie_times[:, first:first + 1]
+        source_queries = history_queries_v69(source_prefix, self.state_config.object_queries)
+        source = self.encoder(source_prefix, source_queries)[-1]
+        observed, targets = source.detach(), []
+        for frame in range(first + 1, stop + 1):
+            observed = self.target_encoder.observe(observed, perception.features[:, frame],
+                perception.coordinates, perception.valid[:, frame], movie_times[:, frame] - movie_times[:, first])
+            targets.append(observed)
+        effect = self.posterior(source, targets, deterministic=True)
+        return source_queries, source, targets, effect
 
     @torch.no_grad()
     def forward(self, batch):
@@ -119,8 +136,8 @@ class FrozenRepresentation(nn.Module):
         self.state_clock_times = perception.times.detach()
         segments = min(self.config["export"]["observed_segments"], len(times) - 1)
         boundaries = np.linspace(0, len(times) - 1, segments + 1).round().astype(int).tolist()
-        # Query initialization is identical for State and State+z, and sees only the first observed interval.
-        queries = history_queries_v69(perception.prefix(boundaries[1] + 1), self.state_config.object_queries)
+        # State and State+z share the same native query helper over all allowed observed history.
+        queries = history_queries_v69(perception, self.state_config.object_queries)
         states = self.encoder(perception, queries)
         values = torch.stack([state.tokens[0] for state in states]).flatten(0, 2)
         xy = torch.stack([state.centers[0] for state in states]).flatten(0, 2)
@@ -131,19 +148,20 @@ class FrozenRepresentation(nn.Module):
         part = self.trim(part, budget * 3 // 4, count)
         if self.model == "state":
             return part
-        effects = []
+        effects, self.effect_source_references = [], []
         for first, stop in zip(boundaries[:-1], boundaries[1:]):
-            observed, targets = states[first].detach(), []
-            for frame in range(first + 1, stop + 1):
-                observed = self.target_encoder.observe(observed, perception.features[:, frame],
-                    perception.coordinates, perception.valid[:, frame], perception.times[:, frame])
-                targets.append(observed)
-            effect = self.posterior(states[first], targets, deterministic=True)
+            source_queries, source, targets, effect = self.observed_effect(perception, batch["times"], first, stop)
+            self.effect_source_references.append({"source_frame": first, "target_end_frame": stop,
+                "source_prefix_times": (batch["times"][:, :first + 1] - batch["times"][:, first:first + 1]).cpu().tolist(),
+                "source_time": source.time.cpu().tolist(),
+                "target_times": torch.stack([target.time for target in targets], 1).cpu().tolist(),
+                "query_frame_indices": source_queries.frame_index.cpu().tolist(),
+                "query_valid": source_queries.valid.cpu().tolist()})
             values = effect["value"][0].flatten(0, 1)
-            xy = states[first].centers[0, :, 0].repeat_interleave(self.state_config.effect_tokens, 0)
+            xy = source.centers[0, :, 0].repeat_interleave(self.state_config.effect_tokens, 0)
             size = len(values)
             effects.append(packet(values, xy, times[first].expand(size),
-                queries.valid[0].repeat_interleave(self.state_config.effect_tokens), kind=1,
+                source_queries.valid[0].repeat_interleave(self.state_config.effect_tokens), kind=1,
                 end_times=times[stop].expand(size)))
         z = self.trim({name: torch.cat([effect[name] for effect in effects]) for name in part}, budget // 4,
                       self.state_config.object_queries * self.state_config.effect_tokens)
@@ -179,6 +197,8 @@ def export_features(config, model):
                                "input_cue": observation["input_cue"],
                                **({"state_clock_times": runtime.state_clock_times.cpu().tolist()}
                                   if model in ("state", "state_z") else {}),
+                               **({"effect_source_references": runtime.effect_source_references}
+                                  if model == "state_z" else {}),
                                "decode_seconds": decoded - start, "encoder_seconds": time.perf_counter() - decoded,
                                "token_sampling": runtime.sampling,
                                "provenance": runtime.provenance})

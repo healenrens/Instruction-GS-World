@@ -204,6 +204,12 @@ def main():
                 assert state_times[0, -1] == 0 and (state_times <= 0).all()
                 assert torch.allclose(state_times.diff(dim=1), public_times.diff(dim=1), atol=1e-6)
                 assert feature["provenance"]["state_time_anchor"] == "last_observed_frame_zero"
+                if model == "state_z":
+                    for segment in feature["effect_source_references"]:
+                        assert segment["source_time"] == [0.0]
+                        assert max(segment["query_frame_indices"][0]) <= segment["source_frame"]
+                        expected = public_times[:, segment["source_frame"] + 1:segment["target_end_frame"] + 1] - public_times[:, segment["source_frame"]:segment["source_frame"] + 1]
+                        assert torch.equal(torch.tensor(segment["target_times"]), expected)
             else:
                 assert "state_clock_times" not in feature and public_times[0, 0] == 0
             run_probe(config, model, "attention", "probe", False)
@@ -233,13 +239,36 @@ def main():
     assert traces[0] == traces[1]
     row = read_json(physion["manifest"])["rows"][0]
     runtime = FrozenRepresentation(physion, "state_z")
-    seen_clock = {}
-    runtime.encoder.register_forward_pre_hook(lambda module, args: seen_clock.update(times=args[0].times.detach().cpu()))
+    seen_clock, posterior_clocks = [], []
+    runtime.encoder.register_forward_pre_hook(lambda module, args: seen_clock.append(args[0].times.detach().cpu()))
+    runtime.posterior.register_forward_pre_hook(lambda module, args: posterior_clocks.append(
+        (args[0].time.detach().cpu(), torch.stack([state.time for state in args[1]], 1).detach().cpu())))
     original_observation = read_observation(row, 8)
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.device.startswith("cuda")):
         original = runtime(move_observation(original_observation, args.device))
-    assert torch.equal(seen_clock["times"], original_observation["times"] - original_observation["times"][:, -1:])
-    assert seen_clock["times"][0, -1] == 0
+    assert torch.equal(seen_clock[0], original_observation["times"] - original_observation["times"][:, -1:])
+    assert seen_clock[0][0, -1] == 0
+    for (source_time, target_times), segment in zip(posterior_clocks, runtime.effect_source_references):
+        assert torch.equal(source_time, torch.zeros_like(source_time)) and (target_times > 0).all()
+        expected = original_observation["times"][:, segment["source_frame"] + 1:segment["target_end_frame"] + 1] - original_observation["times"][:, segment["source_frame"]:segment["source_frame"] + 1]
+        assert torch.equal(target_times, expected)
+    device_observation = move_observation(original_observation, args.device)
+    first, stop = 2, 4
+    movie_times = device_observation["times"]
+    altered_rgb = device_observation["rgb"].clone()
+    altered_rgb[:, first + 1:stop + 1] = 255 - altered_rgb[:, first + 1:stop + 1]
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.device.startswith("cuda")):
+        perception = runtime.perception(device_observation["rgb"], device_observation["pixel_valid"],
+            movie_times - movie_times[:, -1:], device_observation["native_hw"])
+        changed_perception = runtime.perception(altered_rgb, device_observation["pixel_valid"],
+            movie_times - movie_times[:, -1:], device_observation["native_hw"])
+        source_queries, source, targets, effect = runtime.observed_effect(perception, movie_times, first, stop)
+        changed_queries, changed_source, changed_targets, changed_effect = runtime.observed_effect(changed_perception, movie_times, first, stop)
+    assert torch.equal(source.tokens, changed_source.tokens) and torch.equal(source.centers, changed_source.centers)
+    assert torch.equal(source_queries.features, changed_queries.features)
+    assert not torch.equal(targets[-1].tokens, changed_targets[-1].tokens)
+    assert not torch.equal(effect["value"], changed_effect["value"])
+    assert torch.equal(perception.times, movie_times - movie_times[:, -1:])
     with h5py.File(row["path"], "r+") as file:
         for frame in range(37, 40):
             pixels = images(1, 1)[0]
@@ -267,6 +296,9 @@ def main():
         "class_balanced_sampling": True,
         "state_last_observed_clock_zero": True,
         "state_clock_intervals_preserved": True,
+        "native_posterior_source_zero_targets_positive": True,
+        "segment_target_swap_source_exact": True,
+        "segment_target_swap_effect_changed": True,
         "hdf5_schema": inspect_schema(row["path"]), "results": str(root / "outputs")})
     print(json.dumps({"status": "passed", "integration_result": str(root / "integration_result.json")}), flush=True)
 
