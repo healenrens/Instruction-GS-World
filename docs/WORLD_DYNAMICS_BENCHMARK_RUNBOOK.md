@@ -63,7 +63,7 @@ export CONFIG="${ROOT}/code/configs/world_dynamics_benchmarks/ssv2.yaml"
 bash "${ROOT}/code/scripts/prepare_world_dynamics_benchmarks.sh" download --plan /PATH/TO/authorized_downloads.json
 bash "${ROOT}/code/scripts/prepare_world_dynamics_benchmarks.sh" unpack --destination "${BENCH_ROOT}/ssv2" /PATH/TO/video.zip /PATH/TO/labels.zip
 # For a single archive split into ordered parts, add --join-parts instead.
-bash "${ROOT}/code/scripts/prepare_world_dynamics_benchmarks.sh" inspect "${BENCH_ROOT}/ssv2/something-something-v2-train.json"
+bash "${ROOT}/code/scripts/prepare_world_dynamics_benchmarks.sh" inspect "${BENCH_ROOT}/ssv2/labels/train.json"
 bash "${ROOT}/code/scripts/prepare_world_dynamics_benchmarks.sh" manifest
 ```
 
