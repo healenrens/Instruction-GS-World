@@ -59,8 +59,6 @@ def official_physion_plan(root, scenarios, limit):
     for scenario in scenarios:
         for kind in ("readout_training", "testing"):
             name = f"{scenario}_{kind}_HDF5s.tar.gz"
-            if scenario == "Roll" and kind == "readout_training":
-                name = "Rollreadout_HDF5s.tar.gz"
             rows.append({"url": PHYSION_BASE + name, "mode": "tar_stream",
                          "destination": str(Path(root) / kind / scenario), "max_files": limit})
     return rows

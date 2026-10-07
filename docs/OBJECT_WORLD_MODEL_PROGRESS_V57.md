@@ -39,7 +39,7 @@
 
 **SSv2有界扩样**：远端反馈DINO pilot导出768/768 exit0，dev epoch18为2/256，接近1/174 chance；256train/174classes不足以判断utility。新增独立development01配置，保留原pilot01运行不动，official划分后每class采train16/dev8/held8，预期5568clips，新manifest不覆盖旧文件。matchedprobe/assets/preprocessing不变，依据class counts与dev诊断扩样，不读held分选主线，不扩大到全量>1TBcache。
 
-最新本地整链fixture结果为`/tmp/igsw-benchmark-integration-pair-cue-balanced-20261008/integration_result.json`，完整log为`/tmp/igsw-benchmark-integration-pair-cue-balanced-20261008.log`：pair cue仅改目标像素、未来image/mask隔离、per-class采样、dev/test产物分离与resume一致均通过，仍非科学benchmark结果。最新远端Physion反馈为terminal exit1、384complete，原README Rollreadout URL404，覆盖此前live反馈。bounded下载已有足额complete `.hdf5`时在联网前skip，`.partial`不计，unlimited不skip；不猜Roll替代URL、不隐藏HTTP错误，Support可独立官方plan续跑。仅以这些反馈安排准备，不新增模型结论。
+最新本地整链fixture结果为`/tmp/igsw-benchmark-integration-pair-cue-balanced-20261008/integration_result.json`，完整log为`/tmp/igsw-benchmark-integration-pair-cue-balanced-20261008.log`：pair cue仅改目标像素、未来image/mask隔离、per-class采样、dev/test产物分离与resume一致均通过，仍非科学benchmark结果。远端Physion曾terminal exit1、384complete，原README Rollreadout URL404，覆盖此前live反馈；随后用户提供SWXC official bucket listing GET200，实际key确认为`Roll_readout_training_HDF5s.tar.gz`。以bucket实际键为authority，删除旧别名，统一scenario/kind标准命名；不是猜接口或本地重新联网核验。bounded下载已有足额complete `.hdf5`时在联网前skip，`.partial`不计，unlimited不skip；不隐藏HTTP错误。远端使用Support+Roll显式plan续跑，不删重跑384文件、不编辑remote源码。仅以这些反馈安排准备，不新增模型结论。
 
 从本文档此次更新开始，版本号只表示实现迭代，不再表示研究方向重启。项目只保留以下一条主线：
 
