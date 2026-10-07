@@ -219,3 +219,56 @@ Effect coordinates come from this source's centers, and validity from its source
 Use new attempts `ss_development03_native` and `physioncue03_native`; data/manifest selection stays unchanged. Do not link earlier State/State+z caches or optimizers into them. The same-development DINO baseline continuation remains unaffected; raw DINO/V-JEPA2 input features can be reused with matching data/export settings. No V69 source, weights, decoder or architecture is changed. Native-reference dev results are still pending.
 
 The one complete local CPU fixture integration passed at `/tmp/igsw-benchmark-integration-native-posterior-20261008/integration_result.json`, full log `/tmp/igsw-benchmark-integration-native-posterior-20261008.log`. Hooks on the actual posterior confirm source0/positive targets and preserved elapsed times. A single segment's target-RGB swap preserves its source/query exactly and changes its target states/effect; global perception times are not mutated. Resume difference0.0, trace/prefix-future-swap exact, pair cue, split separation and class-balanced sampling also pass. These are adapter-interface observations, not native real-data benchmark scores.
+
+### Native Round Intermediate Receipt: 2026-10-08
+
+Evidence is remote-observed: the parent read actual SWXC stdout, not guessed schema or user hand labels. Execution source `29dcfdc47587811dc149c2b2e33bd0b61e3100ee` was pulled from GitHub into `/mnt/pfs/public/xuhaoming/instruct_gs_world/world_dynamics_benchmarks_29dcfdc4`. At this receipt, controller2210063 is live; old controller971835 and independent DINO2204563 are terminal. Shared GPU usage is approximately13/80GB; other processes are not visible and were not touched. Latency measurements are exploratory, not a controlled speed comparison.
+
+| Item | Observed Receipt | Remaining Boundary |
+| --- | --- | --- |
+| Physion native State export | 512/512, exit0 | Infrastructure completion, not a dev score |
+| Physion native State+z export | 325/512, live | Not complete |
+| DINO development01 baseline | Native strict resume1300->1740, exit0; dev evaluation exit0 | Reused raw baseline, not a new State result |
+| DINO development dev | n1392, accuracy/macro0.171695, top5 0.413793; bestepoch13/step1218; head239406 | Selection set, not held capability |
+| Four native Physion dev comparisons | Pending | Do not mark the native research round complete |
+
+Two real State+z caches were checked with teacher step8750: all finite, final main State clock0 and each source-prefix final clock0. Segment0->4 has source0, target times approximately[0.1667,0.3333,0.5,0.6667], query frames0..0; segment4->7 has source0, target times approximately[0.1667,0.3333,0.5333], query frames0..4. These printed times are rounded stdout summaries, not a new exact-dt proof. The cache checks support the implemented native source/query contract; they do not establish object identity or benchmark utility.
+
+Physion train labels are105 negative/99 positive; dev27 negative/25 positive. Across train+dev124 positives,120 first contact after frame36 and4 at/before36; all4 early positives are train cases, and all25 dev positives contact after36. The contact-timing receipt reports no missing GT labels. This does not imply object validity or official-protocol equivalence. Held metrics have not been read.
+
+Receipt root: `/mnt/pfs/public/xuhaoming/instruct_gs_world/logs/world_dynamics_benchmarks_29dcfdc4/`, including `physion_train_dev_contact_timing.json`, `native_clock_first_state_z_cache_review.json` and `gpu_native_stage_receipts.tsv`. The completed DINO raw baseline is carried into03native with its original provenance preserved; source images, public metadata and weights remain unchanged. Prior positive-clock/past-source-q scores remain historical reference-adapter results, not canonical native capability. State training did observe positive future time, so this receipt supplies no untrained/OOD or causal score-drop claim.
+
+This intermediate receipt was first prepared as an uncommitted draft while Physion dev was pending. The completed Physion dev receipt below supersedes that pending status; the intermediate counts remain a historical snapshot. Data/feature preparation is not equivalent to finishing the research goal, and this record changes no source/config/test or server execution.
+
+### Native Physion Development Results: 2026-10-08
+
+The parent read the actual SWXC result: all four native Physion export/probe/dev-evaluate stages and dev comparison completed with exit0. Each representation uses52 dev cases and the same217218-parameter shallow head. Execution source remains29dcfdc; the real native source/query cache check above is interface evidence, not a replacement for these task results.
+
+| Representation | Dev Accuracy | Scenario Macro Balanced Accuracy | Best Epoch |
+| --- | ---: | ---: | ---: |
+| DINOv3 | 0.6923076923 | 0.6614583333 | 13 |
+| V-JEPA2 | 0.6346153846 | 0.6302083333 | 7 |
+| State | 0.6153846154 | 0.5989583333 | 6 |
+| State+z | 0.6153846154 | 0.59375 | 15 |
+
+Paired State+z minus State gain0, bootstrap95% interval[-0.096154,0.096635], improved4/regressed4; minus DINO gain-0.076923, interval[-0.211538,0.057692],4/8; minus V-JEPA2 gain-0.019231, interval[-0.173077,0.134615],8/9. Report: `/mnt/pfs/public/xuhaoming/instruct_gs_world/data/world_dynamics_benchmarks/experiments/physion/comparisons/seed17/physioncue03_native/comparison_dev.json`.
+
+These52-case development-selection results and wide intervals do not show a clear State+z improvement, and do not prove equal capabilities. They are not held results and do not justify tuning the corrected native adapter or choosing a benchmark from its score. At this receipt controller2210063 remains live, continuing SSv2 V-JEPA2 export at1366/5568; source29dcfdc, weights and inputs are unchanged. The cross-task research goal remains incomplete.
+
+### First Formal Protocol: Frozen Before Held
+
+Both Physion and SSv2 remain in the experiment; held scores will not select which becomes the mainline. Frozen execution source is `29dcfdc47587811dc149c2b2e33bd0b61e3100ee`, fixed teacher step8750 and seed17. Keep the current pixels, frame indices and query/pair-cue rules unchanged for each benchmark. The four representations are DINOv3, V-JEPA2, State and State+observed-transition z.
+
+| Fixed Protocol Item | Physion | SSv2 |
+| --- | --- | --- |
+| Partition Counts | train204/dev52/held256 | per class train16/dev8/held8; total2784/1392/1392 |
+| Matched Attention Head Parameters | 217218 for each representation | 239406 for each representation |
+| Shared Probe Settings | width128, heads4, batch32, LR0.001,20 epochs, weight decay0.01 | Same settings |
+| Held Partition | Official testing subset | Official public validation subset, not hidden test |
+| Primary Results | Overall top1/accuracy and existing paired_accuracy_gain | Same primary results |
+
+Best epoch is selected only on dev. After native clock/source alignment, do not change the model, probe or hyperparameters based on dev scores. Report the primary metric consistently across tasks, with class-balanced accuracy, scenario macro (where applicable) and per-case results alongside it; do not choose whichever metric looks best. Shared-GPU latency is exploratory only, not exclusive-GPU efficiency evidence. Neither probe score establishes object identity.
+
+The choices follow the research question, verified field/interface contracts and class coverage, not a winner threshold or a new gate. These are bounded custom matched-probe experiments, not official-paper SOTA reproductions. Formal held evaluation uses the existing `evaluate --split test` and `compare --split test` once per benchmark after the protocol is frozen; no held score selects the representation design or main benchmark.
+
+Protocol choices are now **frozen before held**, with the complete Physion dev diagnosis recorded above. This consolidated documentation record must be pushed and verified by the parent before requesting SWXC held execution. Physion can evaluate its existing dev-selected best checkpoints with `--split test` once and compare test once, without retraining. SSv2's own native dev runs must complete before its held run; cross-task common choices are already fixed rather than waiting to prefer the better-looking task. Held execution/results remain pending; this documentation change does not run a held command.

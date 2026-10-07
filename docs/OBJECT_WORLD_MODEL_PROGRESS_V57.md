@@ -63,6 +63,20 @@ Code依据：`object_video_sequence_dataset_v69.py:149`与`object_video_world_mo
 
 单次本地完整CPU fixture exit0：`/tmp/igsw-benchmark-integration-native-posterior-20261008/integration_result.json`与`/tmp/igsw-benchmark-integration-native-posterior-20261008.log`。实际q hook source0/targetpositive/dt正确，单段targetRGB swap保持source/query而改变target/effect，globalperception时间不mutation；resume0.0、trace与prefix外futureSwap仍一致，既有cue/split/perclass通过。这是adapter整链证据，不替代真实native benchmark结果。
 
+**2026-10-08 native round中间receipt（最初为未提交草稿）**：证据由父助手读取SWXC实际stdout，属remote-observed，非schema猜测/user hand-label。source`29dcfdc47587811dc149c2b2e33bd0b61e3100ee`已Githubpull至`/mnt/pfs/public/xuhaoming/instruct_gs_world/world_dynamics_benchmarks_29dcfdc4`。回执时controller2210063live，old971835/independentDINO2204563terminal；共享GPU约13/80GB，其他进程不可见且未touch，latency仅exploratory。
+
+- Physion native State512/512 export exit0，State_z325/512仍live；仅infra进度，不是四组dev完成。两真实State_z cache teacher8750/allfinite，main State末时钟0、sourceprefix末0。segment0->4 source0/target约[.1667,.3333,.5,.6667]/queryframe0..0；segment4->7 source0/target约[.1667,.3333,.5333]/queryframe0..4。数字为stdout rounded摘要，不作为新exact-dt证明。
+- DINO development01 strictresume1300->1740 exit0、dev eval exit0，n1392，accuracy/macro0.171695，top5 0.413793，bestepoch13/step1218，head239406。03native沿用完成rawbaseline、保留provenance；这是dev selection结果，不宣称held能力。
+- Physion train negative105/positive99，devnegative27/positive25；124positives中120firstcontact>36，4<=36且都train，dev25positives全after36，contact timing未缺GT。标签完整不等于object validity，heldmetrics未读。
+
+Receipt root`/mnt/pfs/public/xuhaoming/instruct_gs_world/logs/world_dynamics_benchmarks_29dcfdc4/`：`physion_train_dev_contact_timing.json`、`native_clock_first_state_z_cache_review.json`、`gpu_native_stage_receipts.tsv`。旧positiveclock/past-qsource adapter结果仍为historicalreference，不作canonical native能力结论；同encoder曾处理positivefuture，不能称untrained/OOD或因果掉分。当前source/q契约按native实现，不引入新架构或数据。该中间记录曾等待四组Physiondev；下述完成receipt覆盖其pending状态，旧进度数字保留。全轮仍ongoing，goal未完成，不改代码、不测试、不操作remote。
+
+**Native Physion dev完成receipt**：父助手read_thread实际读取SWXC报告，四组native export/probe/evaluate/compare均exit0，n52、head217218相同：DINO accuracy0.6923076923/scenarioMacroBalanced0.6614583333/bestepoch13；V-JEPA2 0.6346153846/0.6302083333/7；State 0.6153846154/0.5989583333/6；State_z 0.6153846154/0.59375/15。Paired z-State gain0 CI[-0.096154,0.096635]、4improved/4regressed；z-DINO -0.076923 CI[-0.211538,0.057692]、4/8；z-V-JEPA2 -0.019231 CI[-0.173077,0.134615]、8/9。实际报告`/mnt/pfs/public/xuhaoming/instruct_gs_world/data/world_dynamics_benchmarks/experiments/physion/comparisons/seed17/physioncue03_native/comparison_dev.json`。这是52例devselection与宽CI，不证明State+z提升，也不证明能力相等；native真实cache字段检查不能替代held科学结果。最新回执controller2210063live继续SSv2 V-JEPA2 export1366/5568，source29dc/weights/inputs不动。
+
+**首轮正式协议（held前锁定）**：两个benchmark均保留，不能按heldscore挑主线。source`29dcfdc47587811dc149c2b2e33bd0b61e3100ee`、teacher8750、seed17及当前pixels/frameIndices/querycue固定；Physion train204/dev52/held256，SS每class16train/8dev/8held。每任务4rep同一shallowhead，Physion217218params、SS239406params；当前width128/heads4/batch32/LR0.001/20epochs/weightdecay0.01固定，不在native适配后按dev调整model/probe，bestepoch仅dev。两个任务共同primary为overall top1/accuracy与既有paired_accuracy_gain，强制伴随class-balanced/scenario macro适用项及percase，不挑最好看metric。共享GPU latency只exploratory，无exclusive效率或objectID结论。协议由research question、字段contract、class coverage决定，无winnerthreshold gate。
+
+四组Physiondev已齐，本轮锁定共同协议并合并为一次docs-onlypush，父核验发布记录后才请求SWXC以既有evaluate/compare --split test各任务执行一次；Physion复用已固定best无需重训，SSnative dev也需完成才做自身held。SS为officialvalidation subset、Physion为officialtesting subset，均boundedcustommatchedprobe，非officialpaperSOTA reproduction。跨任务common choices已锁定，不按哪个成绩好选任务。当前只记录可执行状态，不宣称held已执行/完成，不改code、不test、不发remote执行，goal未完成。
+
 从本文档此次更新开始，版本号只表示实现迭代，不再表示研究方向重启。项目只保留以下一条主线：
 
 > 从纯视频学习可部署的、query-conditioned、persistent object state；在该 state 通过独立 object validity 验证后，再学习 latent effect conditioned object dynamics，最终由 goal、language 或 policy 选择 object query 与 latent effect。
