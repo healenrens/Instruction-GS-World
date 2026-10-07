@@ -39,7 +39,19 @@
 
 **SSv2有界扩样**：远端反馈DINO pilot导出768/768 exit0，dev epoch18为2/256，接近1/174 chance；256train/174classes不足以判断utility。新增独立development01配置，保留原pilot01运行不动，official划分后每class采train16/dev8/held8，预期5568clips，新manifest不覆盖旧文件。matchedprobe/assets/preprocessing不变，依据class counts与dev诊断扩样，不读held分选主线，不扩大到全量>1TBcache。
 
-最新本地整链fixture结果为`/tmp/igsw-benchmark-integration-pair-cue-balanced-20261008/integration_result.json`，完整log为`/tmp/igsw-benchmark-integration-pair-cue-balanced-20261008.log`：pair cue仅改目标像素、未来image/mask隔离、per-class采样、dev/test产物分离与resume一致均通过，仍非科学benchmark结果。远端Physion曾terminal exit1、384complete，原README Rollreadout URL404，覆盖此前live反馈；随后用户提供SWXC official bucket listing GET200，实际key确认为`Roll_readout_training_HDF5s.tar.gz`。以bucket实际键为authority，删除旧别名，统一scenario/kind标准命名；不是猜接口或本地重新联网核验。bounded下载已有足额complete `.hdf5`时在联网前skip，`.partial`不计，unlimited不skip；不隐藏HTTP错误。远端使用Support+Roll显式plan续跑，不删重跑384文件、不编辑remote源码。仅以这些反馈安排准备，不新增模型结论。
+最新本地整链fixture结果为`/tmp/igsw-benchmark-integration-pair-cue-balanced-20261008/integration_result.json`，完整log为`/tmp/igsw-benchmark-integration-pair-cue-balanced-20261008.log`：pair cue仅改目标像素、未来image/mask隔离、per-class采样、dev/test产物分离与resume一致均通过，仍非科学benchmark结果。远端Physion曾terminal exit1、384complete，原README Rollreadout URL404，覆盖此前live反馈；随后父助手读取SWXC actual stdout/receipts，official bucket listing GET200实际key确认为`Roll_readout_training_HDF5s.tar.gz`。本轮schema/bucket事实是remote-observed，不是user-supplied schema；本实现者未亲自重新执行remote检查。以bucket实际键为authority，删除旧别名，统一scenario/kind标准命名；不是猜接口或本地重新联网核验。bounded下载已有足额complete `.hdf5`时在联网前skip，`.partial`不计，unlimited不skip；不隐藏HTTP错误。远端使用Support+Roll显式plan续跑，不删重跑384文件、不编辑remote源码。仅以这些反馈安排准备，不新增模型结论。
+
+### 2026-10-08 Remote-Observed Pilot与扩样进度
+
+证据来自父助手read_thread读取SWXC实际stdout/receipts，以下是有界remote-observed记录，不是用户手工提供schema或本实现者重新运行。保留此前252/live、384/404历史，以下完成状态覆盖其当前性。执行source为`5859aac2df28335367ce4fc6e62588630a7e7f2b`；server worktree `/mnt/pfs/public/xuhaoming/instruct_gs_world/world_dynamics_benchmarks_5859aac2`；logroot `/mnt/pfs/public/xuhaoming/instruct_gs_world/logs/world_dynamics_benchmarks_5859aac2/`，状态/回执为`gpu_pipeline.state`与`gpu_stage_receipts.tsv`。
+
+- Physion512files、60,397,021,088bytes，8scenario x2split x32，Support/Roll exit0；manifest train204/dev52/held256。真实cue操作changed2559pixels=target2034+zone525，outside0，仅验证被检查case的像素处理。
+- SSv2 pilot01全部四表示export768/probe20epochs160steps exit0，dev evaluate/compare全exit0。同一239406参数head、256dev：DINO accuracy0.015625/macro0.011494/top5 0.03125/bestepoch0；V-JEPA2 0.0625/0.063218/0.089844/19；State 0.04296875/0.04023/0.09375/18；State+z 0.04296875/0.04023/0.089844/15。
+- Paired dev z-State gain0，CI[-0.015625,0.015625]、2 improved/2 regressed；z-DINO gain0.02734375，CI[0,0.05859375]；z-V-JEPA2 gain-0.01953125，CI[-0.05087890625,0.015625]。实际报告：`/mnt/pfs/public/xuhaoming/instruct_gs_world/data/world_dynamics_benchmarks/experiments/ssv2/comparisons/seed17/pilot01/comparison_dev.json`。
+
+**推导边界/决定**：dev是选择集，每class仅1-2train的工程pilot，不以CI或分数宣称held能力/object validity，未按testscore选主线。完整State序列+observedz无增益不等于z未学变化；同一observed clip的两种表征可能冗余只是结构解释，不是因果证据。沿既定Physion/SSv2主实验推进class-balanced development，不因此更改模型架构。
+
+Expanded manifest实际2784train/1392dev/1392held，每class16/8/8；checkpoint/exportconfig一致的旧768features/rep硬链接复用，新probe不继承optimizer。缓存仍有界，不做full >1TB。回执时controllerPID971835 live，`running:ssv2:development01:dino:export`，最近2623/5568，后排Physioncue01。Expanded/Physion真实研究结果仍running，goal未完成。本轮仅docs更新，不更改server5859源码/运行、不触发新命令。
 
 从本文档此次更新开始，版本号只表示实现迭代，不再表示研究方向重启。项目只保留以下一条主线：
 
