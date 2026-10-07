@@ -79,7 +79,8 @@ class FrozenRepresentation(nn.Module):
                 self.posterior = ObjectSequencePosteriorV69(self.state_config)
                 self.posterior.load_state_dict(module_state(saved, "posterior"))
             self.provenance.update({"teacher": settings["teacher_checkpoint"], "step": saved["step"],
-                                   "teacher_config": saved["config"], "posterior_scope": "observed intervals only"})
+                                   "teacher_config": saved["config"], "posterior_scope": "observed intervals only",
+                                   "state_time_anchor": "last_observed_frame_zero"})
         self.requires_grad_(False).to(config["device"]).eval()
 
     def trim(self, part, budget, group_size=1):
@@ -107,13 +108,15 @@ class FrozenRepresentation(nn.Module):
             part = packet(encoded, xy, first, torch.ones(len(encoded), device=times.device, dtype=torch.bool),
                           end_times=end)
             return self.trim(part, budget)
-        perception = self.perception(batch["rgb"], batch["pixel_valid"], batch["times"], batch["native_hw"])
+        encoder_times = batch["times"] if self.model == "dino" else batch["times"] - batch["times"][:, -1:]
+        perception = self.perception(batch["rgb"], batch["pixel_valid"], encoder_times, batch["native_hw"])
         if self.model == "dino":
             values = perception.features[0].flatten(0, 1)
             xy = perception.coordinates[0].repeat(len(times), 1)
             part = packet(values, xy, times.repeat_interleave(perception.features.shape[2]),
                           perception.valid[0].flatten())
             return self.trim(part, budget)
+        self.state_clock_times = perception.times.detach()
         segments = min(self.config["export"]["observed_segments"], len(times) - 1)
         boundaries = np.linspace(0, len(times) - 1, segments + 1).round().astype(int).tolist()
         # Query initialization is identical for State and State+z, and sees only the first observed interval.
@@ -174,6 +177,8 @@ def export_features(config, model):
                                "times": observation["times"].tolist(), "native_hw": observation["native_hw"].tolist(),
                                "time_basis": row["time_basis"],
                                "input_cue": observation["input_cue"],
+                               **({"state_clock_times": runtime.state_clock_times.cpu().tolist()}
+                                  if model in ("state", "state_z") else {}),
                                "decode_seconds": decoded - start, "encoder_seconds": time.perf_counter() - decoded,
                                "token_sampling": runtime.sampling,
                                "provenance": runtime.provenance})

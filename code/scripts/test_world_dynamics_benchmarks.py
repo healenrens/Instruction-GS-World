@@ -196,6 +196,16 @@ def main():
             export_features(config, model)
             # Run the normal exporter twice: completed cache entries are retained.
             export_features(config, model)
+            cached_manifest = read_json(experiment_root(config, model) / "features.json")
+            feature = torch.load(cached_manifest["rows"][0]["feature_path"], weights_only=False)
+            public_times = torch.tensor(feature["times"])
+            if model in ("state", "state_z"):
+                state_times = torch.tensor(feature["state_clock_times"])
+                assert state_times[0, -1] == 0 and (state_times <= 0).all()
+                assert torch.allclose(state_times.diff(dim=1), public_times.diff(dim=1), atol=1e-6)
+                assert feature["provenance"]["state_time_anchor"] == "last_observed_frame_zero"
+            else:
+                assert "state_clock_times" not in feature and public_times[0, 0] == 0
             run_probe(config, model, "attention", "probe", False)
             for split in ("dev", "test"):
                 report = evaluate(config, model, "attention", read_json(experiment_root(config, model) / "features.json"), split)
@@ -223,9 +233,13 @@ def main():
     assert traces[0] == traces[1]
     row = read_json(physion["manifest"])["rows"][0]
     runtime = FrozenRepresentation(physion, "state_z")
+    seen_clock = {}
+    runtime.encoder.register_forward_pre_hook(lambda module, args: seen_clock.update(times=args[0].times.detach().cpu()))
     original_observation = read_observation(row, 8)
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.device.startswith("cuda")):
         original = runtime(move_observation(original_observation, args.device))
+    assert torch.equal(seen_clock["times"], original_observation["times"] - original_observation["times"][:, -1:])
+    assert seen_clock["times"][0, -1] == 0
     with h5py.File(row["path"], "r+") as file:
         for frame in range(37, 40):
             pixels = images(1, 1)[0]
@@ -251,6 +265,8 @@ def main():
         "future_mask_swap_observation_exact": True, "benchmarks": list(reports),
         "dev_test_artifacts_separate": True,
         "class_balanced_sampling": True,
+        "state_last_observed_clock_zero": True,
+        "state_clock_intervals_preserved": True,
         "hdf5_schema": inspect_schema(row["path"]), "results": str(root / "outputs")})
     print(json.dumps({"status": "passed", "integration_result": str(root / "integration_result.json")}), flush=True)
 

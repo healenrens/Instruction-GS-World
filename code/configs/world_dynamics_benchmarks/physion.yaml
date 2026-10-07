@@ -2,7 +2,7 @@ benchmark: physion
 protocol: physion_v1_custom_hdf5_pair_cued_prefix_matched_8frame
 scope: pilot
 seed: 17
-attempt: cue01
+attempt: physioncue02_clock
 num_classes: 2
 manifest: ${BENCH_ROOT}/physion/manifest.json
 output_root: ${BENCH_ROOT}/experiments

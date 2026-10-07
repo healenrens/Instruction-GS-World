@@ -152,6 +152,8 @@ This uses generated videos/HDF5 plus small fixture backbones and actual V69 Stat
 
 ### 2026-10-08 Remote-Observed Update
 
+The State/State+z scores in this historical receipt used the first-frame-anchored clock. The subsequent adapter correction below invalidates those State comparisons as correctly adapted capability evidence; the DINO/V-JEPA2 paths are unaffected.
+
 The parent read SWXC actual stdout/receipts for this update. It supersedes earlier partial-download/running receipts above, without changing their chronology. The implementation agent has not independently rerun those remote commands.
 
 - Physion preparation completed:512 HDF5 files,60,397,021,088 bytes, eight scenarios x two splits x32. Support/Roll exit0. Manifest counts are train204/dev52/held256.
@@ -172,3 +174,15 @@ These are development-selection scores from a pilot with only1-2 train examples/
 The expanded manifest is2784 train/1392 dev/1392 held, exactly16/8/8 per class. The existing768 features per representation were hard-linked where teacher checkpoint/export configuration matched; new development probes do not inherit optimizer state. This remains a bounded cache experiment, not full >1TB export.
 
 Execution source is `5859aac2df28335367ce4fc6e62588630a7e7f2b`. Server checkout: `/mnt/pfs/public/xuhaoming/instruct_gs_world/world_dynamics_benchmarks_5859aac2`. Log root: `/mnt/pfs/public/xuhaoming/instruct_gs_world/logs/world_dynamics_benchmarks_5859aac2/`, with `gpu_pipeline.state` and `gpu_stage_receipts.tsv`. At this receipt, controller PID971835 is live, state `running:ssv2:development01:dino:export`, latest2623/5568; Physion cue01 is queued after it. Expanded SSv2 and Physion research results remain in progress, so the research goal is not complete. This documentation update does not change that server source or execution.
+
+### State Clock Adapter Correction
+
+V69 `ObjectVideoSequenceDataset.__getitem__` subtracts the last history timestamp (`timestamps[th-1]`), so history ends at0 and earlier frames are negative. State `observe` embeds absolute time as well as elapsed time. The benchmark previously supplied first-frame-relative positive time, which violated this pretrained input contract. The correction is code-contract driven, not chosen from dev performance: only State/State+z perception receives `encoder_times = batch.times - batch.times[:, -1:]`; online State, target State and posterior source/target times share that clock. Adjacent intervals and posterior relative elapsed time are unchanged. Public movie PTS/metadata remain first-frame-relative; raw DINO/V-JEPA2 inputs and outputs do not change.
+
+Code evidence: `code/igsw/adaptive_gaussian_wm/object_video_sequence_dataset_v69.py:149` subtracts the last history timestamp; `query_object_video_encoder_v69.py:103` embeds `(time,time-state.time)`; `pretrained_visual_encoder_v69.py:96` retains supplied times without normalization; `object_sequence_dynamics_v69.py:37` uses `target.time-source.time` in the posterior. The public packet still uses the original movie times; cache `state_clock_times` comes from the actual `perception.times` supplied to State.
+
+State provenance now declares `state_time_anchor=last_observed_frame_zero`; every State cache records the actual negative-to-zero `state_clock_times`. This is audit metadata, not an extra probe input. Old pilot01 and development01 State/State+z caches and comparisons are historical incorrectly adapted results, not evidence of correctly adapted capability. Preserve the artifacts, but do not reuse their State caches or optimizer state.
+
+The existing development config now uses `ss_development02_clock`, and Physion uses `physioncue02_clock`. Manifests, sample selection, readout settings, V69 training/model/checkpoint and public data clock stay unchanged. Initialize new probes, re-export State/State+z, and reuse only raw DINO/V-JEPA2 caches where sampling/teacher/export settings match; no new cache-management system is introduced. This correction does not establish benchmark success; correct-clock dev evaluation is the next result.
+
+One local complete integration run passed with exit0 at `/tmp/igsw-benchmark-integration-state-clock-20261008/integration_result.json`, full log `/tmp/igsw-benchmark-integration-state-clock-20261008.log`: the encoder hook confirms the actual negative-to-zero input clock; adjacent intervals are preserved; resume parameter difference0.0, trace/future-swap exact. This is CPU fixture evidence, not new real-data benchmark scores.

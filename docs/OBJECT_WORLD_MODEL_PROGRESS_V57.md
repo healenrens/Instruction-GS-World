@@ -53,6 +53,10 @@
 
 Expanded manifest实际2784train/1392dev/1392held，每class16/8/8；checkpoint/exportconfig一致的旧768features/rep硬链接复用，新probe不继承optimizer。缓存仍有界，不做full >1TB。回执时controllerPID971835 live，`running:ssv2:development01:dino:export`，最近2623/5568，后排Physioncue01。Expanded/Physion真实研究结果仍running，goal未完成。本轮仅docs更新，不更改server5859源码/运行、不触发新命令。
 
+**2026-10-08 State时间适配修正**：V69 dataset以history末帧时间为0，过去为negative；State.observe同时embed绝对时间与dt。Benchmark公共时间却以首帧0、后续positive进入State，属于预训练输入contract错误，不是由dev分数触发的调参。仅State/state_z perception前减去最后观察时间，online/targetState与posterior共用此clock；dt保持不变，public movie时间/metadata及rawDINO/V-JEPA2不改，V69训练入口/model/ckpt不改。provenance标last_observed_frame_zero，每State cache记录实际state_clock_times且不增加probe字段。此前pilot01/development01 State/z及其comparisons不能作为正确适配能力结果；保留历史分数，不推出z没学变化。新attempt ss_development02_clock/physioncue02_clock，data/manifest采样不变、新probe初始化，旧State cache不得复用，rawbaselines可按相同输入配置复用。下一步取得正确clock的dev结果，goal仍未完成。
+
+Code依据：`object_video_sequence_dataset_v69.py:149`、`query_object_video_encoder_v69.py:103`、`pretrained_visual_encoder_v69.py:96`、`object_sequence_dynamics_v69.py:37`。单次本地完整CPU fixture exit0，结果`/tmp/igsw-benchmark-integration-state-clock-20261008/integration_result.json`，log同目录名加`.log`；实际encoder clock末帧0、dt保留、resume差异0.0、trace/future-swap完全一致。不以此宣布真实benchmark成功。
+
 从本文档此次更新开始，版本号只表示实现迭代，不再表示研究方向重启。项目只保留以下一条主线：
 
 > 从纯视频学习可部署的、query-conditioned、persistent object state；在该 state 通过独立 object validity 验证后，再学习 latent effect conditioned object dynamics，最终由 goal、language 或 policy 选择 object query 与 latent effect。

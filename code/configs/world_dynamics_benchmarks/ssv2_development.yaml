@@ -2,7 +2,7 @@ benchmark: ssv2
 protocol: ssv2_official_split_matched_singleview_16frame
 scope: class_balanced_development
 seed: 17
-attempt: development01
+attempt: ss_development02_clock
 num_classes: 174
 manifest: ${BENCH_ROOT}/ssv2/manifest_development.json
 output_root: ${BENCH_ROOT}/experiments
