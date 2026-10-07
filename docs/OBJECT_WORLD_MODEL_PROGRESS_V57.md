@@ -19,7 +19,17 @@
 > W&B：`healenrenss-university-of-chinese-acadmic-and-science/instruct-gs-world`
 > 当前训练SwanLab：`healenrens/instruct-gs-world`；仅同步训练标量，评测逐例产物保留本地
 
+> 2026-10-08研究决策更新：主线定位为 **world dynamics representation**，不以机器人 action/VLA/RoboTwin 成绩定义主实验。新增独立 Physion OCP、SSv2 frozen representation probe；执行协议见 `WORLD_DYNAMICS_BENCHMARK_RUNBOOK.md`。本轮不修改 Stage 1/2/3，不将旧 tracker/object validity 缺口记为通过。
+
 ## 0. 唯一主线
+
+### 2026-10-08主实验定位修订
+
+**What changed**：核心表征由冻结 State 与 observed-transition effect 共同接受外部任务检验；Physion OCP 只观察官方 input boundary 内的 prefix，SSv2 使用全部方法相同的可见视频片段；对照为 DINOv3、明确版本的 V-JEPA2、State-only、State+z。RoboTwin/语言/控制是分离的应用，不再是主线必须达到的终点。
+
+**Why**：旧训练/重建/teacher一致性不足以说明变化表征具有外部任务价值；先固定可闭环的外部判断任务，再决定模型迭代。
+
+**Impact**：Physion per-scenario linear reference 与新 matched token-attention protocol 分开报告；首轮 pilot 和正式分区结果不能混称。MOVi 只保留独立 object validity 诊断规划；仍不声称16个query等于16个物体。历史 promotion chain 保留为旧实验证据边界，而非把本轮外部 frozen probe 阻断或误记为所有 gate 通过。
 
 从本文档此次更新开始，版本号只表示实现迭代，不再表示研究方向重启。项目只保留以下一条主线：
 

@@ -1,0 +1,45 @@
+benchmark: ssv2
+protocol: ssv2_official_split_matched_singleview_16frame
+scope: pilot
+seed: 17
+attempt: pilot01
+num_classes: 174
+manifest: ${BENCH_ROOT}/ssv2/manifest.json
+output_root: ${BENCH_ROOT}/experiments
+device: cuda:0
+downloads: []  # Supply an authorized download-plan JSON; never mirror unverified URLs.
+data:
+  root: ${BENCH_ROOT}/ssv2
+  videos: ${BENCH_ROOT}/ssv2/20bn-something-something-v2
+  labels: ${BENCH_ROOT}/ssv2/something-something-v2-labels.json
+  train: ${BENCH_ROOT}/ssv2/something-something-v2-train.json
+  validation: ${BENCH_ROOT}/ssv2/something-something-v2-validation.json
+  extension: .webm
+  dev_fraction: 0.1
+  pilot_per_split: 256
+export:
+  frames: 16
+  token_budget: 4096
+  frame_batch: 16
+  observed_segments: 4
+models:
+  dino_repository: ${DINO_REPOSITORY}
+  dino_weights: ${DINO_WEIGHTS}
+  vjepa_repository: ${VJEPA_REPOSITORY}
+  vjepa_weights: ${VJEPA_WEIGHTS}
+  vjepa_factory: vjepa2_vit_large
+  vjepa_checkpoint_key: target_encoder
+  vjepa_crop: 256
+  teacher_checkpoint: ${TEACHER_CHECKPOINT}
+probe:
+  width: 128
+  heads: 4
+  batch_size: 32
+  epochs: 20
+  lr: 0.001
+  weight_decay: 0.01
+  save_every: 100
+  linear_tokens: 16
+  linear_cv: 5
+  linear_logspace: [-8, 8, 17]
+  linear_max_iter: 200

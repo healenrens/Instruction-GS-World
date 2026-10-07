@@ -1,0 +1,11 @@
+torch>=2.5
+torchvision
+av
+h5py
+Pillow
+numpy
+PyYAML
+scikit-learn
+joblib
+einops
+timm
