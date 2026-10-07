@@ -148,19 +148,25 @@ def physion_manifest(config):
     indices = data["input_frame_indices"]
     for scenario in data["scenarios"]:
         for official_split, split in (("readout_training", "train"), ("testing", "test")):
-            files = sorted((Path(data["root"]) / official_split / scenario).rglob("*.hdf5"))
+            source_root = Path(data["root"]) / official_split / scenario
+            files = sorted(source_root.rglob("*.hdf5"))
             for path in files:
+                relative = path.relative_to(source_root)
                 with h5py.File(path) as sample:
                     keys = sorted(sample["frames"])
                     stimulus = sample["static/stimulus_name"][()].decode()
                     # Labels are allowed to describe unseen outcomes; image access remains prefix-only.
                     label = int(any(bool(sample[f"frames/{key}/labels/target_contacting_zone"][()]) for key in keys))
                     image = Image.open(io.BytesIO(sample[f"frames/{keys[indices[0]]}/images/_img"][()].tobytes()))
-                rows.append({"id": scenario + "_" + stimulus, "stimulus_name": stimulus,
+                rows.append({"id": f"{scenario}/{official_split}/{relative.with_suffix('').as_posix()}",
+                             "stimulus_name": stimulus, "source_relative_path": relative.as_posix(),
                              "path": str(path.resolve()), "format": "physion_hdf5",
                              "split": split, "scenario": scenario, "label": label,
                              "official_split": official_split, "frame_indices": indices,
                              "times": [i / data["fps"] for i in indices], "native_hw": [image.height, image.width],
+                             "time_basis": {"kind": "nominal_frame_time", "nominal_fps": data["fps"],
+                                            "measured_clock": False,
+                                            "provenance": "config-selected scale; official Dataset.run default and model BASE_FPS are 30; batch clock unverified"},
                              "input_boundary": data["prefix_source"], "last_allowed_frame": indices[-1]})
     # Dev comes only from readout training, stratified within scenario and outcome.
     stratified_development(rows, data["dev_fraction"], config["seed"])
@@ -177,6 +183,8 @@ def ssv2_manifest(config):
             rows.append({"id": str(item["id"]), "path": str(path.resolve()), "format": "video",
                          "split": split, "scenario": "ssv2", "label": int(labels[template]),
                          "official_split": official_split, "input_boundary": "entire annotated video",
+                         "time_basis": {"kind": "video_pts_seconds", "measured_clock": True,
+                                        "provenance": "decoded frame pts * time_base; video clock, not calibrated simulator clock"},
                          "sampling": "unique uniform indices; actual PTS; no padding by repetition"})
     stratified_development(rows, data["dev_fraction"], config["seed"])
     if data.get("pilot_per_split"):

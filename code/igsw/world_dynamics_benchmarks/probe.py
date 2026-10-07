@@ -262,7 +262,7 @@ def evaluate(config, model_name, protocol, manifest):
         for case in cases:
             feature = torch.load(features_by_id[case["id"]],
                                  map_location="cpu", weights_only=False)
-            case.update({key: feature[key] for key in ("frame_indices", "times", "native_hw", "decode_seconds", "encoder_seconds", "token_sampling")})
+            case.update({key: feature[key] for key in ("frame_indices", "times", "time_basis", "native_hw", "decode_seconds", "encoder_seconds", "token_sampling")})
             stream.write(json.dumps(case) + "\n")
     report = {"benchmark": manifest["benchmark"], "scope": manifest["scope"], "model": model_name,
               "representation": manifest["representation"], "input_protocol": manifest["protocol"],

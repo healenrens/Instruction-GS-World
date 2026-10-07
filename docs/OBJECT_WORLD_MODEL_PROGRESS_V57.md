@@ -31,6 +31,8 @@
 
 **Impact**：Physion per-scenario linear reference 与新 matched token-attention protocol 分开报告；首轮 pilot 和正式分区结果不能混称。MOVi 只保留独立 object validity 诊断规划；仍不声称16个query等于16个物体。历史 promotion chain 保留为旧实验证据边界，而非把本轮外部 frozen probe 阻断或误记为所有 gate 通过。
 
+**2026-10-08真实数据契约补充**：8600首次HDF5反馈表明 `static/stimulus_name` 是局部序号，不能作为唯一样本身份；manifest改用scenario/original-split/relative-file-path，保留原始名称。官方generator默认与模型可视化约定均为30，下载样本没有timestamp/FPS元数据，所以当前使用nominal frame-time而非真实秒数；不得以此推断已核验的物理时长。首个sample的red/yellow已确认，但不能推广到全部split。变更后重新生成manifest并使用新attempt，不混用旧cache。
+
 从本文档此次更新开始，版本号只表示实现迭代，不再表示研究方向重启。项目只保留以下一条主线：
 
 > 从纯视频学习可部署的、query-conditioned、persistent object state；在该 state 通过独立 object validity 验证后，再学习 latent effect conditioned object dynamics，最终由 goal、language 或 policy 选择 object query 与 latent effect。

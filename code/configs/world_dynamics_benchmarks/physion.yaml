@@ -13,9 +13,9 @@ data:
   download_limit: 32
   dev_fraction: 0.2
   input_frame_indices: [0, 5, 10, 15, 20, 25, 30, 36]
-  fps: 60.0
+  fps: 30.0  # Nominal frame-time scale, not a measured clock for the downloaded batch.
   prefix_source: physics-models pDEIT input STATE_LEN=7 SUBSAMPLE_FACTOR=6; matched sample ends at frame36
-  time_basis: nominal 60Hz; must confirm actual simulator timestamps before temporal claims
+  time_basis: nominal 30 based on official generator default and model BASE_FPS; downloaded batch clock unverified
   image_variant: S3 readout training declared redyellow by official README; testing HDF5 coloring unconfirmed until sample review
 export:
   frames: 16

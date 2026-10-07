@@ -133,12 +133,13 @@ def main():
     configs = []
     physion = {**base, "benchmark": "physion", "protocol": "fixture_hdf5_prefix",
         "manifest": str(root / "physion.json"), "data": {"root": str(root / "physion"), "scenarios": ["Collide"],
-            "input_frame_indices": [0, 5, 10, 15, 20, 25, 30, 36], "fps": 60, "dev_fraction": .33,
+            "input_frame_indices": [0, 5, 10, 15, 20, 25, 30, 36], "fps": 30, "dev_fraction": .33,
             "prefix_source": "verified fixture boundary"}}
     for split, count in (("readout_training", 12), ("testing", 4)):
         for index in range(count):
-            make_hdf5(root / "physion" / split / "Collide" / f"{split}_{index:02d}.hdf5", index % 2,
-                      f"{split}_{index:02d}")
+            # Both directories and splits reuse basenames and static stimulus names, as real bundles do.
+            make_hdf5(root / "physion" / split / "Collide" / f"experiment_{index // 6}" / f"{index % 6:04d}.hdf5",
+                      index % 2, f"train_readout_{index % 2:04d}")
     configs.append(physion)
     videos = root / "ssv2"
     videos.mkdir()
@@ -159,6 +160,10 @@ def main():
     for config in configs:
         manifest = build_manifest(config)
         assert manifest["split_counts"] == {"train": 8, "dev": 4, "test": 4}
+        assert len({row["id"] for row in manifest["rows"]}) == len(manifest["rows"])
+        if config["benchmark"] == "physion":
+            assert len({row["stimulus_name"] for row in manifest["rows"]}) == 2
+            assert all(row["time_basis"]["measured_clock"] is False for row in manifest["rows"])
         for model in ("dino", "vjepa2", "state", "state_z"):
             export_features(config, model)
             # Run the normal exporter twice: completed cache entries are retained.
