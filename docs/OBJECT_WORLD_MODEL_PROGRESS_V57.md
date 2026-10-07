@@ -25,7 +25,7 @@
 
 ### 2026-10-08主实验定位修订
 
-**What changed**：核心表征由冻结 State 与 observed-transition effect 共同接受外部任务检验；Physion OCP 只观察官方 input boundary 内的 prefix，SSv2 使用全部方法相同的可见视频片段；对照为 DINOv3、明确版本的 V-JEPA2、State-only、State+z。RoboTwin/语言/控制是分离的应用，不再是主线必须达到的终点。
+**What changed**：核心表征由冻结 State 与 observed-transition effect 共同接受外部任务检验；Physion OCP 只观察 custom pDEIT-derived frame0..36 prefix，不冒称论文1.5s observed协议，SSv2 使用全部方法相同的可见视频片段；对照为 DINOv3、明确版本的 V-JEPA2、State-only、State+z。RoboTwin/语言/控制是分离的应用，不再是主线必须达到的终点。
 
 **Why**：旧训练/重建/teacher一致性不足以说明变化表征具有外部任务价值；先固定可闭环的外部判断任务，再决定模型迭代。
 

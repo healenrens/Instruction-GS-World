@@ -11,9 +11,9 @@ downloads: []  # Supply an authorized download-plan JSON; never mirror unverifie
 data:
   root: ${BENCH_ROOT}/ssv2
   videos: ${BENCH_ROOT}/ssv2/20bn-something-something-v2
-  labels: ${BENCH_ROOT}/ssv2/something-something-v2-labels.json
-  train: ${BENCH_ROOT}/ssv2/something-something-v2-train.json
-  validation: ${BENCH_ROOT}/ssv2/something-something-v2-validation.json
+  labels: ${BENCH_ROOT}/ssv2/labels/labels.json
+  train: ${BENCH_ROOT}/ssv2/labels/train.json
+  validation: ${BENCH_ROOT}/ssv2/labels/validation.json
   extension: .webm
   dev_fraction: 0.1
   pilot_per_split: 256
