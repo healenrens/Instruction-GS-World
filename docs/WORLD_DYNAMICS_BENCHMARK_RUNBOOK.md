@@ -183,6 +183,27 @@ Code evidence: `code/igsw/adaptive_gaussian_wm/object_video_sequence_dataset_v69
 
 State provenance now declares `state_time_anchor=last_observed_frame_zero`; every State cache records the actual negative-to-zero `state_clock_times`. This is audit metadata, not an extra probe input. Old pilot01 and development01 State/State+z caches and comparisons are old reference-clock adapter results, not capability conclusions for the canonical-history version. Preserve their numbers and artifacts without inferring that the clock caused low accuracy, but do not reuse their State caches or optimizer state in the new reference-frame experiment.
 
-The existing development config now uses `ss_development02_clock`, and Physion uses `physioncue02_clock`. Manifests, sample selection, readout settings, V69 training/model/checkpoint and public data clock stay unchanged. Initialize new probes, re-export State/State+z, and reuse only raw DINO/V-JEPA2 caches where sampling/teacher/export settings match; no new cache-management system is introduced. This correction does not establish benchmark success; correct-clock dev evaluation is the next result.
+The existing development config now uses `ss_development02_clock`, and Physion uses `physioncue02_clock`. Manifests, sample selection, readout settings, V69 training/model/checkpoint and public data clock stay unchanged. Re-export State/State+z and initialize fresh State/State+z and V-JEPA2 probes. DINO has the same-development-run continuation exception below. Reuse only raw DINO/V-JEPA2 caches where sampling/teacher/export settings match; no new cache-management system is introduced. This correction does not establish benchmark success; canonical-history dev evaluation is the next result.
 
 One local complete integration run passed with exit0 at `/tmp/igsw-benchmark-integration-state-clock-20261008/integration_result.json`, full log `/tmp/igsw-benchmark-integration-state-clock-20261008.log`: the encoder hook confirms the actual negative-to-zero input clock; adjacent intervals are preserved; resume parameter difference0.0, trace/future-swap exact. This is CPU fixture evidence, not new real-data benchmark scores.
+
+### DINO Development Baseline Continuation
+
+The parent reports that the old controller became terminal during development01 DINO probe training. Its committed `latest.pt` was at step1300 of1740 planned updates, while trace output reached1305; these are different records, not a checkpoint at1305. All5568 DINO features were retained. After confirming terminal state, the parent requested continuation of the same development01 run with the original5859 source and native `dino probe --resume`, preserving dataset, metadata, seed, batch and hyperparameters. Completion has not yet been reported; the linking instructions below apply only after it completes. This continues the16-training-examples/class baseline; it does not inherit the1-2-examples/class pilot optimizer.
+
+The clock alignment changes only State paths, so the completed development01 DINO `features/`, `features.json`, `attention/best.pt`, `attention/latest.pt` and `attention/trace.jsonl` may be copied/linked into the new `ss_development02_clock` attempt. Preserve original artifacts and embedded source/attempt/config provenance; do not rewrite their cached manifest or checkpoint metadata. Native recovery starts from the committed step1300, not the trace's1305: existing `probe.py` keeps trace steps<=1300, atomically replaces that trace, and replays the uncommitted1301-1305 updates. No new code or manual trace edits are needed; trace content is not claimed to remain unchanged during interrupted-run recovery. A completed checkpoint saved with epoch20 leads to an empty `range(epoch,epochs)`, so invoking native resume there performs no further parameter updates. It can still atomically replace the destination trace; replacing a hard link or symlink does not write the original completed trace's inode/target. This is a DINO-only exception to fresh-head initialization, not a new compatibility feature.
+
+After the completed DINO baseline has been linked, the new attempt uses the existing commands:
+
+```bash
+export CONFIG="${ROOT}/code/configs/world_dynamics_benchmarks/ssv2_development.yaml"
+bash "${ROOT}/code/scripts/run_world_dynamics_benchmarks.sh" probe --model dino --protocol attention --resume
+for MODEL in vjepa2 state state_z; do
+  bash "${ROOT}/code/scripts/run_world_dynamics_benchmarks.sh" probe --model "${MODEL}" --protocol attention
+done
+for MODEL in dino vjepa2 state state_z; do
+  bash "${ROOT}/code/scripts/run_world_dynamics_benchmarks.sh" evaluate --model "${MODEL}" --protocol attention --split dev
+done
+```
+
+V-JEPA2/State/State+z heads and optimizers start fresh, never from pilot heads. State caches must use the new canonical-history clock; neither their old caches nor old optimizers are linked. Raw weights, source pixels and probe metadata are unchanged. This delivery note adds no source/config/test changes and does not launch a remote command.

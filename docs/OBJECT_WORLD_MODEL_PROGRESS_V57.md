@@ -57,6 +57,8 @@ Expanded manifest实际2784train/1392dev/1392held，每class16/8/8；checkpoint/
 
 Code依据：`object_video_sequence_dataset_v69.py:149`与`object_video_world_model_v69.py:37-40`定义canonical history；同world model的75-79行证实stageState在线encoder观察positive future；`query_object_video_encoder_v69.py:103`、`pretrained_visual_encoder_v69.py:96`、`object_sequence_dynamics_v69.py:37`说明absolute clock输入与posterior relative dt。单次本地完整CPU fixture exit0，结果`/tmp/igsw-benchmark-integration-state-clock-20261008/integration_result.json`，log同目录名加`.log`；实际encoder clock末帧0、dt保留、resume差异0.0、trace/future-swap完全一致。不以此宣布真实benchmark成功。本次补充只修文档措辞，不改source/tests/config，不重跑，不引入新architecture/query seed。
 
+**DINO baseline同run续训例外**：父助手确认旧controller在development01 DINO probe期间terminal，committed latest=step1300/计划1740，trace到1305；不是checkpoint1305，full5568 DINO features保留。父助手要求terminal后以原5859source与native probe --resume继续同一16/class development01，尚无完成回执；dataset/meta/seed/batch/hp不变，不继承pilot1-2/class optimizer。恢复依据latest1300；现有native逻辑保留trace step<=1300并atomic replace，再重放未提交1301-1305，不新增代码或手工修trace，也不声称恢复期间trace不变。因canonicalclock只改State路径，待完成后才允许DINO features/features.json/best/latest/trace复制或链接至ss_development02_clock，原artifact/provenance/cachedconfig保留原source/attempt不rewrite。完成epoch20的native resume不再更新参数，但可能atomic replace目的trace链接，不写原完成artifact的inode/target，然后evaldev；这只例外于DINO。V-JEPA2/State/z fresh head/optimizer，不复用pilotheads；State缓存仍必须新canonical。weights/rawinputs/publicmetadata不改，不新增cache系统或代码。旧统一“新probe初始化”对DINO作此例外，其余保持。仅docs交付，不执行remote、不重复测试，goal未完成。
+
 从本文档此次更新开始，版本号只表示实现迭代，不再表示研究方向重启。项目只保留以下一条主线：
 
 > 从纯视频学习可部署的、query-conditioned、persistent object state；在该 state 通过独立 object validity 验证后，再学习 latent effect conditioned object dynamics，最终由 goal、language 或 policy 选择 object query 与 latent effect。
