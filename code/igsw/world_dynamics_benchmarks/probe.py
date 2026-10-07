@@ -233,10 +233,10 @@ def train_linear(config, model_name, manifest, resume=False):
     return root
 
 
-def evaluate(config, model_name, protocol, manifest):
+def evaluate(config, model_name, protocol, manifest, split="dev"):
     settings = config["probe"]
     root = experiment_root(config, model_name) / protocol
-    rows = [row for row in manifest["rows"] if row["split"] == "test"]
+    rows = [row for row in manifest["rows"] if row["split"] == split]
     if protocol == "attention":
         saved = torch.load(root / "best.pt", map_location=config["device"], weights_only=False)
         model = TokenProbe(settings, manifest["num_classes"]).to(config["device"])
@@ -258,25 +258,30 @@ def evaluate(config, model_name, protocol, manifest):
                     "prediction": int(classes[p.argmax()]), "probabilities": p.tolist(),
                     "probability_classes": classes.tolist(), "top5": classes[p.argsort()[-5:][::-1]].tolist()})
     features_by_id = {row["id"]: row["feature_path"] for row in rows}
-    with (root / "cases.jsonl").open("w") as stream:
+    with (root / f"cases_{split}.jsonl").open("w") as stream:
         for case in cases:
             feature = torch.load(features_by_id[case["id"]],
                                  map_location="cpu", weights_only=False)
             case.update({key: feature[key] for key in ("frame_indices", "times", "time_basis", "native_hw", "decode_seconds", "encoder_seconds", "token_sampling")})
+            # Existing SSv2 natural-RGB caches precede the explicit cue metadata field.
+            case["input_cue"] = feature.get("input_cue", {"kind": "natural_rgb"})
             stream.write(json.dumps(case) + "\n")
     report = {"benchmark": manifest["benchmark"], "scope": manifest["scope"], "model": model_name,
               "representation": manifest["representation"], "input_protocol": manifest["protocol"],
               "readout_protocol": protocol, "readout_parameters": parameters,
               "expected_num_classes": manifest["num_classes"],
               "observed_evaluation_class_count": len({row["label"] for row in cases}),
-              "evaluation_partition": "official validation" if manifest["benchmark"] == "ssv2" else "official testing",
+              "split": split,
+              "evaluation_role": "development_selection" if split == "dev" else "held_evaluation",
+              "evaluation_partition": "internal train-derived dev" if split == "dev" else (
+                  "official validation" if manifest["benchmark"] == "ssv2" else "official testing"),
               "official_score_reproduction": False, "overall": summary(cases),
               "scenario_macro_accuracy": float(np.mean([summary([case for case in cases if case["scenario"] == scenario])[
                   "balanced_accuracy_present_classes"] for scenario in sorted({case["scenario"] for case in cases})])),
               "scenarios": {scenario: summary([case for case in cases if case["scenario"] == scenario])
                             for scenario in sorted({case["scenario"] for case in cases})}}
-    write_json(root / "report.json", report)
-    with (root / "confusion.csv").open("w") as stream:
+    write_json(root / f"report_{split}.json", report)
+    with (root / f"confusion_{split}.csv").open("w") as stream:
         writer = csv.writer(stream)
         writer.writerow(["truth", "prediction", "count"])
         from collections import Counter
@@ -286,8 +291,8 @@ def evaluate(config, model_name, protocol, manifest):
     return report
 
 
-def run_probe(config, model_name, protocol, command, resume):
+def run_probe(config, model_name, protocol, command, resume, split="dev"):
     manifest = read_json(experiment_root(config, model_name) / "features.json")
     if command == "probe":
         return (train_attention if protocol == "attention" else train_linear)(config, model_name, manifest, resume)
-    return evaluate(config, model_name, protocol, manifest)
+    return evaluate(config, model_name, protocol, manifest, split)

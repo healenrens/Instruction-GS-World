@@ -21,7 +21,8 @@ def main():
     inspect = sub.add_parser("inspect")
     inspect.add_argument("path")
     sub.add_parser("manifest")
-    sub.add_parser("compare")
+    comparison = sub.add_parser("compare")
+    comparison.add_argument("--split", choices=["dev", "test"], default="dev")
     export = sub.add_parser("export")
     export.add_argument("--model", choices=["dino", "vjepa2", "state", "state_z"], required=True)
     for command in ("probe", "evaluate"):
@@ -29,6 +30,8 @@ def main():
         runner.add_argument("--model", choices=["dino", "vjepa2", "state", "state_z"], required=True)
         runner.add_argument("--protocol", choices=["attention", "linear"], default="attention")
         runner.add_argument("--resume", action="store_true")
+        if command == "evaluate":
+            runner.add_argument("--split", choices=["dev", "test"], default="dev")
     args = parser.parse_args()
     config = load_config(args.config)
     if args.command == "plan":
@@ -53,13 +56,14 @@ def main():
         build_manifest(config)
     elif args.command == "compare":
         from .compare import compare_models
-        compare_models(config)
+        compare_models(config, args.split)
     elif args.command == "export":
         from .features import export_features
         export_features(config, args.model)
     else:
         from .probe import run_probe
-        run_probe(config, args.model, args.protocol, args.command, args.resume)
+        run_probe(config, args.model, args.protocol, args.command, args.resume,
+                  args.split if args.command == "evaluate" else "dev")
 
 
 if __name__ == "__main__":

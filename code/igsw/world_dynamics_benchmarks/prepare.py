@@ -33,7 +33,7 @@ def stratified_development(rows, fraction, seed):
             row["split"] = "dev"
 
 
-def stratified_pilot(rows, limit, seed):
+def stratified_pilot(rows, limit, seed, per_class=None):
     selected = []
     for split in ("train", "dev", "test"):
         groups = {}
@@ -43,6 +43,9 @@ def stratified_pilot(rows, limit, seed):
         rng = random.Random(seed)
         for group in groups.values():
             rng.shuffle(group)
+        if per_class:
+            selected.extend(row for key in sorted(groups) for row in groups[key][:per_class[split]])
+            continue
         ordered = sorted(groups)
         rng.shuffle(ordered)
         candidates = [groups[key][index] for index in range(max(map(len, groups.values()), default=0))
@@ -72,6 +75,9 @@ def download_plan(config, plan_path=None):
         destination = Path(row["destination"])
         if row["mode"] == "tar_stream":
             destination.mkdir(parents=True, exist_ok=True)
+            if row["max_files"] > 0 and sum(path.is_file() for path in destination.glob("*.hdf5")) >= row["max_files"]:
+                print(f"download skip completed pilot {destination}", flush=True)
+                continue
             count = 0
             # A pilot stops after N HDF5 members; it never downloads the dynamics corpus.
             with urllib.request.urlopen(row["url"]) as response, tarfile.open(fileobj=response, mode="r|gz") as archive:
@@ -155,6 +161,18 @@ def physion_manifest(config):
                 with h5py.File(path) as sample:
                     keys = sorted(sample["frames"])
                     stimulus = sample["static/stimulus_name"][()].decode()
+                    object_ids = sample["static/object_ids"][()].tolist()
+                    colors = sample["static/object_segmentation_colors"][()]
+                    target_id = int(sample["static/target_id"][()])
+                    zone_id = int(sample["static/zone_id"][()])
+                    cue = {"kind": "custom_hdf5_pair_cued", "alpha": data["pair_cue_alpha"],
+                           "target_id": target_id, "zone_id": zone_id,
+                           "target_segmentation_color": colors[object_ids.index(target_id)].tolist(),
+                           "zone_segmentation_color": colors[object_ids.index(zone_id)].tolist(),
+                           "target_tint": [255, 0, 0], "zone_tint": [255, 255, 0],
+                           "mask_source": "observed prefix frames/images/_id exact RGB match only",
+                           "source": "https://github.com/neuroailab/tdw_physics/blob/master/tdw_physics/dataset.py#L730-L757",
+                           "official_material_rerender": False}
                     # Labels are allowed to describe unseen outcomes; image access remains prefix-only.
                     label = int(any(bool(sample[f"frames/{key}/labels/target_contacting_zone"][()]) for key in keys))
                     image = Image.open(io.BytesIO(sample[f"frames/{keys[indices[0]]}/images/_img"][()].tobytes()))
@@ -163,6 +181,7 @@ def physion_manifest(config):
                              "path": str(path.resolve()), "format": "physion_hdf5",
                              "split": split, "scenario": scenario, "label": label,
                              "official_split": official_split, "frame_indices": indices,
+                             "input_cue": cue,
                              "times": [i / data["fps"] for i in indices], "native_hw": [image.height, image.width],
                              "time_basis": {"kind": "nominal_frame_time", "nominal_fps": data["fps"],
                                             "measured_clock": False,
@@ -190,8 +209,8 @@ def ssv2_manifest(config):
                                         "provenance": "decoded frame pts * time_base; video clock, not calibrated simulator clock"},
                          "sampling": "unique uniform indices; actual PTS; no padding by repetition"})
     stratified_development(rows, data["dev_fraction"], config["seed"])
-    if data.get("pilot_per_split"):
-        rows = stratified_pilot(rows, data["pilot_per_split"], config["seed"])
+    if data.get("pilot_per_class") or data.get("pilot_per_split"):
+        rows = stratified_pilot(rows, data.get("pilot_per_split", 0), config["seed"], data.get("pilot_per_class"))
     return rows
 
 

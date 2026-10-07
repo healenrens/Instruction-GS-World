@@ -35,6 +35,12 @@
 
 本轮本地CPU整链测试exit0：`/tmp/igsw-benchmark-integration-paper-time-20261008/integration_result.json`，完整log为`/tmp/igsw-benchmark-integration-paper-time-20261008.log`；resume差异0.0，trace/prefix-future-swap完全一致，使用fixture而非真实预训练评测。最新远端反馈（尚未读取具体结果路径）：Physion PID173180 live，252/512约28.53GB，至Drape testing，代理正确；CPU/CUDA fixture passed。SSv2分片1完整，分片2约7.32GB处curl92后SWXC续传并获取labels。下载未全部完成，未据此推出benchmark能力结论。
 
+**2026-10-08 pair cue与选择集协议修订**：远端testing Collide反馈显示自然RGB未必标出contact pair，原uncued输入缺少判断对象。官方[generator颜色映射](https://github.com/neuroailab/tdw_physics/blob/master/tdw_physics/dataset.py#L730-L757)按object_ids顺序保存segmentation colors；[首帧cue](https://github.com/neuroailab/tdw_physics/blob/master/tdw_physics/dataset.py#L466-L490)按target/zone索引exact-match PNG `_id`。本版所有方法共同使用每个prefix观察帧的target-red/zone-yellow alpha0.65 tint，不读未来mask，不另输入mask，称customHDF5pair-cued而非officialrerender。真实schema来自远端反馈，artifact为runtime相对`logs/world_dynamics_benchmarks_20cd3946/physion_testing_collide_schema.json`及`physion_testing_collide_img0000.png`，本实现者未亲读remote。Physion改cue01重新导出；SSv2不重训、不换attempt。评测/比较默认dev且标为选择集，test显式调用；两者产物独立，不再默认读取test分来迭代主线。State/teacher/readout容量冻结不变；下一步先做cue01 dev任务对照，不以fixture或dev分认定held能力。
+
+**SSv2有界扩样**：远端反馈DINO pilot导出768/768 exit0，dev epoch18为2/256，接近1/174 chance；256train/174classes不足以判断utility。新增独立development01配置，保留原pilot01运行不动，official划分后每class采train16/dev8/held8，预期5568clips，新manifest不覆盖旧文件。matchedprobe/assets/preprocessing不变，依据class counts与dev诊断扩样，不读held分选主线，不扩大到全量>1TBcache。
+
+最新本地整链fixture结果为`/tmp/igsw-benchmark-integration-pair-cue-balanced-20261008/integration_result.json`，完整log为`/tmp/igsw-benchmark-integration-pair-cue-balanced-20261008.log`：pair cue仅改目标像素、未来image/mask隔离、per-class采样、dev/test产物分离与resume一致均通过，仍非科学benchmark结果。最新远端Physion反馈为terminal exit1、384complete，原README Rollreadout URL404，覆盖此前live反馈。bounded下载已有足额complete `.hdf5`时在联网前skip，`.partial`不计，unlimited不skip；不猜Roll替代URL、不隐藏HTTP错误，Support可独立官方plan续跑。仅以这些反馈安排准备，不新增模型结论。
+
 从本文档此次更新开始，版本号只表示实现迭代，不再表示研究方向重启。项目只保留以下一条主线：
 
 > 从纯视频学习可部署的、query-conditioned、persistent object state；在该 state 通过独立 object validity 验证后，再学习 latent effect conditioned object dynamics，最终由 goal、language 或 policy 选择 object query 与 latent effect。

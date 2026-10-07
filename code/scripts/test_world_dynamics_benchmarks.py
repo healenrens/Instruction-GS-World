@@ -73,10 +73,23 @@ def make_hdf5(path, label, stimulus):
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as file:
         file.create_dataset("static/stimulus_name", data=stimulus.encode())
+        file.create_dataset("static/object_ids", data=[3, 2, 1])
+        file.create_dataset("static/object_segmentation_colors", data=np.array(
+            [[166, 180, 55], [218, 76, 142], [241, 241, 236]], dtype=np.uint8))
+        file.create_dataset("static/target_id", data=2)
+        file.create_dataset("static/zone_id", data=1)
         for frame, pixels in enumerate(images(label, 40)):
             buffer = io.BytesIO()
             Image.fromarray(pixels).save(buffer, format="PNG")
             file.create_dataset(f"frames/{frame:04d}/images/_img", data=np.frombuffer(buffer.getvalue(), dtype=np.uint8))
+            segmentation = np.zeros_like(pixels)
+            offset = frame % (pixels.shape[1] - 6)
+            segmentation[8:16, offset:offset + 6] = [218, 76, 142]
+            segmentation[20:28, 24:30] = [241, 241, 236]
+            segmentation[:4, :4] = [166, 180, 55]
+            buffer = io.BytesIO()
+            Image.fromarray(segmentation).save(buffer, format="PNG")
+            file.create_dataset(f"frames/{frame:04d}/images/_id", data=np.frombuffer(buffer.getvalue(), dtype=np.uint8))
             file.create_dataset(f"frames/{frame:04d}/labels/target_contacting_zone", data=label and frame == 39)
 
 
@@ -131,10 +144,10 @@ def main():
     torch.manual_seed(17)
     base = setup(root, args.device)
     configs = []
-    physion = {**base, "benchmark": "physion", "protocol": "fixture_hdf5_prefix",
+    physion = {**base, "benchmark": "physion", "protocol": "fixture_custom_hdf5_pair_cued_prefix",
         "manifest": str(root / "physion.json"), "data": {"root": str(root / "physion"), "scenarios": ["Collide"],
             "input_frame_indices": [0, 5, 10, 15, 20, 25, 30, 36], "fps": 30, "dev_fraction": .33,
-            "prefix_source": "verified fixture boundary"}}
+            "prefix_source": "verified fixture boundary", "pair_cue_alpha": .65}}
     for split, count in (("readout_training", 12), ("testing", 4)):
         for index in range(count):
             # Both directories and splits reuse basenames and static stimulus names, as real bundles do.
@@ -155,28 +168,48 @@ def main():
         "manifest": str(root / "ssv2.json"), "data": {"root": str(videos), "videos": str(videos),
         "labels": str(videos / "labels.json"), "train": str(videos / "train.json"),
         "validation": str(videos / "validation.json"), "extension": ".mp4", "dev_fraction": .33,
-        "pilot_per_split": 0}})
+        "pilot_per_class": {"train": 4, "dev": 2, "test": 2}}})
     reports = {}
     for config in configs:
         manifest = build_manifest(config)
         assert manifest["split_counts"] == {"train": 8, "dev": 4, "test": 4}
         assert len({row["id"] for row in manifest["rows"]}) == len(manifest["rows"])
+        if config["benchmark"] == "ssv2":
+            assert manifest["class_counts"] == {"train": {"0": 4, "1": 4}, "dev": {"0": 2, "1": 2},
+                                                 "test": {"0": 2, "1": 2}}
         if config["benchmark"] == "physion":
             assert len({row["stimulus_name"] for row in manifest["rows"]}) == 2
             assert all(row["time_basis"]["measured_clock"] is False for row in manifest["rows"])
             assert all(row["times"][-1] == 1.2 and row["time_basis"]["paper_observed_prefix_seconds"] == 1.5
                        for row in manifest["rows"])
+            row = manifest["rows"][0]
+            observed = read_observation(row, 8)["rgb"][0].permute(0, 2, 3, 1).numpy()
+            with h5py.File(row["path"]) as file:
+                for index, pixels in zip(row["frame_indices"], observed):
+                    raw = np.array(Image.open(io.BytesIO(file[f"frames/{index:04d}/images/_img"][()].tobytes())))
+                    segmentation = np.array(Image.open(io.BytesIO(file[f"frames/{index:04d}/images/_id"][()].tobytes())))
+                    masks = [(segmentation == color).all(-1) for color in ([218, 76, 142], [241, 241, 236])]
+                    assert np.array_equal(pixels[~(masks[0] | masks[1])], raw[~(masks[0] | masks[1])])
+                    for mask, tint in zip(masks, ([255, 0, 0], [255, 255, 0])):
+                        assert np.array_equal(pixels[mask], np.rint(.35 * raw[mask] + .65 * np.array(tint)).astype(np.uint8))
         for model in ("dino", "vjepa2", "state", "state_z"):
             export_features(config, model)
             # Run the normal exporter twice: completed cache entries are retained.
             export_features(config, model)
             run_probe(config, model, "attention", "probe", False)
-            report = evaluate(config, model, "attention", read_json(experiment_root(config, model) / "features.json"))
-            assert report["overall"]["count"] == 4
-        compare_models(config)
-        reports[config["benchmark"]] = read_json(experiment_root(config, "state_z") / "attention/report.json")
+            for split in ("dev", "test"):
+                report = evaluate(config, model, "attention", read_json(experiment_root(config, model) / "features.json"), split)
+                assert report["overall"]["count"] == 4 and report["split"] == split
+            output = experiment_root(config, model) / "attention"
+            cases = [{json.loads(line)["id"] for line in (output / f"cases_{split}.jsonl").read_text().splitlines()}
+                     for split in ("dev", "test")]
+            assert cases[0].isdisjoint(cases[1])
+        for split in ("dev", "test"):
+            compare_models(config, split)
+        reports[config["benchmark"]] = read_json(experiment_root(config, "state_z") / "attention/report_dev.json")
     run_probe(physion, "state_z", "linear", "probe", False)
-    run_probe(physion, "state_z", "linear", "evaluate", False)
+    for split in ("dev", "test"):
+        run_probe(physion, "state_z", "linear", "evaluate", False, split)
     manifest = read_json(experiment_root(physion, "state_z") / "features.json")
     resume_config = {**physion, "attempt": "resumed"}
     train_attention(resume_config, "state_z", manifest, stop_step=2)
@@ -190,8 +223,9 @@ def main():
     assert traces[0] == traces[1]
     row = read_json(physion["manifest"])["rows"][0]
     runtime = FrozenRepresentation(physion, "state_z")
+    original_observation = read_observation(row, 8)
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.device.startswith("cuda")):
-        original = runtime(move_observation(read_observation(row, 8), args.device))
+        original = runtime(move_observation(original_observation, args.device))
     with h5py.File(row["path"], "r+") as file:
         for frame in range(37, 40):
             pixels = images(1, 1)[0]
@@ -200,13 +234,23 @@ def main():
             key = f"frames/{frame:04d}/images/_img"
             del file[key]
             file.create_dataset(key, data=np.frombuffer(buffer.getvalue(), dtype=np.uint8))
+            buffer = io.BytesIO()
+            Image.fromarray(np.full_like(pixels, [241, 241, 236])).save(buffer, format="PNG")
+            key = f"frames/{frame:04d}/images/_id"
+            del file[key]
+            file.create_dataset(key, data=np.frombuffer(buffer.getvalue(), dtype=np.uint8))
+    changed_observation = read_observation(row, 8)
+    assert torch.equal(original_observation["rgb"], changed_observation["rgb"])
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.device.startswith("cuda")):
-        changed = runtime(move_observation(read_observation(row, 8), args.device))
+        changed = runtime(move_observation(changed_observation, args.device))
     assert torch.equal(original["tokens"], changed["tokens"])
     assert not any(parameter.requires_grad for parameter in runtime.parameters())
     write_json(root / "integration_result.json", {"status": "passed", "device": args.device,
         "fixture_not_pretrained_benchmark": True, "resume_max_difference": maximum,
-        "trace_exact": True, "prefix_future_swap_exact": True, "benchmarks": list(reports),
+        "trace_exact": True, "prefix_future_swap_exact": True, "pair_cue_pixels_exact": True,
+        "future_mask_swap_observation_exact": True, "benchmarks": list(reports),
+        "dev_test_artifacts_separate": True,
+        "class_balanced_sampling": True,
         "hdf5_schema": inspect_schema(row["path"]), "results": str(root / "outputs")})
     print(json.dumps({"status": "passed", "integration_result": str(root / "integration_result.json")}), flush=True)
 

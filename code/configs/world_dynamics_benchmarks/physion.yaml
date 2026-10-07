@@ -1,8 +1,8 @@
 benchmark: physion
-protocol: physion_v1_input_prefix_matched_8frame
+protocol: physion_v1_custom_hdf5_pair_cued_prefix_matched_8frame
 scope: pilot
 seed: 17
-attempt: pilot01
+attempt: cue01
 num_classes: 2
 manifest: ${BENCH_ROOT}/physion/manifest.json
 output_root: ${BENCH_ROOT}/experiments
@@ -16,7 +16,8 @@ data:
   fps: 30.0  # Paper-reported movie FPS; no timestamps measured from this HDF5 batch.
   prefix_source: custom pDEIT-derived frame0..36 prefix (nominal last time 1.2s at paper FPS); NOT the paper observed 1.5s protocol
   time_basis: Physion arXiv2106.08261v3 section2.2 reports30fps; frame-position time inferred, not HDF5-measured
-  image_variant: S3 readout training declared redyellow by official README; testing HDF5 coloring unconfirmed until sample review
+  pair_cue_alpha: 0.65
+  image_variant: custom HDF5 prefix-only target-red zone-yellow alpha tint; not official material rerender
 export:
   frames: 16
   token_budget: 4096

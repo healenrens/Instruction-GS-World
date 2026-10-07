@@ -8,12 +8,12 @@ import numpy as np
 from .io import experiment_root, read_json, write_json
 
 
-def compare_models(config):
+def compare_models(config, split="dev"):
     reports, cases = {}, {}
     for model in ("dino", "vjepa2", "state", "state_z"):
         root = experiment_root(config, model) / "attention"
-        reports[model] = read_json(root / "report.json")
-        cases[model] = {row["id"]: row for row in map(json.loads, (root / "cases.jsonl").read_text().splitlines())}
+        reports[model] = read_json(root / f"report_{split}.json")
+        cases[model] = {row["id"]: row for row in map(json.loads, (root / f"cases_{split}.jsonl").read_text().splitlines())}
     shared = sorted(set.intersection(*(set(rows) for rows in cases.values())))
     comparisons = {}
     rng = np.random.default_rng(config["seed"])
@@ -28,13 +28,16 @@ def compare_models(config):
             "improved_cases": int((differences > 0).sum()), "regressed_cases": int((differences < 0).sum())}
     output = Path(config["output_root"]) / config["benchmark"] / "comparisons" / f"seed{config['seed']}" / config["attempt"]
     output.mkdir(parents=True, exist_ok=True)
-    report = {"scope": config["scope"], "protocol": config["protocol"], "paired_count": len(shared),
+    report = {"scope": config["scope"], "protocol": config["protocol"], "split": split,
+              "evaluation_role": "development_selection" if split == "dev" else "held_evaluation",
+              "paired_count": len(shared),
               "unpaired_counts": {model: len(rows) - len(shared) for model, rows in cases.items()},
               "comparisons": comparisons, "reports": reports,
-              "interpretation": "task utility only; not object validity, deployment accuracy or official score reproduction"}
-    write_json(output / "comparison.json", report)
-    with (output / "paired_cases.jsonl").open("w") as stream:
+              "interpretation": ("dev scores are selection-set results, not held generalization; " if split == "dev" else "")
+                                + "task utility only; not object validity, deployment accuracy or official score reproduction"}
+    write_json(output / f"comparison_{split}.json", report)
+    with (output / f"paired_cases_{split}.jsonl").open("w") as stream:
         for key in shared:
             stream.write(json.dumps({"id": key, "models": {model: rows[key] for model, rows in cases.items()}}) + "\n")
-    print(json.dumps({"comparison": str(output / "comparison.json"), "comparisons": comparisons}), flush=True)
+    print(json.dumps({"comparison": str(output / f"comparison_{split}.json"), "comparisons": comparisons}), flush=True)
     return report

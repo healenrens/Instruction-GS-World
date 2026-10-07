@@ -173,6 +173,7 @@ def export_features(config, model):
                                "id": row["id"], "frame_indices": observation["frame_indices"],
                                "times": observation["times"].tolist(), "native_hw": observation["native_hw"].tolist(),
                                "time_basis": row["time_basis"],
+                               "input_cue": observation["input_cue"],
                                "decode_seconds": decoded - start, "encoder_seconds": time.perf_counter() - decoded,
                                "token_sampling": runtime.sampling,
                                "provenance": runtime.provenance})
