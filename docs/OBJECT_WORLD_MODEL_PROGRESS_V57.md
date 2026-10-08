@@ -77,6 +77,39 @@ Receipt root`/mnt/pfs/public/xuhaoming/instruct_gs_world/logs/world_dynamics_ben
 
 四组Physiondev已齐，本轮锁定共同协议并合并为一次docs-onlypush，父核验发布记录后才请求SWXC以既有evaluate/compare --split test各任务执行一次；Physion复用已固定best无需重训，SSnative dev也需完成才做自身held。SS为officialvalidation subset、Physion为officialtesting subset，均boundedcustommatchedprobe，非officialpaperSOTA reproduction。跨任务common choices已锁定，不按哪个成绩好选任务。当前只记录可执行状态，不宣称held已执行/完成，不改code、不test、不发remote执行，goal未完成。
 
+**Physion正式held中间结果草稿（待SS齐后统一提交）**：父助手read_thread实际SWXCstdout确认c14freeze发布后，以source29dc/固定dev-selected best完成四evaluate_test与compare_test，均exit0，controller3444671 terminal/tmuxdead1/exit0。此receipt覆盖此前Physionheld pending，冻结协议/旧数字不改。n256、head217218相同：DINO accuracy0.49609375/globalBalanced0.4866895663/scenarioMacro0.4784992122/WilsonCI[0.4353577874,0.5569452156]/epoch13；V-JEPA2 0.515625/0.5308838864/0.5259721437/[0.4546277053,0.5761602824]/7；State 0.5078125/0.5009507453/0.4860033757/[0.4469087670,0.5684852269]/6；State_z 0.48046875/0.4759553456/0.4696113221/[0.4200076804,0.5415073349]/15。
+
+Paired z-State gain-0.02734375 CI[-0.09765625,0.04296875]、39improved/46regressed；z-DINO -0.015625 CI[-0.08984375,0.05859375]、42/46；z-V-JEPA2 -0.03515625 CI[-0.12109375,0.05078125]、55/64。模型报告/逐例位于`/mnt/pfs/public/xuhaoming/instruct_gs_world/data/world_dynamics_benchmarks/experiments/physion/{model}/seed17/physioncue03_native/attention/report_test.json`与`cases_test.jsonl`；compare为`/mnt/pfs/public/xuhaoming/instruct_gs_world/data/world_dynamics_benchmarks/experiments/physion/comparisons/seed17/physioncue03_native/comparison_test.json`。freeze已确认`/mnt/pfs/public/xuhaoming/instruct_gs_world/logs/world_dynamics_benchmarks_29dcfdc4/physion_held_freeze_receipt.json`；held-stage receipt具体文件名尚待父确认，不编造。未提供的scenario/percase分析不在本草稿推断。
+
+**推导与下一步边界（中间receipt）**：本协议所有Physionaccuracy near chance、Wilson均含0.5、pairedCI均含0，无可靠physicalutility或zgain证据；不等同能力等价。rawvisualbaselines也near chance，不能单独归因latent；train204/dev52选epoch/domainshift仅待验证假设，不是因果结论。当时Physionheld完成、SSnative V-JEPA2 probe仍在训且formalheld pending；下述最终receipt覆盖其pending状态。保持两task/原冻结协议，不按分数换主线，不新增未授权改善数字实验，不改source/config/model/probe，不test、不访问或操作server。
+
+**已知label priors解释control与SS partial补充**：父read_thread直接读到Physion label0/1 train105/99、dev27/25、held137/119(total256)，非BAcc倒推。uniform coin expectedaccuracy/BA0.5；train-only globalmajority选0，其held137/256=0.53515625、BA0.5，超过四model已记录heldaccuracy。这仅为已知labelcounts派生的解释control，不伪造新modelrun、不训练重评、不新增protocolmetric/benchmark选择；原numbers及冻结primary保留。
+
+SSnative V-JEPA2 export/probe/evaldev均exit0，n1392 accuracy=BA0.3448275862/top5 0.6623563218/bestepoch14/head239406。DINO准确receipt为accuracy=BA0.1716954023/top5 0.4137931034/epoch13/head239406，补充而不删除旧roundednumbers。source29dc下controller2210063/child3446759回执时Stateexport1036/5568 live、无报告错误，仅进度。SSdev高于1/174说明该任务readout可学视频类别，但不是held/objects证明；不同task的运行证据不排除Physiontask-specific adaptation问题，也不能把Physion失败单独归latent/全system代码或证明smalltrain/domainshift/epochselection假设。
+
+用户已授权剩余SSnative dev完成后按冻结protocol每组held评测/比较一次，无需额外许可；本实现者不发remote命令。source0/nativeq逻辑保持，该记录当时等待四组SSheld与统一docs发布；下述最终receipt现已齐，不改source/config/model/probe/protocol，不train/eval/test、不读remote，核心研究goal仍未完成。
+
+**SSnative State最新dev receipt**：父实际读取ss_development03_native/source29dc结果，n1392，accuracy=BalancedAccuracy0.1041666667、top5 0.2916666667、bestepoch8、head239406；State export/probe/dev-evaluate阶段完成，具体exit receipt待父核验，不编造exit0。旧1036/5568导出snapshot保留为历史，新receipt覆盖当前阶段pending。相同冻结dataset inputs/head下，State在observed-video-change classification dev点估计低于rawDINO(0.1716954023/epoch13/top5 0.4137931034)与V-JEPA2(0.3448275862/14/0.6623563218)。这是native当前结果，不是旧clockadapter；未held，不确证compression/objective/readout等哪个机制导致，也不推出general State无信息/object不成立或因果能力结论。State_z pending，余dev完成后formalheld已有授权无需新确认，本实现不发remote；两benchmark冻结protocol/mainline不变，goal未完成，继续保留两docs未提交草稿。
+
+### 首轮冻结实验最终记录
+
+父read_thread读取SWXC实际summary：`/mnt/pfs/public/xuhaoming/instruct_gs_world/logs/world_dynamics_benchmarks_29dcfdc4/first_frozen_round_summary.json`。两个benchmark四evaluate_held与compare_held全exit0，controllers2210063/3444671/2116988均terminal deadexit0，非UI推断。执行source`29dcfdc47587811dc149c2b2e33bd0b61e3100ee`，held前freeze`c14ea3b1b1b1e863bbe0fdbf384ced08d09a45fc`；teacher8750/seed17/输入/probe冻结不变。Physion256cases/rep、SS1392cases/rep。旧pending与精确Physionfloat/Wilson均保留为历史；本最终receipt覆盖阶段pending，以下百分数为summary四位显示，不覆盖旧精度。
+
+| 表示 | Physion Held Accuracy (%) | Physion Scenario Macro BA (%) | SS Held Accuracy (%) | SS Held Top5 (%) |
+| --- | ---: | ---: | ---: | ---: |
+| DINOv3 | 49.6094 | 47.8499 | 12.8592 | 35.2730 |
+| V-JEPA2 | 51.5625 | 52.5972 | 29.2385 | 60.7040 |
+| State | 50.7813 | 48.6003 | 6.6092 | 22.6293 |
+| State+z | 48.0469 | 46.9611 | 7.3994 | 23.2759 |
+
+PhysglobalBA及精确Wilson在此前heldreceipt保留，scenarioMacro不能替代globalBA。SSheld为已知174classes各8条、共1392，故globalBA/classmacrorecall数学上等于overallaccuracy；此为uniform classcounts推导，不伪造额外stdout字段。每class细节仍见原report。
+
+Paired gain/CI统一**percentage points(pp)**而非relative%gain：SS z-State+0.7902pp CI[-0.7920,2.2989]、66improved/55regressed；z-DINO-5.4598pp CI[-7.4713,-3.5183]、66/142；z-V-JEPA2-21.8391pp CI[-24.4253,-19.1810]、59/363。Phys z-State-2.7344pp CI[-9.7656,4.2969]；z-DINO-1.5625pp CI[-8.9844,5.8594]；z-V-JEPA2-3.5156pp CI[-12.1094,5.0781]。Physlabelcounts直接观察train105/99、dev27/25、held137/119，train-majority label0派生held53.515625%/BA50%为解释control，不是新modelrun或BAcc反推。
+
+SS逐例/模型报告`/mnt/pfs/public/xuhaoming/instruct_gs_world/data/world_dynamics_benchmarks/experiments/ssv2/{model}/seed17/ss_development03_native/attention/{report_test.json,cases_test.jsonl}`，compare同root下`ssv2/comparisons/seed17/ss_development03_native/comparison_test.json`。Phys路径与上文receipt一致，percase/class-balanced/scenario companions保持原协议，不挑好看metric。
+
+**结论**：本round没有general dynamics transfer advantage证据。SS State/State+z点估计均低于rawbackbones，State+z对raw的pairedCI明确不含0；z对State+0.7902pp增益CI含0，增益不可靠。Phys所有near chance，raw也weak，不能单独归latent，协议/control结果也弱；不证明能力等价，不推出irreversible information loss、object-centric idea错误或query object-ID成立。完成的是**首轮冻结实验**，不是coreobject/dynamics研究目标实现。结果为boundedcustommatchedprobe/single seed，非full officialSOTA；latency exploratory。保持两task，不用held追分/调modelprobe/挑主benchmark。下一步仅**PROPOSED dev-only DINO->State->z information-accessibility localization**，区分capacity/readout可访问性与objective等粗假设，非已证cause；本次无代码、无实验实现/执行。本轮将两docs一次统一提交发布，不改冻结协议、源码、配置或测试，不操作服务器。
+
 从本文档此次更新开始，版本号只表示实现迭代，不再表示研究方向重启。项目只保留以下一条主线：
 
 > 从纯视频学习可部署的、query-conditioned、persistent object state；在该 state 通过独立 object validity 验证后，再学习 latent effect conditioned object dynamics，最终由 goal、language 或 policy 选择 object query 与 latent effect。

@@ -272,3 +272,76 @@ Best epoch is selected only on dev. After native clock/source alignment, do not 
 The choices follow the research question, verified field/interface contracts and class coverage, not a winner threshold or a new gate. These are bounded custom matched-probe experiments, not official-paper SOTA reproductions. Formal held evaluation uses the existing `evaluate --split test` and `compare --split test` once per benchmark after the protocol is frozen; no held score selects the representation design or main benchmark.
 
 Protocol choices are now **frozen before held**, with the complete Physion dev diagnosis recorded above. This consolidated documentation record must be pushed and verified by the parent before requesting SWXC held execution. Physion can evaluate its existing dev-selected best checkpoints with `--split test` once and compare test once, without retraining. SSv2's own native dev runs must complete before its held run; cross-task common choices are already fixed rather than waiting to prefer the better-looking task. Held execution/results remain pending; this documentation change does not run a held command.
+
+### Physion Formal Held Receipt: Intermediate Snapshot
+
+The parent read actual SWXC stdout: after freeze record `c14ea3b1b1b1e863bbe0fdbf384ced08d09a45fc` was published, all four `evaluate --split test` calls and `compare --split test` completed with exit0, using source29dcfdc and the fixed dev-selected best checkpoints without retraining. Controller3444671 is terminal, tmux dead1/exit0. This supersedes the earlier Physion held-pending status only; the frozen protocol and historical numbers are unchanged. Each representation has256 held cases and the same217218-parameter head.
+
+| Representation | Held Accuracy | Global Balanced Accuracy | Scenario Macro Balanced | Accuracy Wilson95% CI | Dev-Selected Epoch |
+| --- | ---: | ---: | ---: | --- | ---: |
+| DINOv3 | 0.49609375 | 0.4866895663 | 0.4784992122 | [0.4353577874,0.5569452156] | 13 |
+| V-JEPA2 | 0.515625 | 0.5308838864 | 0.5259721437 | [0.4546277053,0.5761602824] | 7 |
+| State | 0.5078125 | 0.5009507453 | 0.4860033757 | [0.4469087670,0.5684852269] | 6 |
+| State+z | 0.48046875 | 0.4759553456 | 0.4696113221 | [0.4200076804,0.5415073349] | 15 |
+
+| Paired State+z Comparison | Accuracy Gain | Bootstrap95% CI | Improved / Regressed |
+| --- | ---: | --- | --- |
+| Minus State | -0.02734375 | [-0.09765625,0.04296875] | 39 / 46 |
+| Minus DINOv3 | -0.015625 | [-0.08984375,0.05859375] | 42 / 46 |
+| Minus V-JEPA2 | -0.03515625 | [-0.12109375,0.05078125] | 55 / 64 |
+
+Report/case files: `/mnt/pfs/public/xuhaoming/instruct_gs_world/data/world_dynamics_benchmarks/experiments/physion/{model}/seed17/physioncue03_native/attention/report_test.json` and `cases_test.jsonl`, where model is `dino`, `vjepa2`, `state` or `state_z`. Paired report: `/mnt/pfs/public/xuhaoming/instruct_gs_world/data/world_dynamics_benchmarks/experiments/physion/comparisons/seed17/physioncue03_native/comparison_test.json`. Confirmed freeze receipt: `/mnt/pfs/public/xuhaoming/instruct_gs_world/logs/world_dynamics_benchmarks_29dcfdc4/physion_held_freeze_receipt.json`. A held-stage receipt filename is not yet confirmed here. Per-case files are retained; this draft does not invent unprovided scenario/case analyses.
+
+All four accuracies are near chance and every Wilson interval includes0.5; every paired interval includes0. This protocol therefore supplies no reliable evidence of physical-task utility or an added-z gain. It does not establish equal capabilities. Raw visual baselines are also near chance, so the outcome cannot be attributed to latent learning alone. Small training set204, dev52 epoch selection and domain shift are possible follow-up hypotheses, not demonstrated causes.
+
+At this intermediate receipt, Physion formal held was complete while SSv2 native V-JEPA2 was still in probe training and formal held was pending. The final full-round receipt below supersedes that pending status. Both tasks remain in the frozen experiment; no score-driven mainline switch or unapproved score-improvement experiment follows these results. This record changes no source/config/model/probe, and performs no test or remote command.
+
+### Known Label Priors and SSv2 Partial Receipt
+
+The parent subsequently read authoritative Physion label counts: train label0/1=105/99, dev27/25, held137/119 (total256). These counts were observed directly, not inferred from balanced accuracy. A uniform coin has expected accuracy/balanced accuracy0.5. A global-majority rule selected **only from training** chooses label0, which gives held accuracy137/256=0.53515625 and balanced accuracy0.5, exceeding the four reported model accuracies. This is an explanatory control derived from known counts, not a new model run, training/evaluation, protocol metric or benchmark-selection criterion. Original model numbers and the frozen primary metrics remain unchanged.
+
+Updated remote-observed SSv2 dev receipt, still source29dcfdc and239406-parameter heads:
+
+| Representation | Dev Accuracy / Balanced Accuracy | Dev Top5 | Best Epoch | Execution Receipt |
+| --- | ---: | ---: | ---: | --- |
+| DINOv3 | 0.1716954023 | 0.4137931034 | 13 | n1392, completed baseline; exact values supplement the earlier rounded receipt |
+| V-JEPA2 | 0.3448275862 | 0.6623563218 | 14 | n1392; native export/probe/dev-evaluate exit0 |
+| State | 0.1041666667 | 0.2916666667 | 8 | n1392; native export/probe/dev-evaluate completed, exact exit receipt not yet confirmed |
+
+At this snapshot controller2210063/child3446759 is live on State export1036/5568 with no reported error. This is not State completion or formal held evidence. SSv2 dev scores above uniform174-class chance1/174 show that the existing readout pipeline can learn video categories in this task; they establish neither held generalization nor object validity. They provide task-specific evidence of readout operation, not proof that Physion's difficulty is exclusively latent or a whole-system code failure, and do not exclude task-specific adaptation problems. Small training size, domain shift and epoch selection remain hypotheses rather than demonstrated causes.
+
+The user authorized each SSv2 formal held evaluation/comparison once under the already frozen protocol after native dev completion. The implementation agent sent no remote command and changed no source0/native-q logic. The final receipt below now records all four held results, consolidating the previously pending documentation under the same fixed two-task protocol.
+
+The new State row is a parent-read actual dev receipt from `ss_development03_native`, source29dcfdc, not an old clock-adapter result. It superseded the earlier1036/5568 State-export snapshot without deleting it. Under the same fixed dataset inputs and239406-parameter head, State's dev point estimate is below DINO and V-JEPA2. This does not identify compression, training objective, readout or any other mechanism as the cause; it does not prove that State generally lacks information or that object representation is invalid. At that receipt State+z and exact State stage exit codes were pending. These are historical dev-selected observations; final held completion is recorded below, while the two-benchmark protocol/mainline remains frozen.
+
+### First Frozen Round: Completed Results
+
+The parent read actual SWXC final summary `/mnt/pfs/public/xuhaoming/instruct_gs_world/logs/world_dynamics_benchmarks_29dcfdc4/first_frozen_round_summary.json`. Both benchmarks completed all four held evaluations and paired comparison with exit0. Controllers2210063/3444671/2116988 are terminal, dead/exit0. This completion is supported by the execution summary, not inferred from UI state. Native execution source remains `29dcfdc47587811dc149c2b2e33bd0b61e3100ee`; protocol freeze `c14ea3b1b1b1e863bbe0fdbf384ced08d09a45fc` preceded held. Teacher8750, seed17, pixels/frame indices/query cues and probe settings remained fixed. Physion has256 cases/representation, SSv2 has1392. Earlier pending receipts are preserved as snapshots and superseded by this final completion record.
+
+Values below are the final summary's rounded percentages; they do not replace the precise Physion floats/Wilson intervals above.
+
+| Representation | Physion Held Accuracy (%) | Physion Scenario Macro BA (%) | SSv2 Held Accuracy (%) | SSv2 Held Top5 (%) |
+| --- | ---: | ---: | ---: | ---: |
+| DINOv3 | 49.6094 | 47.8499 | 12.8592 | 35.2730 |
+| V-JEPA2 | 51.5625 | 52.5972 | 29.2385 | 60.7040 |
+| State | 50.7813 | 48.6003 | 6.6092 | 22.6293 |
+| State+z | 48.0469 | 46.9611 | 7.3994 | 23.2759 |
+
+Physion global balanced accuracy and precise Wilson intervals remain in the earlier held table; scenario macro BA above does not replace them. SSv2 held has exactly8 cases in each of174 classes (1392 total), so global balanced accuracy/class-macro recall mathematically equals its overall accuracy in this partition. This equality follows from the known uniform class counts, not an invented additional stdout field. Per-class details remain in the model reports.
+
+Paired gains and intervals use **percentage points (pp)**, not relative percentage improvement:
+
+| Task / State+z Minus | Accuracy Gain (pp) | Bootstrap95% CI (pp) | Improved / Regressed |
+| --- | ---: | --- | --- |
+| SSv2 / State | +0.7902 | [-0.7920,2.2989] | 66 / 55 |
+| SSv2 / DINOv3 | -5.4598 | [-7.4713,-3.5183] | 66 / 142 |
+| SSv2 / V-JEPA2 | -21.8391 | [-24.4253,-19.1810] | 59 / 363 |
+| Physion / State | -2.7344 | [-9.7656,4.2969] | 39 / 46 |
+| Physion / DINOv3 | -1.5625 | [-8.9844,5.8594] | 42 / 46 |
+| Physion / V-JEPA2 | -3.5156 | [-12.1094,5.0781] | 55 / 64 |
+
+SSv2 reports/cases are under `/mnt/pfs/public/xuhaoming/instruct_gs_world/data/world_dynamics_benchmarks/experiments/ssv2/{model}/seed17/ss_development03_native/attention/report_test.json` and `cases_test.jsonl`; comparison is `.../experiments/ssv2/comparisons/seed17/ss_development03_native/comparison_test.json`. Physion report/case/comparison paths remain those recorded above. Per-case and class/scenario companions remain part of the fixed reporting protocol, rather than selecting the best-looking metric. Physion's directly observed train0/1=105/99, dev27/25 and held137/119 imply the training-majority label0 control's held53.515625% accuracy/50% BA; this explanatory count-derived control is not a new model run.
+
+**Conclusion:** this first frozen round shows no general dynamics-transfer advantage. On SSv2, both State representations have lower point estimates than raw backbones, and State+z's paired intervals against each raw backbone exclude0. The +0.7902pp gain over State is not reliable evidence of an added-z improvement because its interval includes0. Physion models, including raw backbones, remain near chance with all paired intervals containing0; neither added-z utility nor equal capabilities are established. Physion does not isolate latent failure, and the weak protocol/control outcome warrants localization before an architecture conclusion. These results do not prove irreversible information loss, an invalid object-centric idea or query-level object identity.
+
+The completed unit is the **first frozen experimental round**, not the core object/dynamics research objective. It uses bounded custom matched probes, one seed and subsets, not full official SOTA reproduction; shared-GPU latency remains exploratory. Both tasks remain the main experiment. Do not tune model/probe on held scores or choose the better-scoring benchmark. The proposed next step is **dev-only information-accessibility localization along DINO -> State -> z**, distinguishing readout access/capacity and training-objective hypotheses; these are not demonstrated causes. No code or experiment for that proposal is implemented or executed in this documentation update.
