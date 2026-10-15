@@ -891,3 +891,9 @@ printf 'TEST_RC=%s\nREPORT=%s/test_report.json\nVIDEOS=%s/conditional_generation
 ```
 
 正式benchmark训练复用16.3/16.6，但将manifest/text cache切换为本节路径，并使用独立的 `textocvp_v71_*` run名称。它是域内训练比较，不把多源100步模型的zero-shot结果当成与TextOCVP的公平主表。仍需对齐输出分辨率、预训练资产、训练预算和评测实现后再报告外部方法优劣。
+
+### 17.3 独立模拟器环境
+
+- **What changed**：用户已明确允许在百度原运行根建立独立benchmark uv环境，安装PyBullet、Gym及CLIPort必需依赖。新增 `setup_object_event_benchmark_v71.py`，环境位于 `environments/cliport-v71`，使用CPU版PyTorch2.7/torchvision0.22及固定包版本；官方CLIPort源码固定 `2be5c47b5bb9bb7040ad90693288b87b1e18e7ad`。uv二进制、缓存、临时包与源码全部在旧PFS根；经指定代理下载。
+- **Why**：原训练 `.venv` 不承担模拟器依赖变更。CLIPort包入口会导入agent/model模块，因此隔离环境包含其导入依赖，但数据生成不加载策略权重、不训练动作policy。使用官方环境和oracle执行物理过程，后续采集实际body ID、位置和事件次序。
+- **Impact**：环境准备本身不算模拟器执行成功。独立生成与真实渲染仍需完整运行后记录。已读公开分割集只有前后两个action级info快照，不是逐视频帧pose；同编号 `episode00001` 的主RGB/分割集caption相同，但51/50帧且首帧像素不同，不能交叉挂载mask。segm灰度为0、25、51等11个值，尚未确认到body ID的编码，不据此生成目标物体评分。
