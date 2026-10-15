@@ -469,12 +469,14 @@ V71逐源评测采用固定种子、source内部episode-uniform无放回抽样�
 - [x] 运行完整模型训练/恢复/评测链路，取得真实结果。
 - [x] 定位并修正初始化状态/后验量级异常，重新执行完整链路及逐帧trace。
 - [x] 在修正后的完整模型上完成100步优化和固定40例held对照。
-- [x] 百度旧环境与配套DINOv2/RAE资产已可执行；阿里独立环境仍待准备。
+- [x] 百度旧环境与配套DINOv2/RAE资产已可执行；阿里准备按最新skip决定移出本阶段。
 - [x] 实现基础Object State、posterior、Dynamics、renderer并做真实数据端到端试验。
 - [x] 实现对象片段effects、条件prior和完整训练/恢复/生成链路。
-- [ ] 建立独立主体/事件顺序组合评测与正式baseline比较。
+- [x] 建立独立主体/顺序评分器，并在真实模拟序列及模型完整链路执行，见第18节。
+- [x] 固定1000/100/200场景划分及原子关系覆盖计划。
+- [ ] 生成正式scene-disjoint集合并完成主模型与匹配baseline比较。
 - [x] 形成百度八卡前台训练、显式恢复和单卡评测指令，见第16节；尚未启动正式长训。
-- [ ] 完成阿里备用环境和配套权重准备。
+- 阿里备用环境和配套权重：本阶段跳过，保留已准备的数据，不再重试网络。
 
 ## 14. 基础主干实施进度（2026-10-15）
 
@@ -1017,3 +1019,24 @@ printf 'GENERATE_RC=%s\nREVIEW=%s/index.html\n' "${GENERATE_RC}" "${OUT}"
 - **What changed**：用户本轮明确回复skip，跳过阿里备用阶段的网络、环境和权重准备；不再查询或重试其代理访问。已完成的阿里数据和只读记录保留。
 - **Why**：百度已经完成真实数据、模拟器和GPU链路，后续实验以百度旧目录为主。
 - **Impact**：安装、数据、模型与结果仍全部放服务器PFS，不放Mac；新代码继续本地提交GitHub、SWXC从GitHub取到百度执行。阿里没有被记为GPU实验通过。
+
+### 18.8 已有结果的独立CPU配对汇总
+
+`280021f08636f525e62c88dfb032f571a478ec98` 已推送。准备机按16.1取得该release后执行以下命令；不联网、不读GPU、不重算已有视频，原始report/cases保持不变。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=280021f08636f525e62c88dfb032f571a478ec98
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/environments/cliport-v71/bin/python"
+export CUDA_VISIBLE_DEVICES=""
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+for RESULT in cliport_event_metric_check_92db4e7_20261015T134435Z cliport_event_eval_92db4e7_20261015T134435Z; do
+  "${PYTHON}" "${ROOT}/code/scripts/summarize_cliport_event_pairs_v71.py" \
+    --cases "${WORK_ROOT}/outputs/${RESULT}/cases.jsonl" \
+    --out "${WORK_ROOT}/outputs/${RESULT}/paired_summary_280021f.json"
+  printf 'SUMMARY_RC=%s RESULT=%s\n' "$?" "${RESULT}"
+done
+```
+
+后续完整 `evaluate_cliport_events_v71.py` 自动将同场景两条程序一起选入 `--items` 的预算，并写入 `report.json/paired_outcome_preference`。`--items` 是case数而非scene数，使用偶数；未配对场景明确列出，不能在均值中隐去缺失。
