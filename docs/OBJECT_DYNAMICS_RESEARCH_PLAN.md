@@ -1172,6 +1172,12 @@ printf 'EVAL_RC=%s\nREPORT=%s/report.json\n' "$?" "${OUT}"
 
 **已经核对的LPWM调用边界**：[官方 `DLP.sample_from_x`](https://github.com/taldatech/lpwm/blob/main/models.py) 支持直接传history RGB。部署生成必须使用 `use_all_ctx=False`、`n_pred_eq_gt=False`，明确给 `cond_steps`、`num_steps` 和文本embedding；后一个参数关闭“输入GT长度必须等于输出长度”的假设，不需要把真实未来或dummy future拼进模型输入。`use_all_ctx=True` 会从完整视频提取context，只用于标明读未来的posterior reconstruction。构造可复用[官方配置loader](https://github.com/taldatech/lpwm/blob/main/generate_lpwm_video_prediction.py)的无checkpoint路径，再直接 `load_state_dict` 加载指定快照；不沿用其捕获所有加载错误后继续生成的分支。尚未据此声称baseline已运行。
 
+### 19.1 官方原始数据字段已确认
+
+- **What changed**：2026-10-16直接读取官方GCS的 [dataset_info.json](https://storage.googleapis.com/gresearch/robotics/language_table/0.0.1/dataset_info.json) 和 [features.json](https://storage.googleapis.com/gresearch/robotics/language_table/0.0.1/features.json)，而非从论文摘要猜schema。版本0.0.1只有名为train的原始split，登记numBytes为428,665,067,806；顶层为字符串episode_id与可变长steps。每步RGB为360x640、uint8/JPEG，instruction为512维int32的UTF-8字节序列。其余是二维action/effector坐标、reward与first/last/terminal标记，没有显式帧时间戳、对象mask或对象位姿。
+- **Why**：LPWM准备脚本再从原始集合划80/10/10，不能将其二次划分称为原始官方test；[官方README](https://github.com/google-research/language-table)同时明确原始real集合经过relabel。仅有episode_id字段尚不能证明不同ID对应完全独立的录制，真实ID格式与重标注来源映射仍需读取样本后确认。
+- **Impact**：首个适配以frame-step记录时序，除非获得实际采集时间证据，否则不填写推测FPS/秒数。只将RGB和原始指令接入预测模型，机器人action不成为隐藏条件；它用于真实视频重建/条件生成，不提供本项目独立主体或事件顺序GT。先形成可追溯的episode/窗口划分再比较；不以随机拆重标注ID自动证明录制级留出。当前仅远程读取少量公开JSON元数据，未下载视频shards、未安装TensorFlow/TFDS，也未生成新的训练集合。
+
 ## 20. 相同token预算的非对象对照
 
 - **What changed**：新增 `scene_state.py` 与 `code/configs/object_event_scene_control_v71.json`。保留相同DINOv2/RAE、68个384维state tokens、17个64维global effect tokens、Dynamics层数、目标和采样；每个scene token独立读取全图，取消对象之间的竞争分配，memory在68个tokens之间全局attention。renderer将所有tokens汇成一个场景field，不再为每个候选对象独立成像和mask合成。使用 `global_step` effect路径，历史和effect cross-attention都是全局的。
