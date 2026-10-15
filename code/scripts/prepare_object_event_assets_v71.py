@@ -4,7 +4,6 @@
 import argparse
 import json
 from pathlib import Path
-import subprocess
 
 from huggingface_hub import hf_hub_download, snapshot_download
 
@@ -13,6 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work-root", default="/mnt/pfs/xuhaoming/wm-align")
     parser.add_argument("--rae-repository", required=True)
+    parser.add_argument("--rae-revision", default="a4d18c4db766419cbe7cb8c02cd9f7ceb0ec9041")
     parser.add_argument("--image-size", type=int, choices=(256, 512), default=512)
     args = parser.parse_args()
     root, repository = Path(args.work_root).resolve(), Path(args.rae_repository).resolve()
@@ -27,7 +27,7 @@ def main():
     stats = hf_hub_download("nyu-visionx/RAE-collections",
                             f"stats/dinov2/wReg_base/{statistics}/stat.pt", local_dir=model_root / "rae")
     payload = {"rae_repository": str(repository),
-               "rae_revision": subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip(),
+               "rae_revision": args.rae_revision,
                "image_size": args.image_size, "encoder": str(encoder),
                "decoder_config": str(repository / "configs/decoder/ViTXL"),
                "decoder": decoder, "statistics": stats}

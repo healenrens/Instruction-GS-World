@@ -531,3 +531,5 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 `setup_object_event_env_v71.sh` 仅用于联网准备：在指定WORK_ROOT内通过uv创建独立环境，安装torch2.7.0/torchvision0.22.0及批准的软件包，取得官方RAE固定版本和512版配套DINO/decoder/statistics。uv、临时文件、HF/Torch缓存、Python环境和版本报告全部位于PFS。不修改系统Python或shell配置，不在训练脚本中调用下载。已有可用环境的平台直接运行资产准备和模型测试，无需重复安装PyTorch。
 
 测试入口 `test_object_event_world_model_v71.sh` 与训练入口默认复用百度旧运行根；阿里通过显式WORK_ROOT切换到其已有PFS根。测试默认单卡、前台执行，日志落 `logs/<run>/test.log`；训练默认八卡、前台执行。两个运行入口均不访问GitHub或下载模型。
+
+百度8732现有环境实测为Python3.11.13、torch2.8.0+cu126、torchvision0.23.0、Transformers5.10.2、PyAV17.0.1、SwanLab0.10.1；当前完整测试不调用未安装的LPIPS。用户确认继续使用DINOv2-B与配套RAE，不切换已有DINOv3。百度下载使用 `http_proxy=https_proxy=http://10.66.65.186:18000`。容器未安装Git，但代理访问GitHub/HF已成功；源码可从GitHub固定提交归档取得并放在旧runtime的版本目录，仍不允许从Mac直接传源码。资产清单通过显式 `--rae-revision` 记录所用官方源码版本，不依赖运行机器安装Git。

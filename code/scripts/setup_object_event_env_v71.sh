@@ -37,7 +37,8 @@ if [ ! -d "${RAE_REPOSITORY}" ]; then
 fi
 git -C "${RAE_REPOSITORY}" checkout --detach "${RAE_REVISION}"
 "${PYTHON}" "${SOURCE_ROOT}/code/scripts/prepare_object_event_assets_v71.py" \
-  --work-root "${WORK_ROOT}" --rae-repository "${RAE_REPOSITORY}" --image-size 512
+  --work-root "${WORK_ROOT}" --rae-repository "${RAE_REPOSITORY}" \
+  --rae-revision "${RAE_REVISION}" --image-size 512
 "${PYTHON}" - "${WORK_ROOT}/metadata/environment_v71.json" <<'PY'
 from importlib.metadata import version
 import json
