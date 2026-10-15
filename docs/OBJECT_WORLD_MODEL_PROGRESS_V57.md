@@ -2,6 +2,7 @@
 
 ## 2026-10-16 V71继续实施
 
+- **正式数据和文本cache完成**：原session32782退出0，实际1300 scenes/2200 programs；train1000/1600、development100/200、test200/400，scene交集均0。900组双program场景的生成器历史RGB比较全部相同。2196条oracle完成，4条未完成原样保留；joint训练1600条RGB/1000 scenes，语言prior使用其中1597条完成program/998 scenes。三个split均覆盖全部30种原子关系，train/development/test有序actor-color pair数24/30/30。343条完整指令的离线Qwen cache退出0，width2560。正式manifest为 `metadata/cliport_event_v71.json`，文本为 `metadata/cliport_ordered_text_v71`；完整统计和失败case见研究计划18.11。未启动八卡长训，也未将数据完成写成模型对照完成。
 - **view128完整评测收回**：`aab8913`四例独立eval与共同CPU评分均退出0，四例七条件无漏评分。正确语言actor L1=0.45846309、无语言0.45878868、copy0.16980290；正确语言paired margin仅7.98e-7。结果确认测量链路已可用，不能用两步工程模型证明运动或语言能力。原始逐例/视频和共同report位于 `outputs/cliport_view128_e2e_aab8913_20261015T200205Z`，见研究计划22.4；正式数据任务与文本cache继续原会话。
 - **LanguageTable原始字段确认**：官方0.0.1 GCS元数据实际为单个train split，RGB360x640/JPEG、UTF-8指令、episode_id及机器人状态，无时间戳和对象实例真值。适配使用frame-step而非推测秒数，官方relabel数据的录制级划分需读取真实ID后确定。未安装额外依赖或下载视频；它不能替代受控模拟器的独立主体/顺序标注，见研究计划19.1。
 - **共同评分和输入尺寸对照已落地**：`6a120b9`对真实控制、旧object与scene预测的四个CPU入口全部退出0，逐case native分数保持在约1e-8差异以内。纯resize参考已显示128/512链路本身造成不同误差，因此新增实际128输入/目标/输出配置，而非只缩小评分图。`aab8913`单卡完整链路退出0，world/prior恢复差均0、因果差0；内部DINO448/RAE512保留，不称等计算预算。四例独立评分仍在执行，正式数据原任务最近1882/2200程序、1879条oracle完成，未重启。八卡joint/prior与单卡development独立命令见研究计划22.5，正式长训未启动。

@@ -4,7 +4,7 @@
 
 阅读顺序：先看第 11 节的调研后取舍，再看第 3-7 节的模型/训练/数据工作包；第 9-10 节是逐篇证据。初始候选计划与最终收窄方向保留在同一文档，避免把调研前的假设当成调研后的结论。
 
-用户决策：重新审视主干，不要求继承旧版本的架构、冻结方式或 latent 形状；先给全局计划，再由六个 Sol/Luna agent 并行阅读论文的方法、实验与必要代码。调研后用户批准进入实施阶段；当前先锚定迁移数据与评测，模型训练尚未开始。
+用户决策：重新审视主干，不要求继承旧版本的架构、冻结方式或 latent 形状；先给全局计划，再由六个 Sol/Luna agent 并行阅读论文的方法、实验与必要代码。调研后用户批准进入实施阶段；已完成主干端到端测试、100步真实视频pilot及正式受控数据准备，尚未启动正式八卡训练。最新数据结果见18.11，匹配128输入/输出的实测与命令见22.4-22.5；早期章节保留当时状态。
 
 历史入口：[长期实验账本](OBJECT_WORLD_MODEL_PROGRESS_V57.md)。旧实验事实保留，但不把旧路线的阶段门槛当成此次重新设计的前提。
 
@@ -474,7 +474,8 @@ V71逐源评测采用固定种子、source内部episode-uniform无放回抽样�
 - [x] 实现对象片段effects、条件prior和完整训练/恢复/生成链路。
 - [x] 建立独立主体/顺序评分器，并在真实模拟序列及模型完整链路执行，见第18节。
 - [x] 固定1000/100/200场景划分及原子关系覆盖计划。
-- [ ] 生成正式scene-disjoint集合并完成主模型与匹配baseline比较。
+- [x] 生成正式scene-disjoint集合及离线文本cache，实际统计见18.11。
+- [ ] 在正式集合完成主模型与匹配baseline比较；外部LPWM仍待独立环境/权重准备与实际执行。
 - [x] 形成百度八卡前台训练、显式恢复和单卡评测指令，见第16节；尚未启动正式长训。
 - 阿里备用环境和配套权重：本阶段跳过，保留已准备的数据，不再重试网络。
 
@@ -1163,6 +1164,37 @@ export OUT="${WORK_ROOT}/outputs/cliport_ordered_eval_v71_${EFFECT_MODE}_1000_de
   --partition development --items 200 --out "${OUT}"
 printf 'EVAL_RC=%s\nREPORT=%s/report.json\n' "$?" "${OUT}"
 ```
+
+### 18.11 正式集合与文本cache完成（2026-10-16）
+
+- **What changed**：原session32782正常退出0，完成1300个场景、2200条program视频，并自动写出训练manifest；没有重启生成。随后现有Qwen离线单卡文本cache退出0，保存343条唯一完整指令，width2560、input=instruction_only、truncation=false。
+- **Why**：正式训练现在有了实际已生成的scene-disjoint集合，不再只有四例工程数据或尚未兑现的采样计划。
+- **Impact**：joint保留全部1600条训练RGB，语言prior只使用1597条oracle完成的训练program；按scene均匀访问，不按program条数增加scene权重。未完成样本原样保留，未为成功率换seed或重试。正式GPU长训和模型间比较尚未开始。
+
+统计来自实际读取2200个episode.json及两个manifest，case ID集合一致、partition/combination/status无冲突：
+
+| Partition | Scenes | Programs | Oracle完成 | Oracle未完成 | Seen actor order | Held actor order |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| train | 1000 | 1600 | 1597 | 3 | 1600 | 0 |
+| development | 100 | 200 | 200 | 0 | 160 | 40 |
+| test | 200 | 400 | 399 | 1 | 320 | 80 |
+| 合计 | 1300 | 2200 | 2196 | 4 | 2080 | 120 |
+
+三个partition的scene交集均为0。各集合实际覆盖30种原子actor-color/target-color关系，仅统计oracle完成program也均为30；development/test相对train缺失原子关系均为空。有序actor-color pair数分别为24、30、30，测试的是已见原子关系的新先后组合，不称为新物理技能。
+
+集合中900个scene有两种program，生成器记录的900组历史RGB逐像素比较均相同，false/缺失均为0；另400个scene只有一种允许的训练program。语言prior实际采样分母为998个scene，而不是1000或1597：scene1129、1990的唯一program未完成，因此没有语言训练样本；scene1008仍有另一条已完成program。joint分母仍为1000个scene。
+
+保留的oracle未完成记录：train的 `scene_001008_order_10`、`scene_001129_order_10`、`scene_001990_order_10`，reward均0.5；test的 `scene_002170_order_01`，reward0。最终progress为completed，planned/finished一致，reused=0。它们的真实RGB仍可用于重建；没有把未执行完成的指令当作成功后果监督。独立条件评测必须保留这些状态与实际分母。
+
+正式产物均在百度旧运行根 `/mnt/pfs/public/xuhaoming/instruct_gs_world`：
+
+- 数据与人工查看：`data/benchmarks/cliport_ordered_v71/`、其中 `index.html`。
+- 原集合及物理真值映射：`data/benchmarks/cliport_ordered_v71/manifest.json`、各case的 `episode.json` 与 `truth.npz`。
+- 训练统一入口：`metadata/cliport_event_v71.json`，3秒/16帧历史、固定10秒/50帧未来。
+- 文本cache：`metadata/cliport_ordered_text_v71/`，343个 `.pt` 与 `index.json`、`completion.json`。
+- 原数据生成日志：`logs/cliport_ordered_v71_data/20261015T155452Z.log`。
+
+数据生成源码为 `0fd4346ffd3b5437ff63291e45777ad8c2fbf2fa`；文本准备与当前完整模型测试源码为 `aab89134da946b4ea2286929059cac503745dc22`。只更新文档不要求重造数据或重复测试。18.10/22.5的正式manifest和cache路径现在对应已存在的产物。
 
 ## 19. 外部对照的实际接口准备
 
