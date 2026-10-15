@@ -1014,6 +1014,8 @@ printf 'GENERATE_RC=%s\nREVIEW=%s/index.html\n' "${GENERATE_RC}" "${OUT}"
 - **Why**：同一个不随语言改变的预测，可能偶然更像其中一种顺序；只看单例margin或“2/4正值”不能证明语言有效。两种指令使用相同history、噪声和对称评分区域时，固定输出的成对margin应为0。
 - **Impact**：成对分数只测真实配对结果偏好，不宣称任务成功或物理事件onset。posterior/真实oracle读取未来，只作为上限；仅history/语言条件承担部署结论。真实控制应表现为正确结果正值、反序负值、copy和两结果均值约0；已保存四例结果的CPU配对汇总待执行。
 
+**实际配对汇总完成**：百度两个CPU入口均退出0，未重算模型/视频，使用 `280021f`。两场景各50个共同未来帧，无未配对场景。正确真实结果的scene平均margin为0.15500595772638917，反序为对应负数；copy和两结果RGB均值严格为0。两步模型正确语言margin仅0.0000048857927322387695，无语言为0，posterior为0.00000184670090675354；正确语言主体RGB L1为0.5475552627，copy为0.1698028974。前述单例正负偏好不再被解释成语言遵循。原始结果目录下均新增 `paired_summary_280021f.json`；identity-swap的RGB完全未变，因此仍得到oracle的RGB分数，其身份错误由独立ownership测量识别。
+
 ### 18.7 平台范围更新
 
 - **What changed**：用户本轮明确回复skip，跳过阿里备用阶段的网络、环境和权重准备；不再查询或重试其代理访问。已完成的阿里数据和只读记录保留。
@@ -1040,3 +1042,9 @@ done
 ```
 
 后续完整 `evaluate_cliport_events_v71.py` 自动将同场景两条程序一起选入 `--items` 的预算，并写入 `report.json/paired_outcome_preference`。`--items` 是case数而非scene数，使用偶数；未配对场景明确列出，不能在均值中隐去缺失。
+
+### 18.9 正式集合的并行与续跑
+
+- **What changed**：生成入口新增 `--workers`，每个spawn子进程独立创建PyBullet环境并处理一整个scene的程序；子进程只写自己的scene目录，主进程统一写集合manifest和review。`progress.json`区分已落盘程序、oracle成功程序和本轮复用程序。显式 `--resume` 在同一plan/时间协议下复用已落盘 `episode.json`，包括oracle未完成的样本；不替换seed、不为成功而重试。
+- **Why**：正式计划有1300场景、2200程序，串行生成与中断后全部重做会重复消耗CPU时间。续跑应恢复生成进度，而不是选择更容易成功的数据。
+- **Impact**：每条RGB、truth、history及preview写完后才原子发布episode元数据。未发布的程序可重新生成；已发布程序不改写。默认workers=1保留原入口，完整真实测试采用2个CPU进程生成四例并再次续跑，再做已有独立评分；不新增训练环境、GPU依赖或大量单元门禁。正式集合尚未因实现此入口而被标记已完成。

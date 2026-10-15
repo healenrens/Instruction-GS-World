@@ -1,9 +1,11 @@
 """Ordered manipulation videos from the official CLIPort environment and oracle."""
 
 from copy import deepcopy
+from concurrent.futures import ProcessPoolExecutor
 from fractions import Fraction
 from html import escape
 import json
+import multiprocessing
 from pathlib import Path
 import random
 
@@ -24,7 +26,10 @@ def json_value(value):
 
 
 def write_json(path, value):
-    Path(path).write_text(json.dumps(value, default=json_value, indent=2, allow_nan=False))
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix+".tmp")
+    temporary.write_text(json.dumps(value, default=json_value, indent=2, allow_nan=False))
+    temporary.replace(path)
 
 
 class OrderedPlacement(Task):
@@ -160,7 +165,6 @@ def save_recording(env, output, events, seed, history_seconds, source_revision, 
                 "history_rgb": "history.npz",
                 "preview": "video.mp4", "truth": "truth.npz",
                 "model_training_inputs": "RGB history and instruction only; no action/pose/mask input"}
-    write_json(output/"episode.json", metadata)
     panels = []
     chosen = np.linspace(0, len(frames)-1, 6).round().astype(int)
     for index in chosen:
@@ -173,25 +177,30 @@ def save_recording(env, output, events, seed, history_seconds, source_revision, 
     for index, panel in enumerate(panels):
         timeline.paste(panel, (320*index, 0))
     timeline.save(output/"timeline.jpg")
+    # This final record marks a complete saved program, including oracle failures.
+    write_json(output/"episode.json", metadata)
     return metadata
 
 
-def generate(assets, output, seeds, history_seconds=3., tail_seconds=1., source_revision="",
-             future_seconds=10., plan_path=""):
-    root = Path(output)
-    root.mkdir(parents=True, exist_ok=True)
-    env = RecordedEnvironment(str(assets))
-    records, pairs, sections = [], [], []
-    plan = json.loads(Path(plan_path).read_text()) if plan_path else None
-    scenes = plan["scenes"] if plan else [
-        {"scene_seed": seed, "partition": "engineering", "programs": [
-            {"order": [0, 1], "combination": "engineering"},
-            {"order": [1, 0], "combination": "engineering"}]} for seed in seeds]
-    for scene in scenes:
-        seed = scene["scene_seed"]
-        prefixes = []
-        for program in scene["programs"]:
-            order = program["order"]
+def generate_scene(job):
+    assets, output, scene, history_seconds, tail_seconds, revision, future_seconds, resume = job
+    root, seed = Path(output), scene["scene_seed"]
+    env = None
+    records, prefixes, sections = [], [], []
+    reused = 0
+    for program in scene["programs"]:
+        order = program["order"]
+        name = f"scene_{seed:06d}_order_{''.join(map(str, order))}"
+        episode = root/name/"episode.json"
+        saved = resume and episode.is_file()
+        if saved:
+            metadata = json.loads(episode.read_text())
+            with np.load(episode.parent/metadata["history_rgb"], allow_pickle=False) as history:
+                prefixes.append(history["rgb"].copy())
+            reused += 1
+        else:
+            if env is None:
+                env = RecordedEnvironment(str(assets))
             random.seed(seed)
             np.random.seed(seed)
             env.seed(seed)
@@ -219,22 +228,60 @@ def generate(assets, output, seeds, history_seconds=3., tail_seconds=1., source_
                                "goal_completed": len(task.goals) < before, "reward": reward})
             env.idle(max(tail_seconds, history_seconds+future_seconds-env.physics_tick/env.physics_hz))
             env.finish_recording()
-            name = f"scene_{seed:06d}_order_{''.join(map(str, order))}"
-            metadata = save_recording(env, root/name, events, seed, history_seconds, source_revision,
+            metadata = save_recording(env, root/name, events, seed, history_seconds, revision,
                                       future_seconds, scene["partition"], program["combination"])
-            records.append({"case_id": name, "episode": f"{name}/episode.json", "status": metadata["status"],
-                            "scene_seed": seed, "partition": scene["partition"], "combination": program["combination"]})
-            print(json.dumps({"event": "simulated_episode", "case_id": name,
-                              "status": metadata["status"], "reward": metadata["official_task_reward"],
-                              "frames": metadata["frame_count"], "seconds": float(metadata["frame_times_seconds"][-1])}), flush=True)
-            sections.append(f'<section><h2>{escape(name)}</h2><p>{escape(task.instruction)}</p>'
-                            f'<p>Status: {metadata["status"]}; reward: {metadata["official_task_reward"]}</p>'
-                            f'<img src="{name}/timeline.jpg" alt="Actual simulator timeline">'
-                            f'<video src="{name}/video.mp4" controls preload="none"></video>'
-                            f'<p><a href="{name}/episode.json">Entities, events and camera</a></p></section>')
-        pairs.append({"scene_seed": seed, "history_frames": len(prefixes[0]), "programs": len(prefixes),
-                      "identical_history_rgb": bool(np.array_equal(prefixes[0], prefixes[1])) if len(prefixes) == 2 else None})
-    p.disconnect()
+        records.append({"case_id": name, "episode": f"{name}/episode.json", "status": metadata["status"],
+                        "source_revision": metadata["source_revision"], "scene_seed": seed,
+                        "partition": scene["partition"], "combination": program["combination"]})
+        print(json.dumps({"event": "reused_episode" if saved else "simulated_episode", "case_id": name,
+                          "status": metadata["status"], "reward": metadata["official_task_reward"],
+                          "frames": metadata["frame_count"], "seconds": float(metadata["frame_times_seconds"][-1])}), flush=True)
+        sections.append(f'<section><h2>{escape(name)}</h2><p>{escape(metadata["instruction"])}</p>'
+                        f'<p>Status: {metadata["status"]}; reward: {metadata["official_task_reward"]}</p>'
+                        f'<img src="{name}/timeline.jpg" alt="Actual simulator timeline" loading="lazy">'
+                        f'<video src="{name}/video.mp4" controls preload="none"></video>'
+                        f'<p><a href="{name}/episode.json">Entities, events and camera</a></p></section>')
+    if env is not None:
+        p.disconnect()
+    pair = {"scene_seed": seed, "history_frames": len(prefixes[0]), "programs": len(prefixes),
+            "identical_history_rgb": bool(np.array_equal(prefixes[0], prefixes[1])) if len(prefixes) == 2 else None}
+    return records, pair, sections, reused
+
+
+def generate(assets, output, seeds, history_seconds=3., tail_seconds=1., source_revision="",
+             future_seconds=10., plan_path="", workers=1, resume=False):
+    root = Path(output)
+    root.mkdir(parents=True, exist_ok=True)
+    records, pairs, sections = [], [], []
+    plan = json.loads(Path(plan_path).read_text()) if plan_path else None
+    scenes = plan["scenes"] if plan else [
+        {"scene_seed": seed, "partition": "engineering", "programs": [
+            {"order": [0, 1], "combination": "engineering"},
+            {"order": [1, 0], "combination": "engineering"}]} for seed in seeds]
+    jobs = [(str(assets), str(root), scene, history_seconds, tail_seconds, source_revision,
+             future_seconds, resume) for scene in scenes]
+    progress = {"planned_scenes": len(scenes), "planned_episodes": sum(len(scene["programs"]) for scene in scenes),
+                "finished_scenes": 0, "finished_episodes": 0, "reused_episodes": 0,
+                "oracle_completed_episodes": 0, "workers": workers, "status": "running"}
+
+    def collect(results):
+        for scene_records, pair, scene_sections, reused in results:
+            records.extend(scene_records)
+            pairs.append(pair)
+            sections.extend(scene_sections)
+            progress["finished_scenes"] += 1
+            progress["finished_episodes"] += len(scene_records)
+            progress["reused_episodes"] += reused
+            progress["oracle_completed_episodes"] += sum(row["status"] == "completed" for row in scene_records)
+            write_json(root/"progress.json", progress)
+            print(json.dumps({"event": "collection_progress", **progress}), flush=True)
+
+    write_json(root/"progress.json", progress)
+    if workers == 1:
+        collect(map(generate_scene, jobs))
+    else:
+        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+            collect(pool.map(generate_scene, jobs))
     report = {"contract": "cliport_ordered_video_collection_v1", "source_revision": source_revision,
               "episodes": records, "paired_initial_scenes": pairs,
               "completed_episodes": sum(row["status"] == "completed" for row in records),
@@ -247,4 +294,6 @@ def generate(assets, output, seeds, history_seconds=3., tail_seconds=1., source_
         '<style>body{font:16px system-ui;margin:24px;color:#202124;background:white;letter-spacing:0}'
         'section{padding:24px 0;border-top:1px solid #ddd}img{width:100%}video{width:640px;max-width:100%}'
         'h2{font-size:20px;overflow-wrap:anywhere}</style><h1>Ordered CLIPort Episodes</h1>'+''.join(sections)+'</html>')
+    progress["status"] = "completed"
+    write_json(root/"progress.json", progress)
     return report

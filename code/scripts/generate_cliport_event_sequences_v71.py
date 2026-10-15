@@ -15,6 +15,8 @@ def main():
     parser.add_argument("--history-seconds", type=float, default=3.)
     parser.add_argument("--future-seconds", type=float, default=10.)
     parser.add_argument("--plan", default="", help="Scene-disjoint program plan; overrides --seeds.")
+    parser.add_argument("--workers", type=int, default=1, help="Independent CPU simulator processes, one scene per job.")
+    parser.add_argument("--resume", action="store_true", help="Reuse saved programs in the same output with the same plan and time protocol.")
     parser.add_argument("--tail-seconds", type=float, default=1.)
     parser.add_argument("--source-revision", default="")
     args = parser.parse_args()
@@ -26,7 +28,7 @@ def main():
     result = generate(repository/"cliport/environments/assets", args.out,
                       [int(seed) for seed in args.seeds.split(",")],
                       args.history_seconds, args.tail_seconds, args.source_revision,
-                      args.future_seconds, args.plan)
+                      args.future_seconds, args.plan, args.workers, args.resume)
     print(json.dumps(result), flush=True)
 
 
