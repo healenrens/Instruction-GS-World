@@ -1,5 +1,12 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
+## 2026-10-15 研究重规划入口
+
+- **实施启动更新**：用户已授权建立active goal并开始数据与主干实施。阿里 `10.67.16.10:22` 的 `/mnt/pfs/xuhaoming` 已确认独立CPFS、约35TiB可用；统一运行根为 `/mnt/pfs/xuhaoming/wm-align`。源数据目前是OSS上的26个分片tar。Mac不承载数据、环境或实验产物；代码仍走GitHub发布。原数据支持RGB重建/变化训练，语言sidecar需补迁，独立组合评测数据尚缺；实际进度见研究计划第13节。
+- **What changed**：按用户要求重新审视主干，不再把旧架构、冻结顺序、effect 形状及阶段门槛作为新方案前提。完整模型/训练/数据/实验计划与六组论文证据集中在 [Object Dynamics 研究计划](OBJECT_DYNAMICS_RESEARCH_PLAN.md)。
+- **Why**：已有工作已覆盖大部分“objects + latent actions + renderer + language”组合；新的候选问题收敛到主体绑定、持续时间与事件顺序共同组织能否改善实际组合生成，而不是把已有组件重新命名。
+- **Impact**：旧实验事实继续保留；本文以下运行状态是历史快照。本轮只更新研究文档，没有修改模型、推送代码或启动新训练。
+
 > 更新日期：2026-10-05
 > 本地权威代码：`/Users/hela/Instruct-GS-World-recovered-20260725/`  
 > 当前开发分支：`codex/object-video-sequence-v69`
