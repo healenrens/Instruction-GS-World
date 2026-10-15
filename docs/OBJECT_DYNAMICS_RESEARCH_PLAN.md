@@ -1279,3 +1279,41 @@ printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
 - **What changed**：用相同scene teacher、完整16+50帧输入测量prior的B32、累积1、encoder frame-batch64，默认高吞吐算法，单卡退出0。prior入口默认设置更新为B32/acc1/frame64；显式环境值仍优先。18.10与20.2的八卡prior命令同步，global batch仍为256，joint配置不改。
 - **Why**：prior不加载RAE decoder，也不对frozen teacher回传，其B1测试峰值只有1.44GiB。将joint的B2设置直接用于prior会留下很大的批量空间。
 - **Impact**：实际profile仅两步、effective batch32，不是八卡性能测量。第一步21.1444秒（data13.3720秒）、1.5134样例/秒、22.5032GiB；第二步4.80839秒（data0.000577秒）、6.65504样例/秒、22.6823GiB。loss2.013954/1.619500，梯度60.00037/59.24242，均有限；预取让第二步几乎不等数据，不能把该点写成长期吞吐。结果在 `outputs/cliport_prior_batch32_0fcca58_20261015T165942Z`，未启动八卡长训，也未为profile重启正式数据生成。
+
+## 21. LPWM原生外部对照接入
+
+- **What changed**：固定官方源码 `4cf53c403433e64c01652ac2adbec66231a46dea`，新增独立 `object_event_baselines/lpwm.py`，调用官方DLP、ELBO和sampling方法，不替换为V71网络或loss。新的准备/文本cache、FP32训练/恢复、RGB评价与单卡完整测试入口已写出；9个Python文件完成语法解析，两份shell入口完成语法检查。未安装新依赖、下载资产或运行LPWM，不能记为baseline已通过。
+- **Why**：内部scene/global/object/segment控制不能代替外部已有方法。接入要先核对真实调用与原生训练目标，再用同一视频/语言来源执行，不能仅凭论文摘要仿写一个“LPWM-like”模型。
+- **Impact**：先接当前受控数据和公开图像序列接口。LanguageTable原始RLDS读取、正式主体/顺序评分与FVD对齐仍未完成；当前RGB evaluator不冒充这些结果。依赖/权重准备仍等待此前发给用户的授权，不在Mac安装或下载。
+
+### 21.1 已核对的模型与loss
+
+依据[固定版本DLP实现](https://github.com/taldatech/lpwm/blob/4cf53c403433e64c01652ac2adbec66231a46dea/models.py)与[原生训练代码](https://github.com/taldatech/lpwm/blob/4cf53c403433e64c01652ac2adbec66231a46dea/train_lpwm.py)：
+
+1. 动态模型将encoder粒子数设为prior粒子数；LanguageTable配置因此编码256个particles，再为decoder选24个。新inventory读取实际对象属性，不把配置的24直接当总计算量，也不把粒子数当已验证物体数。
+2. 保留原生Adam参数、ELBO系数、VGG/LPIPS重建及FP32计算。当前原生配置无LR scheduler；共享checkpoint保存支持scheduler=None，V71已有非空scheduler行为不变。warmup仍以数据epoch表示，scene均匀采样的epoch按实际访问数计算。
+3. 原生loss可自行下载VGG/LPIPS。接入只改权重构造方式：从PFS显式加载TorchVision VGG与官方LPIPS文件，forward直接继承官方实现。训练进程不调用下载或hash校验，不改成MSE替代方法。criterion不进入model optimizer，模型checkpoint不重复保存该冻结VGG。
+4. 未来posterior路径调用 `sample_from_x(... use_all_ctx=True)`；部署路径只传history，使用 `use_all_ctx=False, n_pred_eq_gt=False`。当前接口不读取机器人action或image goal。两类结果明确分栏。
+
+### 21.2 数据与条件对齐的边界
+
+受控协议固定16历史/50未来，因此模型horizon由原生20调整为65，并记录原值/实际值；这是新受控任务适配，不宣称复现原论文原始训练配置。保留原生128像素模型，但改用全视野letterbox，避免中心裁剪丢掉边缘操作对象。当前128像素RGB分数不能直接与V71的512像素分数混表，正式共同尺度评测仍需完成。
+
+语言采用本地T5-large。保留原生不传padding attention mask的编码方式；不截断原指令，cache长度取max(32,实际最长token数)，并在模型配置记录必要的language_max_len调整。若所有指令都不超过32，长度与原生配置一致；超过32时明确是完整指令适配，不是原样的32-token条件。T5只读语言，cache只保存小型文本张量，不保存视频特征。
+
+LPWM训练联合使用语言条件，因此使用与V71 prior相同的有效语言窗口集合；受控oracle未完成的视频仍保留在数据中，但不作为成功实现指令的LPWM训练标签。V71 joint可使用这些无标签RGB，两者的实际episode数分别记录，不能声称视觉样本暴露次数完全相同。
+
+原生batch3/epoch150是外部方法的初始recipe，不等于V71的global batch256/1000步预算。正式比较前需报告实际访问数、更新数、两阶段总成本和预训练资产；不把不同loss的数值直接比较。八卡LPWM默认global batch24，尚未实际测量显存或训练吞吐。
+
+### 21.3 工程入口与测试定义
+
+| 文件 | 作用 |
+| --- | --- |
+| `setup_lpwm_environment_v71.py` | 用已有PFS uv创建独立CUDA环境，不改旧训练或CLIPort环境；不安装TensorFlow。 |
+| `prepare_lpwm_assets_v71.py` | 准备固定LPWM源码、T5、VGG/LPIPS；只有此准备阶段联网。 |
+| `prepare_lpwm_instruction_cache_v71.py` | 本地T5完整指令cache，记录token长度与条件变化。 |
+| `train_lpwm_object_events_v71.py/.sh` | 原生FP32目标、scene均匀采样、DDP、完整checkpoint、仅训练标量SwanLab。 |
+| `evaluate_lpwm_rgb_v71.py` | posterior、正确语言单样本、无语言及当前图copy，逐帧RGB/PSNR/SSIM/LPIPS和本地视频。 |
+| `test_lpwm_object_events_v71.py/.sh` | 一次真实短更新、保存恢复、history-only生成、future swap及视频评价。 |
+
+LPWM的CUDA STN含grid_sample，其backward可能非确定，见[PyTorch2.8说明](https://docs.pytorch.org/docs/2.8/generated/torch.nn.functional.grid_sample.html)。测试验证模型/优化器/RNG的精确序列化往返、恢复后的step与采样顺序，并报告独立轨迹的参数差异，不把浮点逐位一致当已保证能力。测试只有在后续RGB评价也完成后才写passed；当前所有运行结果仍待真实PFS环境与资产。

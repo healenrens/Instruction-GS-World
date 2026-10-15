@@ -68,7 +68,7 @@ def save_checkpoint(out, model, optimizer, scheduler, step, cursor, args, rank, 
         states[0] = local_rng
     if rank == 0:
         payload = {"format": "object_event_wm_v71", "model": model.state_dict(),
-                   "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                   "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict() if scheduler is not None else None,
                    "step": step, "cursor": cursor, "rng": states, "world_size": world,
                    "args": vars(args), "model_config": asdict(model.config), "swanlab_run_id": run_id}
         payload.update(metadata or {})
