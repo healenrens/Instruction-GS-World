@@ -931,11 +931,15 @@ RGB为640x480，240Hz物理引擎每48步采样一次，并保留不满0.2秒的
 
 **训练源修订**：上述初次运行保存了有损H.264展示视频，history相同结论来自编码前原图，不能直接扩展到解码MP4的像素。生成器现同时保存 `rgb.npz` 的无损uint8原始序列及时间，以它作为训练/评测输入；`video.mp4`仅作preview。两种指令必须在真正交付给模型的history原图上相同，不能让视频压缩差异成为未来条件线索。需要按原seed重新生成无损版本，旧结果保留作历史执行证据。
 
+**无损版实测完成**：`c37762c` 在20:33:27 CST正常结束，四条reward/事件/帧数与原运行相同，生成进程376331已退出。从实际 `rgb.npz` 读回的shape依次为 `[48,480,640,3]`、`[52,480,640,3]`、`[58,480,640,3]`、`[53,480,640,3]`，均为uint8。两组16帧history的最大/平均像素差均为0；RGB/episode/truth的帧数、时间及物理tick完全对应，最大时间差0。四个preview视频均可解码且帧数匹配。单例无损RGB文件约1.20--1.43MB。
+
+当前应查看和使用的结果根是 `/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/cliport_event_sequences_v71_c37762c_20261015T123110Z`，有 `index.html`、集合manifest及 `lossless_rgb_verification.json`。它替代旧cb53f5d目录作为后续模型输入来源；旧目录不删除。此结果完成了可追溯的受控数据生成链路，独立模型评测和正式组合划分仍未完成。
+
 已准备服务器上可独立重跑以下CPU生成命令，不联网：
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=cb53f5d26beed6f39833bbad25fa42264035a978
+export SOURCE_REVISION=c37762c476c2df2c192f15d76600f8e7f8b3492c
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/environments/cliport-v71/bin/python"
 export CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
