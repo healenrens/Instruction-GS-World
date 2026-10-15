@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, Sampler
 
 from .codec import FrozenVisualCodec
 from .config import ModelConfig
-from .data import ObjectEventVideoDataset, SequenceConfig, collate_object_event_video, write_json
+from .data import build_video_dataset, collate_object_event_video, write_json
 from .model import ObjectEventWorldModel
 
 
@@ -183,7 +183,7 @@ def train(args):
         scheduler.load_state_dict(checkpoint["scheduler"])
         step, cursor = checkpoint["step"], checkpoint["cursor"]
         restore_rng(checkpoint["rng"][rank])
-    dataset = ObjectEventVideoDataset(args.manifest, seed=args.seed,
+    dataset = build_video_dataset(args.manifest, seed=args.seed,
                                       sampling="language_windows" if args.stage == "prior" else None,
                                       text_cache=args.text_cache if args.stage == "prior" else "")
     sampler = EpisodeBatchSampler(len(dataset), args.batch, rank, world, args.seed, cursor)
@@ -206,6 +206,9 @@ def train(args):
     if rank == 0:
         write_json(out / "run.json", {"args": vars(args), "model_config": asdict(config),
                                      "world_size": world, "dataset_episodes": len(dataset),
+                                     "dataset_contract": dataset.manifest["contract"],
+                                     "sequence": dataset.manifest["sequence"],
+                                     "time_unit": dataset.manifest.get("time_unit", "seconds"),
                                      "trainable_parameters": sum(p.numel() for p in model.parameters()),
                                      "frozen_codec_parameters": sum(p.numel() for p in codec.parameters()),
                                      "frozen_teacher_parameters": sum(p.numel() for p in teacher.parameters()) if teacher else 0,

@@ -841,3 +841,9 @@ printf 'EVAL_RC=%s\nREPORT=%s/report.json\nCASES=%s/cases.jsonl\nVIDEOS=%s/video
 - **What changed**：新增作者公开TextOCVP/CLIPort视频归档的下载与实际结构清单入口 `prepare_textocvp_archive_v71.py`。先下载/读取ZIP目录及少量caption、图像，再决定adapter；默认不解压、不占GPU、不修改既有训练数据。
 - **Why**：现有multirobot数据没有独立主体/事件顺序GT，不能用模型自己的mask或训练tracker来替代这项证据。
 - **Impact**：公开archive只作为待核对的benchmark资产；21k、mask、时间信息等论文描述不直接当作已读取的文件事实。实际schema、可复用标签及最终组合协议待归档读取后记录。此次下载通过指定代理，在百度旧运行根 `data/benchmarks/textocvp_cliport` 进行；未改为新的训练分布。
+
+### 17.1 公开RGB协议适配
+
+- **What changed**：按[作者loader](https://github.com/angelvillar96/TextOCVP/blob/master/src/data/CLIPort.py)实现独立图像序列manifest，直接读取ZIP里的 `color/*_color.png` 与 `task_description.txt`，不展开或重编码RGB。保留作者train/val/test和四个明确排除的episode；默认首帧到后九帧，可另建十九帧预测manifest。沿用原joint/prior训练、episode-uniform采样、单卡完整测试与配对评测，真实机器人数据的时间契约不变。
+- **Why**：公开loader按连续帧序号读取，没有提供物理FPS；不能把它改写为三秒历史/五秒未来。新数据以 `sampled_frame` 表示相邻发布图像的步数，历史请求仅列出实际历史图像，不列未来文件。预览采用5FPS并明确只是播放速度，逐帧指标使用frame offset而非seconds。
+- **Impact**：这是公开语言条件成像benchmark的接口，不是独立实体/事件真值评价。原生图像尺寸由实际PIL读取，成像仍使用既有RAE512；现阶段结果必须标明该输出尺寸，不能直接与其他尺寸的论文数值混比。公开archive完成后执行真实数据端到端测试；在此之前仅为已实现接口。独立主体/顺序实验仍待模拟器GT或已核实的发布标注，不以模型mask替代。

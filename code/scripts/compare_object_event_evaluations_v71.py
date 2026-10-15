@@ -15,7 +15,8 @@ def read_cases(path):
 
 
 def case_key(row):
-    return row["case_id"], tuple(row["frame_indices"]), tuple(row["times"]), row["image_size"]
+    return (row["case_id"], tuple(row["frame_indices"]), tuple(row["times"]),
+            row.get("time_unit", "seconds"), row["image_size"])
 
 
 def main():

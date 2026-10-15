@@ -13,17 +13,26 @@ from .state import coordinates
 def read_history_request(path, device):
     request = json.loads(Path(path).read_text())
     indices = torch.tensor(request["frame_indices"], dtype=torch.long)
-    rgb, times, _ = read_object_video_frames_v69({"record": request["record"]}, indices)
+    if request["record"]["adapter"] == "image_zip":
+        from .image_sequences import read_image_sequence
+        rgb = read_image_sequence(request["record"], indices)
+        times = indices.float()
+    else:
+        rgb, times, _ = read_object_video_frames_v69({"record": request["record"]}, indices)
     observed = {"rgb": rgb[None].to(device), "native_hw": torch.tensor([rgb.shape[-2:]], device=device),
                 "frame_valid": torch.ones((1, len(rgb)), dtype=torch.bool, device=device),
-                "times": (times-times[-1]).float()[None].to(device)}
+                "times": (times-times[-1]).float()[None].to(device),
+                "time_unit": request.get("time_unit", "seconds")}
     return observed
 
 
 def make_history_request(sample):
     th = sample["history_frames"]
-    return {"record": {"path": sample["media_path"], "fps": sample["fps"],
-                       "frame_offset": sample["frame_offset"], "adapter": sample["adapter"]},
+    record = sample.get("observation_record", {"path": sample["media_path"], "fps": sample["fps"],
+                        "frame_offset": sample["frame_offset"], "adapter": sample["adapter"]})
+    if record["adapter"] == "image_zip":
+        record = {**record, "frame_files": record["frame_files"][:int(sample["frame_indices"][th-1])+1]}
+    return {"record": record, "time_unit": sample.get("time_unit", "seconds"),
             "frame_indices": sample["frame_indices"][:th].tolist(), "case_id": sample["case_id"],
             "input": "observed_frames_only"}
 

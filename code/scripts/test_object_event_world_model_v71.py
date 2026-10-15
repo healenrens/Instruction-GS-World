@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from igsw.object_event_wm.codec import FrozenVisualCodec, letterbox_video
 from igsw.object_event_wm.config import ModelConfig
-from igsw.object_event_wm.data import ObjectEventVideoDataset, collate_object_event_video, write_json
+from igsw.object_event_wm.data import build_video_dataset, collate_object_event_video, write_json
 from igsw.object_event_wm.evaluation import evaluate
 from igsw.object_event_wm.model import ObjectEventWorldModel
 from igsw.object_event_wm.prior import ObjectEffectPrior, prior_objective
@@ -72,7 +72,7 @@ def main():
     model = ObjectEventWorldModel(ModelConfig(**saved["model_config"])).cuda().eval()
     model.load_state_dict(saved["model"])
     codec = FrozenVisualCodec(args.assets).cuda().eval()
-    data = ObjectEventVideoDataset(args.manifest, partition="development")
+    data = build_video_dataset(args.manifest, partition="development")
     sample = data[0]
     batch = device_batch(collate_object_event_video([sample]), torch.device("cuda"))
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.precision == "bf16"):
@@ -146,7 +146,7 @@ def main():
         report["language_prior_training"] = exercise_resume(common, out/"language_prior")
         conditional_model, conditional_prior, _ = load_prior_model(out/"language_prior/recovered/latest.json", torch.device("cuda"))
         text_store = TextFeatureStore(args.text_cache)
-        conditional_data = ObjectEventVideoDataset(args.manifest, partition="development", sampling="language_windows")
+        conditional_data = build_video_dataset(args.manifest, partition="development", sampling="language_windows")
         evaluated = evaluate(conditional_model, codec, conditional_data, out/"conditional_generation",
                              items_per_source=1, precision=args.precision, videos_per_source=1,
                              prior=conditional_prior, text_store=text_store, samples=2)
@@ -156,6 +156,7 @@ def main():
                         "--assets", args.assets, "--history-request",
                         str(out/"conditional_generation/videos"/first_case["case_id"]/"history_request.json"),
                         "--instruction", first_case["instruction"], "--text-model", text_store.metadata["model"],
+                        "--future-frames", str(conditional_data.config.future_frames),
                         "--precision", args.precision,
                         "--out", str(out/"history_only_forecast")], check=True)
         report["language_prior_training"].update(generation_cases=evaluated["cases"],
@@ -165,6 +166,8 @@ def main():
             video_tick = float(video.streams.video[0].time_base)
             video_times = torch.tensor([frame.time for frame in video.decode(video=0)])
         requested = torch.tensor(report["language_prior_training"]["history_only_forecast"]["frame_times"])
+        if report["language_prior_training"]["history_only_forecast"]["time_unit"] == "sampled_frame":
+            requested = requested/5
         video_time_error = float((video_times-(requested-requested[0])).abs().max())
         assert video_time_error <= video_tick+1e-6, video_time_error
         report["language_prior_training"]["video_timestamp_max_error_seconds"] = video_time_error

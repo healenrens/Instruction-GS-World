@@ -44,7 +44,8 @@ def main():
         text, valid = text.to(device), valid.to(device)
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.precision == "bf16"):
         states = observe_history(model, codec, observed)
-        times = torch.arange(1, args.future_frames+1, device=device)[None]*args.future_seconds/args.future_frames
+        extent = args.future_frames if observed["time_unit"] == "sampled_frame" else args.future_seconds
+        times = torch.arange(1, args.future_frames+1, device=device)[None]*extent/args.future_frames
         result = generate_from_history(model, codec, prior, states, times, text, valid,
                                         generator=torch.Generator(device=device).manual_seed(args.seed))
         history_rgb, _ = letterbox_video(observed, codec.image_size)
@@ -53,13 +54,16 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     write_video(out / "forecast.mp4", torch.cat((history_rgb[0], result["rgb"][0])),
-                torch.cat((observed["times"][0], times[0])))
+                torch.cat((observed["times"][0], times[0])), observed["time_unit"])
     torch.save({"effects": result["effects"].cpu(), "updates": result["updates"].cpu(),
                 "times": times.cpu()}, out / "generated_effects.pt")
     write_json(out / "prediction.json", {"instruction": args.instruction, "seed": args.seed,
                 "precision": args.precision,
                 "future_rgb_read": False, "teacher_checkpoint": saved["teacher_checkpoint"],
-                "future_frames": args.future_frames, "future_seconds": args.future_seconds,
+                "future_frames": args.future_frames,
+                "future_seconds": args.future_seconds if observed["time_unit"] == "seconds" else None,
+                "time_unit": observed["time_unit"],
+                "preview_fps_not_physical": 5 if observed["time_unit"] == "sampled_frame" else None,
                 "frame_times": torch.cat((observed["times"][0], times[0])).cpu().tolist(),
                 "prediction_seconds_including_text_history_dynamics_render": elapsed})
 

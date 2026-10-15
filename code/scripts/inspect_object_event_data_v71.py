@@ -14,7 +14,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from igsw.object_event_wm.codec import letterbox_video
-from igsw.object_event_wm.data import ObjectEventVideoDataset, collate_object_event_video, write_json
+from igsw.object_event_wm.data import build_video_dataset, collate_object_event_video, write_json
 from igsw.object_event_wm.evaluation import balanced_indices, write_video
 
 
@@ -28,7 +28,7 @@ def main():
     args = parser.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    dataset = ObjectEventVideoDataset(args.manifest, partition=args.partition)
+    dataset = build_video_dataset(args.manifest, partition=args.partition)
     records, excluded, sections = [], [], []
     torch.set_num_threads(4)
     for index in balanced_indices(dataset, args.items_per_source):
@@ -39,15 +39,19 @@ def main():
         frames, _ = letterbox_video(collate_object_event_video([sample]), args.preview_size)
         frames = frames[0]
         case_dir = out / sample["case_id"]
-        write_video(case_dir / "input_sequence.mp4", frames, sample["times"])
+        unit = sample.get("time_unit", "seconds")
+        write_video(case_dir / "input_sequence.mp4", frames, sample["times"], unit)
         rows = []
-        for requested in (-3., -1.5, 0., 1., 3., 5.):
+        requested_times = ((-3., -1.5, 0., 1., 3., 5.) if unit == "seconds" else
+                           np.linspace(float(sample["times"][0]), float(sample["times"][-1]), 6))
+        for requested in requested_times:
             frame = int((sample["times"]-requested).abs().argmin())
             array = (frames[frame].permute(1, 2, 0).numpy()*255).round().astype(np.uint8)
             preview = Image.fromarray(array).resize((256, 256))
             panel = Image.new("RGB", (256, 280), "white")
             panel.paste(preview)
-            ImageDraw.Draw(panel).text((8, 260), f't={float(sample["times"][frame]):+.3f}s frame={int(sample["frame_indices"][frame])}', fill="black")
+            time_label = f'{float(sample["times"][frame]):+.3f}s' if unit == "seconds" else f'step {int(sample["times"][frame])}'
+            ImageDraw.Draw(panel).text((8, 260), f'{time_label} frame={int(sample["frame_indices"][frame])}', fill="black")
             rows.append(panel)
         contact = Image.new("RGB", (256*len(rows), 280), "white")
         for column, panel in enumerate(rows):
@@ -58,12 +62,15 @@ def main():
         for key in ("times", "frame_indices", "frame_valid", "native_hw"):
             record[key] = sample[key].tolist()
         record["preview_size"] = args.preview_size
+        record["time_unit"] = unit
+        record["preview_fps_not_physical"] = 5 if unit == "sampled_frame" else None
+        record["observation_record"] = sample.get("observation_record")
         records.append(record)
         write_json(case_dir / "source.json", record)
         case_id = escape(sample["case_id"], quote=True)
         sections.append(f'<section><h2>{escape(sample["source"])} / {case_id}</h2>'
                         f'<p>Camera: {escape(sample["camera"])}; native: {record["native_hw"]}; '
-                        f'FPS: {record["fps"]}; history: {record["history_frames"]} frames</p>'
+                        f'Physical FPS: {record["fps"]}; history: {record["history_frames"]} frames; time unit: {unit}</p>'
                         f'<p>{escape(sample["instruction"] or "No episode-level instruction at this window")}</p>'
                         f'<img src="{case_id}/timeline.jpg" alt="History and future at recorded times">'
                         f'<video src="{case_id}/input_sequence.mp4" controls preload="none"></video>'

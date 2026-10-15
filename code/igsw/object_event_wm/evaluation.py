@@ -18,7 +18,7 @@ from .training import device_batch
 from .prediction import history_batch, observe_history, generate_from_history, make_history_request
 
 
-def image_records(prediction, target, mask, current, times, perceptual=None):
+def image_records(prediction, target, mask, current, times, perceptual=None, time_unit="seconds"):
     rows = []
     for frame in range(len(target)):
         active = mask[frame, 0]
@@ -35,7 +35,8 @@ def image_records(prediction, target, mask, current, times, perceptual=None):
         # Pixel change includes illumination and camera effects, not only physical motion.
         change = (truth-initial).abs().mean(1, keepdim=True)
         weighted_error = (error*change).sum()/(change.sum()*3).clamp_min(1e-8)
-        row = {"frame": frame, "seconds": float(times[frame]), "rgb_l1": float(error.mean()),
+        time_key = "seconds" if time_unit == "seconds" else "sampled_frame_offset"
+        row = {"frame": frame, time_key: float(times[frame]), "rgb_l1": float(error.mean()),
                "psnr": float(-10*torch.log10(mse.clamp_min(1e-12))), "ssim": float(ssim(predicted, truth)),
                "appearance_change_weighted_l1": float(weighted_error) if change.sum() > 0 else None,
                "rgb_change_amplitude": float(change.mean())}
@@ -50,9 +51,12 @@ def image_records(prediction, target, mask, current, times, perceptual=None):
     return rows
 
 
-def write_video(path, frames, times):
+def write_video(path, frames, times, time_unit="seconds"):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Frame-only benchmarks use 5 FPS for viewing; no physical FPS is inferred.
+    if time_unit == "sampled_frame":
+        times = times/5
     fps = Fraction((len(frames)-1)/float(times[-1]-times[0])).limit_denominator(1000)
     timestamps = (times-times[0]).detach().double().cpu().tolist()
     time_base = Fraction(1, 1000000)
@@ -119,6 +123,7 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
                 excluded.append(sample)
                 continue
             batch = device_batch(collate_object_event_video([sample]), device)
+            time_unit = sample.get("time_unit", "seconds")
             started = time.perf_counter()
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=precision == "bf16"):
                 result = model(batch, codec, deterministic=True, render_all=True)
@@ -178,6 +183,8 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
                     "native_hw": sample["native_hw"].tolist(), "language_provenance": sample["language_provenance"],
                     "episode_index": sample["episode_index"], "partition": sample["partition"],
                     "frame_indices": sample["frame_indices"].tolist(), "times": sample["times"].tolist(),
+                    "time_unit": time_unit,
+                    "preview_fps_not_physical": 5 if time_unit == "sampled_frame" else None,
                     "instruction": sample["instruction"], "history_frames": th,
                     "shuffled_instruction": shuffled_instruction,
                     "shuffled_group": shuffled_group,
@@ -192,13 +199,13 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
                     "conditions": {}}
             for condition, prediction in outputs.items():
                 frame_rows = image_records(prediction, target, result["pixel_valid"][0],
-                                           current, times[0], perceptual)
+                                           current, times[0], perceptual, time_unit)
                 case["conditions"][condition] = frame_rows
                 if counts[sample["source"]] < videos_per_source:
                     full = torch.cat((images[0, :th], prediction), 0)
-                    write_video(out / "videos" / sample["case_id"] / f"{condition}.mp4", full, batch["times"][0])
+                    write_video(out / "videos" / sample["case_id"] / f"{condition}.mp4", full, batch["times"][0], time_unit)
             if counts[sample["source"]] < videos_per_source:
-                write_video(out / "videos" / sample["case_id"] / "target.mp4", images[0], batch["times"][0])
+                write_video(out / "videos" / sample["case_id"] / "target.mp4", images[0], batch["times"][0], time_unit)
                 write_json(out / "videos" / sample["case_id"] / "history_request.json", make_history_request(sample))
             sample_names = [key for key in outputs if key.startswith(("correct_language_sample_", "history_only_sample_"))]
             if sample_names:
@@ -212,6 +219,8 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
             stream.flush()
             print(json.dumps({"event": "evaluated", "case_id": sample["case_id"], "cases": len(records)}), flush=True)
     report = {"task": "paired_conditional_generation" if prior is not None else "posterior_conditioned_reconstruction", "cases": len(records),
+              "dataset_contract": dataset.manifest["contract"],
+              "time_unit": dataset.manifest.get("time_unit", "seconds"),
               "sampling": "fixed_seed_episode_uniform_within_source", "sampling_seed": dataset.seed,
               "sources": dict(counts), "excluded": excluded,
               "conditional_prior_evaluated": prior is not None, "independent_object_semantics_evaluated": False,

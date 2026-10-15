@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from igsw.object_event_wm.codec import FrozenVisualCodec
 from igsw.object_event_wm.config import ModelConfig
-from igsw.object_event_wm.data import ObjectEventVideoDataset
+from igsw.object_event_wm.data import build_video_dataset
 from igsw.object_event_wm.evaluation import evaluate
 from igsw.object_event_wm.model import ObjectEventWorldModel
 from igsw.object_event_wm.training import read_checkpoint
@@ -41,7 +41,7 @@ def main():
         model = ObjectEventWorldModel(ModelConfig(**saved["model_config"])).cuda().eval()
         model.load_state_dict(saved["model"])
     codec = FrozenVisualCodec(args.assets).cuda().eval()
-    data = ObjectEventVideoDataset(args.manifest, partition=args.partition,
+    data = build_video_dataset(args.manifest, partition=args.partition,
                                   sampling="language_windows" if prior is not None else None)
     evaluate(model, codec, data, args.out, args.items_per_source, args.precision, args.videos_per_source,
              prior=prior, text_store=text_store, samples=args.samples)

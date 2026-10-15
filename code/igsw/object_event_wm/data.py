@@ -39,6 +39,14 @@ def episode_key(entry):
     return entry["source"], entry["group"], int(entry["episode_index"])
 
 
+def build_video_dataset(manifest, **kwargs):
+    contract = json.loads(Path(manifest).read_text())["contract"]
+    if contract == "object_event_image_sequence_v1":
+        from .image_sequences import ImageSequenceDataset
+        return ImageSequenceDataset(manifest, **kwargs)
+    return ObjectEventVideoDataset(manifest, **kwargs)
+
+
 def available_anchors(case, config):
     fps = float(case["record"]["fps"])
     first = int(case["first_frame"]) + int(np.ceil(config.history_seconds * fps))
@@ -204,6 +212,7 @@ class ObjectEventVideoDataset(Dataset):
             "rgb": rgb, "frame_valid": unique_frame_mask(indices, th),
             "times": (timestamps-timestamps[th-1]).float(), "native_hw": torch.tensor(rgb.shape[-2:]),
             "history_frames": th, "frame_indices": indices, "time_source": basis,
+            "time_unit": "seconds", "observation_record": case["record"],
             "instruction": instruction, "language_provenance": provenance, "window_id": window_id,
             "case_id": entry["case_id"], "source": entry["source"],
             "group": entry["group"],
