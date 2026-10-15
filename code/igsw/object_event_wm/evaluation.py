@@ -106,7 +106,12 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
     out.mkdir(parents=True, exist_ok=True)
     device = next(model.parameters()).device
     counts, records, excluded = defaultdict(int), [], []
-    instructions = text_store.metadata["instructions"] if text_store is not None else []
+    instruction_groups = defaultdict(set)
+    if text_store is not None:
+        for episode in dataset.episodes:
+            for entry in episode:
+                for window in entry["language_windows"]:
+                    instruction_groups[entry["source"]].add((entry["group"], window["instruction"]))
     with (out / "cases.jsonl").open("w") as stream:
         for index in balanced_indices(dataset, items_per_source):
             sample = dataset[index]
@@ -136,7 +141,7 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
                        "posterior": result["posterior_rgb"][0], "zero_effect": zero[0],
                        "reversed_effect_order": reverse[0], "source_state_copy": source_image[0].expand_as(target),
                        "rgb_copy": current[None].expand_as(target)}
-            prediction_times, history_seconds, shuffled_instruction = {}, None, None
+            prediction_times, history_seconds, shuffled_instruction, shuffled_group = {}, None, None, None
             if prior is not None:
                 torch.cuda.synchronize()
                 history_started = time.perf_counter()
@@ -151,9 +156,11 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
                                   (f"history_only_sample_{number}", None, None, number) for number in range(samples)]
                 if text_store is not None:
                     conditions.append(("no_language_sample_0", None, None, 0))
-                    if len(instructions) > 1:
-                        shifted = (text_store.lookup[sample["instruction"]]+1) % len(instructions)
-                        shuffled_instruction = instructions[shifted]
+                    alternatives = sorted((group, text) for group, text in instruction_groups[sample["source"]]
+                                          if group != sample["group"] and text != sample["instruction"])
+                    if alternatives:
+                        chosen = int(np.random.default_rng(dataset.seed+index).integers(len(alternatives)))
+                        shuffled_group, shuffled_instruction = alternatives[chosen]
                         shuffled_text, shuffled_valid = text_store.batch([shuffled_instruction], device)
                         conditions.append(("shuffled_language_sample_0", shuffled_text, shuffled_valid, 0))
                 for name, text, valid, number in conditions:
@@ -173,6 +180,8 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
                     "frame_indices": sample["frame_indices"].tolist(), "times": sample["times"].tolist(),
                     "instruction": sample["instruction"], "history_frames": th,
                     "shuffled_instruction": shuffled_instruction,
+                    "shuffled_group": shuffled_group,
+                    "language_intervention": "different_group_within_source_not_verified_counterfactual" if shuffled_instruction else None,
                     "image_size": codec.image_size, "posterior_control_seconds": seconds,
                     "elapsed_seconds_all_conditions": seconds+(history_seconds or 0.)+sum(prediction_times.values()),
                     "effect_update_fraction": float(result["parts"]["effect_update_fraction"]),

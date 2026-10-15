@@ -618,4 +618,18 @@ Posterior变化加权L1从0.301292降至0.229818，但zero effect为0.219842。�
 
 同一teacher/decoder下配对报告posterior、zero/reversed effect、copy，以及正确语言、无语言、打乱语言的生成样本。相同case的语言干预使用相同随机噪声；记录实际打乱文本，不将其一律称为已确认冲突指令。逐例、逐帧、分来源报告绝对RGB指标。多样本期望误差与按整条sequence选择的best-of-N分开，后者仅是oracle。缓存文本评测的耗时明确不含Qwen；独立forecast记录包含在线文本编码的完整预测耗时。
 
+首次实测发现按文本排序相邻取值会选到近义任务描述，后续改为同一数据来源、不同task group且文本不同的固定种子抽样，并记录替代group/文本。不同group仍不自动等于语义冲突；准确的反事实后果需要独立任务真值，不能以原视频误差越大就断言“听懂了替代指令”。
+
 现有单一完整测试入口加入真实文本cache、固定teacher、prior更新/保存恢复、配对生成和仅历史文件的forecast；还检查批处理未来query不会改变第一步输出及MP4的实际PTS。代码已写入，尚待真实GPU执行。接下来的工程测试可引用上述100步teacher，但不能因此宣布该teacher或prior已具备有效object dynamics；正式科学实验仍需更充分训练与独立主体/顺序评价。
+
+### 15.4 完整语言链路的实测结果
+
+`a74a43c464b78a14b659c34d3eb3b0c1f30e4cfc` 已在百度旧目录/旧环境完整执行；2026-10-15 17:03:17 CST最终报告落盘，文本cache和完整测试均退出0。Qwen、DINO/RAE权重均复用现有文件，没有重新下载或安装包。
+
+文本cache包含4564条unique instruction、宽度2560，覆盖五源68384个窗口与17096条clip，全文保留。三种joint模式以及文本prior连续/恢复参数差异均为0；history future-swap及后续teacher-forced state改变后的prior第一步差异也均为0。prior的固定teacher确认为真实step100、源revision93f5ae1；冻结teacher为27780272参数，prior为22810496可训练参数。
+
+文本prior仅训练两步，loss为0.8821/1.3631，gradient norm为33.67/32.60。五例正确语言sample0的RGB L1为0.183676，无语言为0.184072，打乱语言为0.183665；没有语言有效性的正面结论，且该版打乱中有近义描述。两sample期望L1为0.183739，整段oracle best-of-2为0.183674，仅作为oracle覆盖记录。
+
+独立forecast只读取16个历史帧，生成25个未来帧，记录future_rgb_read=false；MP4 PTS最大误差约0.477微秒，文本编码+历史编码+Dynamics+渲染耗时本例约1.862秒。该计时不包含首次模型加载，不能把它当作跨设备/批量的吞吐结论。
+
+文本cache位于 `/mnt/pfs/public/xuhaoming/instruct_gs_world/metadata/object_event_text_v71`。完整结果根为 `outputs/object_event_v71_language_e2e_a74a43c_20261015T085418Z`（相对于百度旧运行根），包含 `test_report.json`、`language_prior`两分支checkpoint及固定teacher、`conditional_generation`逐例报告/视频、`history_only_forecast/forecast.mp4`及prediction.json；对应日志在旧运行根同名logs目录。会话31263最终退出0，PID187032已结束。

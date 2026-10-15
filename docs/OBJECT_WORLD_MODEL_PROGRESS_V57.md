@@ -2,6 +2,7 @@
 
 ## 2026-10-15 研究重规划入口
 
+- **完整语言链路已运行**：`a74a43c` 完成4564条冻结Qwen全文cache、三模式joint恢复、真实step100 teacher下的prior训练/恢复、配对生成、history-only forecast和PTS检查，均退出0。prior仅两步，未证明语言或effect有效；近义“打乱文本”已改为不同task-group对照。证据与路径见研究计划15.4，后续仍需独立主体/顺序评价及正式训练。
 - **100步pilot结果**：`93f5ae1` 的训练和40例固定窗口评测均正常退出。Posterior RGB L1由0.3064降至0.1924，但仍不优于zero-effect的0.1918和state-copy的0.1872；不能写成effect已有效。完整prior训练、冻结Qwen文本cache、history-only forecast和配对生成评测已补代码，待实测；详见研究计划14.11与第15节。
 - **修正版已实测**：`93f5ae1` 在百度单A100完成完整链路和两次trace，均退出0。三模式resume参数差异0，KL为0.12-0.26、gradient为4.26-12.02，41帧state RMS约1；原自反馈放大在本次复现中未重现。结果和视频已落旧运行根，见研究计划14.10。仍需短程优化、条件prior与独立评测，goal未完成。
 - **首次模型端到端结果**：百度单A100、512/BF16、`a5a6930` 已执行三模式backward及保存恢复、history-only prior更新/rollout、五源重建，退出0，恢复参数差异0。但初始effect KL约千万级、gradient最高约2.91e14，优化量级不正常；当前先定位和修正内部state/后验增长，不直接启动长训。逐例产物及数值见研究计划14.8。
