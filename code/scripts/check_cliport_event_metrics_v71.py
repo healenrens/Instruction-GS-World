@@ -82,7 +82,7 @@ def main():
                               row["mean_visible_iou"] < 1. for row in results["identity_swap"]["objects"]["entities"] if row["body_id"] in actors and row["scored_visible_frames"]),
                           "copy_has_nonzero_actor_error": results["current_copy"]["rgb"]["actor_region_rgb_l1"] > 0}
                 row = {"case_id": entry["case_id"], "scene_seed": entry["scene_seed"],
-                       "combination": meta["combination"],
+                       "combination": meta["combination"], "oracle_status": meta["status"],
                        "alternative_case_id": alternative["case_id"], "instruction": meta["instruction"],
                        "alternative_instruction": other_meta["instruction"], "checks": checks, "conditions": results}
                 row["gt_physical_motion"] = physical_motion_context(truth["poses_xyz_xyzw"][th-1, :, :3],

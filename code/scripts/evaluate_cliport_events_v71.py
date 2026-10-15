@@ -189,12 +189,13 @@ def main():
             stream.flush()
             paired_cases.append({"case_id": case["case_id"], "scene_seed": case["scene_seed"],
                                  "instruction": case["instruction"], "combination": case["combination"],
+                                 "oracle_status": case["oracle_status"],
                                  "conditions": {name: {"rgb": result["rgb"],
                                      "reference_combination": result["reference_combination"],
                                      "reference_instruction": result.get("reference_instruction", case["instruction"])}
                                      for name, result in case["conditions"].items()}})
             summaries.append({"case_id": case["case_id"], "scene_seed": meta["seed"],
-                              "combination": meta["combination"],
+                              "combination": meta["combination"], "oracle_status": meta["status"],
                               "conditions": {name: {key: result["rgb"][key] for key in
                                   ("full_rgb_l1", "actor_region_rgb_l1", "order_preference_margin")}
                                   for name, result in case["conditions"].items()}})

@@ -21,13 +21,18 @@ def summarize_paired_events(cases):
                   "engineering" if set(combinations) == {"engineering"} else "unspecified")
         pair = {"scene_seed": scene, "case_ids": [first["case_id"], second["case_id"]],
                 "instructions": [first["instruction"], second["instruction"]],
-                "combinations": combinations, "composition_subset": subset, "conditions": {}}
+                "combinations": combinations, "composition_subset": subset,
+                "oracle_statuses": [row.get("oracle_status") for row in (first, second)],
+                "conditions": {}, "unscored_conditions": []}
+        for name in sorted(first["conditions"].keys() ^ second["conditions"].keys()):
+            pair["unscored_conditions"].append({"condition": name, "reason": "condition missing from one program"})
         for name in sorted(first["conditions"].keys() & second["conditions"].keys()):
             results = [row["conditions"][name] for row in (first, second)]
             frames = [{frame["seconds"]: frame for frame in result["rgb"]["frames"]
                        if frame["order_preference_margin"] is not None} for result in results]
             times = sorted(frames[0].keys() & frames[1].keys())
             if not times:
+                pair["unscored_conditions"].append({"condition": name, "reason": "no common paired-target times"})
                 continue
             paired_frames = [{"seconds": time,
                               "case_order_margins": [side[time]["order_preference_margin"] for side in frames],

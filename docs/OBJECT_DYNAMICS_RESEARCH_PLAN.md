@@ -1018,6 +1018,8 @@ printf 'GENERATE_RC=%s\nREVIEW=%s/index.html\n' "${GENERATE_RC}" "${OUT}"
 
 **组合切片接入**：正式evaluator保留每个program的 `combination`，反序语言同时切换 `reference_combination`。配对汇总分别报告contains-held-order与seen-only场景；单方向的绝对actor RGB误差按实际参考指令的seen/held类别报告，并保留逐例值。这里不把某一方向的单例margin当语言收益，也不将工程样例归入正式seen/held。旧报告若缺标签明确列为unspecified；不根据case编号反推标签。标签只进入评价记录，不成为模型输入或训练监督。
 
+正式生成已出现oracle未完成的实际样本，因此摘要同时保留各program的oracle状态；某条件只有一侧结果、或没有共同可评分真帧时，配对结果明确列出 `unscored_conditions` 和原因。逐条件scene分母只含实际评分的配对，不把失败样例写成零误差，也不只在原始大JSON中隐藏这些缺失。
+
 ### 18.7 平台范围更新
 
 - **What changed**：用户本轮明确回复skip，跳过阿里备用阶段的网络、环境和权重准备；不再查询或重试其代理访问。已完成的阿里数据和只读记录保留。
