@@ -1492,6 +1492,104 @@ LPWM完成自身测试和训练后，先用 `export_lpwm_cliport_predictions_v71
 
 这些差异在模型之外就存在。因此只统一评分分辨率仍不足以将提升归因于object机制。新加 `object_event_view128_v71.json` 和 `object_event_scene_view128_v71.json`，明确把V71观察输入与RGB训练目标都先变为同一128全视野图像；预测也以128输出。DINO内部仍按448计算、RAE仍为原512 decoder，其输出经过固定、不重叠的area平均到128，未新增或声称有128原生RAE权重。它匹配信息输入/成像输出的尺寸，不匹配预训练资产或内部计算成本。
 
-默认view_size=0保留原512主版本，旧checkpoint默认行为不变。匹配128配置贯穿joint、冻结teacher标签、prior、history-only forecast和所有decode控制，不仅仅在evaluator最后缩图。测试会记录真实input/target/prediction尺寸及内部encoder/decoder尺寸；新配置尚待完整单卡执行，不以JSON设置存在当作已经生效。
+默认view_size=0保留原512主版本，旧checkpoint默认行为不变。匹配128配置贯穿joint、冻结teacher标签、prior、history-only forecast和所有decode控制，不仅仅在evaluator最后缩图。`aab8913`完整单卡链路已退出0：实际input/target/prediction均为128x128，内部encoder/decoder仍为448/512。world和prior第1步及最终恢复参数差均0，两项因果差均0，梯度有限；world最高allocated为30.94620GiB、prior为1.28516GiB。四例独立评测与共同评分仍在执行，不能用上述两步测试宣布模型质量。
 
 CPU证据根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/cliport_common_score_6a120b9_20261015T193640Z`。包含 `calibration/report.json`、`common_calibration/report.json`、`common_object/report.json`、`common_scene/report.json` 和 `native_score_difference.json`；原预测与原报告未修改，没有重跑GPU。
+
+新单卡测试根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/cliport_view128_e2e_aab8913_20261015T200205Z`，完整过程日志位于运行根 `logs/cliport_view128_e2e_aab8913_20261015T200205Z/test.log`。另一个CPU比较入口已确认旧object与scene的四例全部配对、协议差异和排除清单均为空；这些是两步且effect模式不同的工程模型，不用其误差差值证明object结构优劣。
+
+### 22.5 匹配128实验的独立命令
+
+这些命令使用已发布并实测的 `aab89134da946b4ea2286929059cac503745dc22`。准备机按16.1的GitHub同步方式取该release；下列测试、训练和评价均不联网。它是128信息输入/输出的匹配实验，不覆盖原512版本。正式集合和文本cache由18.10的准备入口产生，不能用四例工程集合替代。正式训练尚未启动，八卡吞吐尚未实测。
+
+**单卡完整测试**：已有本节实测结果，不必仅因文档更新再跑；下面用于独立复现。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=aab89134da946b4ea2286929059cac503745dc22
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71_engineering_c682ec9.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+export RUN_NAME="cliport_view128_e2e_aab8913_$(date +%Y%m%d_%H%M%S)"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}" LOG_ROOT="${WORK_ROOT}/logs/${RUN_NAME}"
+bash "${ROOT}/code/scripts/test_object_event_world_model_v71.sh" \
+  --model-config "${ROOT}/code/configs/object_event_view128_v71.json" \
+  --modes object_step --train-partition engineering --evaluation-partition engineering \
+  --text-cache "${WORK_ROOT}/metadata/cliport_event_text_v71_c682ec9"
+printf 'TEST_RC=%s\nREPORT=%s/test_report.json\n' "$?" "${OUT}"
+```
+
+**八卡joint首轮**：object_step、1000步、global batch256。每卡2的容量依据来自相同内部DINO/RAE路径的实际profile；不因为最终输出变成128就宣称计算也减到1/16。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=aab89134da946b4ea2286929059cac503745dc22
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
+export EFFECT_MODE=object_step
+export RUN_NAME="cliport_view128_v71_${EFFECT_MODE}_seed17_aab8913_1000"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export BATCH_PER_GPU=2 GRAD_ACCUM=16 STEPS=1000 WORKERS_PER_RANK=2
+export ENCODER_FRAME_BATCH=4 DECODER_FRAME_BATCH=2
+export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
+unset RESUME INIT_FROM
+bash "${ROOT}/code/scripts/train_object_event_world_model_v71.sh" \
+  --model-config "${ROOT}/code/configs/object_event_view128_v71.json" \
+  --warmup 50 --rollout-ramp 100 --save-every 100 --snapshot-every 1000
+printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
+```
+
+同一object配置下，仅将 `EFFECT_MODE` 改为 `global_step` 或 `object_segment` 会进入对应独立目录。scene对照使用 `object_event_scene_view128_v71.json`、`EFFECT_MODE=global_step` 和独立 `RUN_NAME=cliport_scene_view128_v71_global_step_seed17_aab8913_1000`。首先用scene/global与object/global比较状态组织，再用object/global与object/step比较绑定；不能直接用scene/global对object/step的差值归因于单个因素。此处不自动提交四个长训。
+
+**八卡prior**：明确读取同一模式的1000步编号快照，配置自动继承其中的view_size；不误用512 teacher。八卡32x1=256保持原批量协议。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=aab89134da946b4ea2286929059cac503745dc22
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export TEXT_CACHE="${WORK_ROOT}/metadata/cliport_ordered_text_v71"
+export EFFECT_MODE=object_step
+export BASE_CHECKPOINT="${WORK_ROOT}/outputs/cliport_view128_v71_${EFFECT_MODE}_seed17_aab8913_1000/step_00001000.pt"
+export RUN_NAME="cliport_view128_prior_v71_${EFFECT_MODE}_seed17_aab8913_1000"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
+export BATCH_PER_GPU=32 GRAD_ACCUM=1 STEPS=1000 WORKERS_PER_RANK=2
+export ENCODER_FRAME_BATCH=64 DECODER_FRAME_BATCH=2 LANGUAGE_DROPOUT=0.1
+export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
+unset RESUME INIT_FROM
+bash "${ROOT}/code/scripts/train_object_event_prior_v71.sh" \
+  --warmup 50 --save-every 100 --snapshot-every 1000
+printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
+```
+
+joint/prior恢复分别使用原完整命令，将 `unset RESUME INIT_FROM` 改为 `unset INIT_FROM`，并在启动前设置 `export RESUME="${OUT}/latest.json"`。不改变原run的卡数、batch、accum和模型配置，不自动恢复其他目录。
+
+**单卡development与共同评分**：预测只运行一次，随后CPU使用保存的无损NPZ评分；不以有损MP4重新计算指标。固定100个development场景，不访问最终test做选型。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=aab89134da946b4ea2286929059cac503745dc22
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+export EFFECT_MODE=object_step
+export OUT="${WORK_ROOT}/outputs/cliport_view128_eval_v71_${EFFECT_MODE}_aab8913_1000_development"
+"${WORK_ROOT}/.venv/bin/python" "${ROOT}/code/scripts/evaluate_cliport_events_v71.py" \
+  --manifest "${WORK_ROOT}/metadata/cliport_event_v71.json" \
+  --assets "${WORK_ROOT}/metadata/rae_assets_512.json" \
+  --prior-checkpoint "${WORK_ROOT}/outputs/cliport_view128_prior_v71_${EFFECT_MODE}_seed17_aab8913_1000/step_00001000.pt" \
+  --text-cache "${WORK_ROOT}/metadata/cliport_ordered_text_v71" \
+  --partition development --items 200 --out "${OUT}/predictions" &&
+"${WORK_ROOT}/environments/cliport-v71/bin/python" "${ROOT}/code/scripts/score_cliport_predictions_common_v71.py" \
+  --manifest "${WORK_ROOT}/metadata/cliport_event_v71.json" \
+  --predictions "${OUT}/predictions" --out "${OUT}/common128" \
+  --max-edge 128 --model-image-size 128 --cpu-threads 2
+printf 'EVAL_RC=%s\nREPORT=%s/common128/report.json\n' "$?" "${OUT}"
+```
