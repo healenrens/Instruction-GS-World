@@ -61,6 +61,7 @@ class ObjectStateEncoder(nn.Module):
         self.update = nn.Sequential(nn.Linear(d*2, d), nn.GELU(), nn.Linear(d, d))
         self.gate = nn.Sequential(nn.Linear(d*2, d), nn.Sigmoid())
         self.memory = AttentionBlock(d, config.heads)
+        self.output_norm = nn.LayerNorm(d)
 
     def initial(self, batch, time):
         tokens = self.initial_tokens[None].expand(batch, -1, -1, -1)
@@ -80,10 +81,13 @@ class ObjectStateEncoder(nn.Module):
             local = scores.softmax(2) * ownership[:, :, None]
             weights = local / local.sum(-1, keepdim=True).clamp_min(1e-8)
             evidence = torch.einsum("bkrn,bnd->bkrd", weights.to(values.dtype), values)
-            joined = torch.cat((tokens.float(), evidence.float()), -1)
-            tokens = tokens.float() + self.gate(joined) * self.update(joined)
+            joined = torch.cat((self.norm(tokens.float()), evidence.float()), -1)
+            candidate = self.update(joined).float()
+            gate = self.gate(joined).float()
+            # Correct the persistent state instead of accumulating its own unbounded projection.
+            tokens = (1-gate)*tokens.float() + gate*candidate
         centers = torch.einsum("bkrn,nd->bkrd", weights, xy.float())
-        tokens = self.memory(tokens.reshape(b*k, r, d)).reshape(b, k, r, d)
+        tokens = self.output_norm(self.memory(tokens.reshape(b*k, r, d))).reshape(b, k, r, d)
         observed = valid.any(-1)[:, None, None, None]
         return ObjectState(torch.where(observed, tokens, state.tokens),
                            torch.where(observed, centers, state.centers), time)

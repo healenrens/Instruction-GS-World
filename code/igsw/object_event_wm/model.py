@@ -81,10 +81,15 @@ class ObjectEventWorldModel(nn.Module):
         if self.config.effect_mode == "object_segment":
             dynamic = dynamic + self.config.update_weight*update_loss
         loss = loss + rollout_weight*dynamic
+        rms = lambda value: value.detach().float().square().mean().sqrt()
         parts = {"observed_feature_mse": observed_loss, "posterior_feature_mse": predicted_loss,
                  "observed_rgb_l1": rgb_observed, "posterior_rgb_l1": rgb_predicted,
                  "feature_change_l1": change_loss, "effect_kl": kl_loss,
                  "effect_update_fraction": boundaries.float().mean(), "update_probability": update_loss,
+                 "observed_state_rms_first": rms(states[0].tokens),
+                 "observed_state_rms_last": rms(states[-1].tokens),
+                 "rollout_state_rms_last": rms(predicted[-1].tokens),
+                 "posterior_mean_abs_max": torch.stack([e["mean"].detach().abs().amax() for e in effects]).amax(),
                  "rollout_weight": features.new_tensor(rollout_weight)}
         return {"loss": loss, "parts": parts, "source": states[th-1],
                 "observed_states": states, "predicted_states": predicted,

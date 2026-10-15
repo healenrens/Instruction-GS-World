@@ -548,3 +548,11 @@ V71逐源评测采用固定种子、source内部episode-uniform无放回抽样�
 这次五例、两步模型的codec-reference RGB L1/PSNR/SSIM为0.0528/22.25/0.733；observed-state为0.2027/12.60/0.581；posterior为0.2110/12.35/0.569，zero-effect几乎相同。这仅是初始化附近的工程输出，不构成表示或effect效果结论；样例也采用当时的首项抽取，而非后续固定种子抽样。
 
 实际结果根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/object_event_v71_e2e_a5a6930_20261015T070431Z`。其中 `test_report.json`、三种模式的 `uninterrupted/train.jsonl`/`recovered/train.jsonl`、`reconstruction/report.json`/`cases.jsonl`和视频均落盘。日志在同一旧运行根的 `logs/object_event_v71_e2e_a5a6930_20261015T070431Z`。原测试PID1238已正常结束，没有重启。
+
+### 14.9 数值定位与状态更新修正
+
+`73450f7` 在同一真实训练样例 `robotwin_ep26235_f20` 上执行初始化和旧step-2模型两次前向，均退出0。41帧DINO feature RMS处于0.915-0.953；初始化state RMS却从frame0的0.381增长到frame15的36.81、frame40的77414.31，最后posterior mean abs-max为135168。旧step-2模型最后state RMS进一步达到697298.38。异常已在history阶段发生，早于posterior，不是DINO输入feature整体变大。
+
+- **What changed**：观测更新从无界自反馈残差，改为归一化状态输入、候选状态和门控凸组合；每帧memory输出再经过LayerNorm。新增首/末observed state RMS、末rollout state RMS和posterior mean最大幅度日志。
+- **Why**：原renderer对输入做LayerNorm，使重建loss看起来普通，但posterior直接读取持续增大的state残差；两条路径对数值尺度的反应不同，单看重建loss会漏掉这个问题。
+- **Impact**：不改DINO/RAE资产、不改KL权重；新模型从头执行完整测试，旧两步checkpoint只作诊断记录，不作为新结构resume起点。新增RMS字段仅用于数值健康，不用于证明物体语义或变化预测质量。
