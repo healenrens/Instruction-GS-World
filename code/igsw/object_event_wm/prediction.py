@@ -6,7 +6,6 @@ from pathlib import Path
 import torch
 import numpy as np
 
-from igsw.adaptive_gaussian_wm.object_video_rgb_v69 import read_object_video_frames_v69
 from .codec import letterbox_video
 from .state import coordinates
 
@@ -23,6 +22,8 @@ def read_history_request(path, device):
             rgb = torch.from_numpy(stored["rgb"][indices.numpy()].copy()).permute(0, 3, 1, 2)
             times = torch.from_numpy(stored["times_seconds"][indices.numpy()].copy())
     else:
+        from igsw.adaptive_gaussian_wm.object_video_rgb_v69 import read_object_video_frames_v69
+
         rgb, times, _ = read_object_video_frames_v69({"record": request["record"]}, indices)
     observed = {"rgb": rgb[None].to(device), "native_hw": torch.tensor([rgb.shape[-2:]], device=device),
                 "frame_valid": torch.ones((1, len(rgb)), dtype=torch.bool, device=device),

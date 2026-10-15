@@ -10,14 +10,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from igsw.adaptive_gaussian_wm.object_video_manifest_v69 import (
-    load_object_video_manifest_v69,
-    resolve_object_video_case_v69,
-)
-from igsw.adaptive_gaussian_wm.object_video_rgb_v69 import read_object_video_frames_v69
-from igsw.adaptive_gaussian_wm.video_file_decoder import VideoDecodeError
-
-
 @dataclass(frozen=True)
 class SequenceConfig:
     history_seconds: float = 3.0
@@ -74,6 +66,8 @@ def language_windows(path):
 
 
 def prepare_manifest(source_path, output, config, language_path="", media_root=None):
+    from igsw.adaptive_gaussian_wm.object_video_manifest_v69 import load_object_video_manifest_v69
+
     source = load_object_video_manifest_v69(source_path)
     root = Path(media_root).resolve() if media_root else Path(source["root"])
     languages = language_windows(language_path)
@@ -178,6 +172,10 @@ class ObjectEventVideoDataset(Dataset):
         return len(self.episodes)
 
     def __getitem__(self, item):
+        from igsw.adaptive_gaussian_wm.object_video_manifest_v69 import resolve_object_video_case_v69
+        from igsw.adaptive_gaussian_wm.object_video_rgb_v69 import read_object_video_frames_v69
+        from igsw.adaptive_gaussian_wm.video_file_decoder import VideoDecodeError
+
         index, epoch, occurrence = item if isinstance(item, tuple) else (item, 0, item)
         rng = np.random.default_rng(np.random.SeedSequence([self.seed, epoch, occurrence, index]))
         candidates = self.episodes[index]
