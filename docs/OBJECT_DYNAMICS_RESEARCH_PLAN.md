@@ -1049,7 +1049,112 @@ done
 - **Why**：正式计划有1300场景、2200程序，串行生成与中断后全部重做会重复消耗CPU时间。续跑应恢复生成进度，而不是选择更容易成功的数据。
 - **Impact**：每条RGB、truth、history及preview写完后才原子发布episode元数据。未发布的程序可重新生成；已发布程序不改写。默认workers=1保留原入口，完整真实测试采用2个CPU进程生成四例并再次续跑，再做已有独立评分；不新增训练环境、GPU依赖或大量单元门禁。正式集合尚未因实现此入口而被标记已完成。
 
+**真实并行/续跑完成**：`d1301eb54293bf25227a97121bf15192cec3267f`在百度独立CPU环境执行四例，首次两进程生成86.553秒，resume18.143秒，评分30.948秒，manifest准备1.676秒，全部退出0。四例66帧、reward1；与原串行c682ec9对应RGB的最大差均0。resume为4复用/0新生成，16个episode/NPZ文件的mtime与大小完全未变。两场景16帧history相同，paired控制检查全部通过。结果根为 `outputs/cliport_event_parallel_d1301eb_20261015T151251Z`，实际回执为其中 `parallel_verification_receipt.json`。容器CPU配额11核、内存40GiB；正式生成选4进程，不能把宿主可见116核当可独占额度。
+
 统一CPU入口 `prepare_cliport_ordered_benchmark_v71.sh` 只顺序执行真实生成与manifest准备，不联网、不使用GPU、不启动训练。默认沿用已冻结的 `metadata/cliport_event_v71_plan_c682ec9.json`，数据写入旧运行根 `data/benchmarks/cliport_ordered_v71`，完成后写 `metadata/cliport_event_v71.json`。`GENERATE_WORKERS`默认4，续跑显式设 `RESUME_DATA=1`；中断后不改plan或时间协议。每次启动有独立日志，进度文件区分生成落盘和oracle成功，不能把两者混为一谈。
+
+### 18.10 正式数据与首轮八卡命令
+
+准备机先按16.1取得 `048a3fcd95b8041577929be8a29d7381b526a529` release。下面各段可独立执行，训练不访问GitHub或下载模型；数据生成完毕后再使用其manifest。测试数据仍保留，不依据测试结果选择模型。
+
+**CPU数据生成/续跑**：只运行这段不会训练，也不占用GPU。`RESUME_DATA=1`明确表示复用该集合已落盘程序。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=048a3fcd95b8041577929be8a29d7381b526a529
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export GENERATE_WORKERS=4 RESUME_DATA=1
+export PLAN="${WORK_ROOT}/metadata/cliport_event_v71_plan_c682ec9.json"
+export COLLECTION="${WORK_ROOT}/data/benchmarks/cliport_ordered_v71"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+bash "${ROOT}/code/scripts/prepare_cliport_ordered_benchmark_v71.sh"
+DATA_RC=$?
+printf 'DATA_RC=%s\nPROGRESS=%s/progress.json\nREVIEW=%s/index.html\n' \
+  "${DATA_RC}" "${COLLECTION}" "${COLLECTION}"
+```
+
+**单卡指令特征准备**：读取已经存在的Qwen，只缓存完整文本，不重新编码视频。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=048a3fcd95b8041577929be8a29d7381b526a529
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+"${WORK_ROOT}/.venv/bin/python" "${ROOT}/code/scripts/prepare_object_event_text_v71.py" \
+  --manifest "${WORK_ROOT}/metadata/cliport_event_v71.json" \
+  --model /mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct \
+  --out "${WORK_ROOT}/metadata/cliport_ordered_text_v71" --batch 16
+```
+
+**八卡joint首轮**：固定1000 optimizer steps、global batch256，warmup50、rollout ramp100；这是新受控集合上的首轮测量预算，不是已证明收敛的训练步数。三种effect模式使用同一预算/seed/split，先跑object_step；改变 `EFFECT_MODE` 为global_step或object_segment会产生独立输出目录。单卡B2的实测只作为显存配置依据，不承诺八卡吞吐。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=048a3fcd95b8041577929be8a29d7381b526a529
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
+export EFFECT_MODE=object_step
+export RUN_NAME="cliport_ordered_v71_${EFFECT_MODE}_seed17_048a3fc_1000"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export BATCH_PER_GPU=2 GRAD_ACCUM=16 STEPS=1000 WORKERS_PER_RANK=2
+export ENCODER_FRAME_BATCH=4 DECODER_FRAME_BATCH=2
+export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
+unset RESUME INIT_FROM
+bash "${ROOT}/code/scripts/train_object_event_world_model_v71.sh" \
+  --warmup 50 --rollout-ramp 100 --save-every 100 --snapshot-every 1000
+TRAIN_RC=$?
+printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "${TRAIN_RC}" "${OUT}"
+```
+
+恢复使用完整同段命令，但把 `unset RESUME INIT_FROM` 改成 `unset INIT_FROM`，并加 `export RESUME="${OUT}/latest.json"`。恢复读取保存的优化器、schedule、RNG和data cursor；不改卡数/批量继续同一个run。准备数据的 `RESUME_DATA` 与训练 `RESUME` 是两件事。
+
+**八卡prior首轮**：只在对应world快照完成后运行。world/renderer固定，训练history/完整指令到effect；不是读真实未来的posterior生成。每种world模式对应独立prior，不混用teacher。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=048a3fcd95b8041577929be8a29d7381b526a529
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export TEXT_CACHE="${WORK_ROOT}/metadata/cliport_ordered_text_v71"
+export EFFECT_MODE=object_step
+export BASE_CHECKPOINT="${WORK_ROOT}/outputs/cliport_ordered_v71_${EFFECT_MODE}_seed17_048a3fc_1000/step_00001000.pt"
+export RUN_NAME="cliport_ordered_prior_v71_${EFFECT_MODE}_seed17_048a3fc_1000"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
+export BATCH_PER_GPU=2 GRAD_ACCUM=16 STEPS=1000 WORKERS_PER_RANK=2
+export ENCODER_FRAME_BATCH=4 DECODER_FRAME_BATCH=2 LANGUAGE_DROPOUT=0.1
+export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
+unset RESUME INIT_FROM
+bash "${ROOT}/code/scripts/train_object_event_prior_v71.sh" \
+  --warmup 50 --save-every 100 --snapshot-every 1000
+TRAIN_RC=$?
+printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "${TRAIN_RC}" "${OUT}"
+```
+
+**单卡development评测**：200个case对应100个scene的两种程序；每例保存原生RGB、独立主体评分和history-only请求，report自动给出成对顺序分数。正式test不参与首轮选择。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=048a3fcd95b8041577929be8a29d7381b526a529
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+export EFFECT_MODE=object_step
+export OUT="${WORK_ROOT}/outputs/cliport_ordered_eval_v71_${EFFECT_MODE}_1000_development"
+"${WORK_ROOT}/.venv/bin/python" "${ROOT}/code/scripts/evaluate_cliport_events_v71.py" \
+  --manifest "${WORK_ROOT}/metadata/cliport_event_v71.json" \
+  --assets "${WORK_ROOT}/metadata/rae_assets_512.json" \
+  --prior-checkpoint "${WORK_ROOT}/outputs/cliport_ordered_prior_v71_${EFFECT_MODE}_seed17_048a3fc_1000/step_00001000.pt" \
+  --text-cache "${WORK_ROOT}/metadata/cliport_ordered_text_v71" \
+  --partition development --items 200 --out "${OUT}"
+printf 'EVAL_RC=%s\nREPORT=%s/report.json\n' "$?" "${OUT}"
+```
 
 ## 19. 外部对照的实际接口准备
 
