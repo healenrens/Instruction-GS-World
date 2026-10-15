@@ -1053,6 +1053,8 @@ done
 
 统一CPU入口 `prepare_cliport_ordered_benchmark_v71.sh` 只顺序执行真实生成与manifest准备，不联网、不使用GPU、不启动训练。默认沿用已冻结的 `metadata/cliport_event_v71_plan_c682ec9.json`，数据写入旧运行根 `data/benchmarks/cliport_ordered_v71`，完成后写 `metadata/cliport_event_v71.json`。`GENERATE_WORKERS`默认4，续跑显式设 `RESUME_DATA=1`；中断后不改plan或时间协议。每次启动有独立日志，进度文件区分生成落盘和oracle成功，不能把两者混为一谈。
 
+**正式生成当前状态**：已向授权SWXC对话发送048a3fc的4进程启动请求，但远控返回 `Timed out waiting for MCP response to fs/createDirectory`，随后读取同一thread暂不可达。尚无本次正式生成的session/PID/progress证据，因此不记为running或failed，也不因观察超时重复启动。恢复后先读取该对话与同一集合的实际进程状态，再决定继续观察或启动；四例d1301eb已完成的结果不受此项影响。
+
 ### 18.10 正式数据与首轮八卡命令
 
 准备机先按16.1取得 `048a3fcd95b8041577929be8a29d7381b526a529` release。下面各段可独立执行，训练不访问GitHub或下载模型；数据生成完毕后再使用其manifest。测试数据仍保留，不依据测试结果选择模型。
