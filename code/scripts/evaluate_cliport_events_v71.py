@@ -9,7 +9,6 @@ import sys
 
 import numpy as np
 import torch
-from torch.nn import functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from igsw.object_event_wm.codec import FrozenVisualCodec
@@ -19,49 +18,13 @@ from igsw.object_event_wm.evaluation import write_video
 from igsw.object_event_wm.independent_metrics import score_entities, score_rgb_outcomes, physical_motion_context
 from igsw.object_event_wm.paired_event_summary import summarize_paired_events
 from igsw.object_event_wm.model import ObjectEventWorldModel
+from igsw.object_event_wm.native_view import native_rgb, native_field_labels, paired_indices
 from igsw.object_event_wm.prediction import generate_from_history, history_batch, observe_history, make_history_request
 from igsw.object_event_wm.prior_training import load_prior_model
 from igsw.object_event_wm.simulation_data import load_episode, load_truth, nearest_indices
 from igsw.object_event_wm.state import coordinates
 from igsw.object_event_wm.text import TextFeatureStore
 from igsw.object_event_wm.training import device_batch, read_checkpoint
-
-
-def native_rgb(frames, hw):
-    h, w = map(int, hw)
-    size = frames.shape[-1]
-    rh, rw = round(h*size/max(h, w)), round(w*size/max(h, w))
-    top, left = (size-rh)//2, (size-rw)//2
-    cropped = frames[:, :, top:top+rh, left:left+rw]
-    value = F.interpolate(cropped.float(), (h, w), mode="bicubic", align_corners=False).clamp(0, 1)
-    return value.permute(0, 2, 3, 1).cpu().numpy()
-
-
-def native_field_labels(masks, hw, image_size):
-    h, w = map(int, hw)
-    rh, rw = round(h*image_size/max(h, w)), round(w*image_size/max(h, w))
-    top, left = (image_size-rh)//2, (image_size-rw)//2
-    side = round(masks.shape[-1]**.5)
-    labels = []
-    for frame in masks:
-        raster = F.interpolate(frame[None].reshape(1, len(frame), side, side).float(),
-                               (image_size, image_size), mode="bilinear", align_corners=False)
-        raster = F.interpolate(raster[:, :, top:top+rh, left:left+rw], (h, w), mode="bilinear", align_corners=False)
-        labels.append(raster.argmax(1)[0].cpu().numpy().astype(np.int16))
-    return np.stack(labels)
-
-
-def paired_indices(dataset, items):
-    scenes = defaultdict(list)
-    for index, entries in enumerate(dataset.episodes):
-        scenes[entries[0]["scene_seed"]].append(index)
-    rng = np.random.default_rng(dataset.seed)
-    indices = []
-    for scene in rng.permutation(sorted(scenes)):
-        if len(indices)+len(scenes[scene]) > items:
-            break
-        indices.extend(scenes[scene])
-    return indices
 
 
 @torch.no_grad()
@@ -152,6 +115,7 @@ def main():
                     "prediction_horizon_seconds": data.config.future_seconds, "scored_frames": int(valid.sum()),
                     "terminal_target_available": bool(valid[-1]),
                     "state_layout": model.config.state_layout,
+                    "model_image_size": codec.image_size,
                     "field_labels_meaning": ("upsampled feature-field ownership, not an RGB segmentation head"
                         if model.config.state_layout == "object" else "single global field; no entity labels"),
                     "gt_physical_motion": physical_motion_context(truth["poses_xyz_xyzw"][th-1, :, :3],

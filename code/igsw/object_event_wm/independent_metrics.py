@@ -109,32 +109,34 @@ def score_entities(predicted_anchor, predicted_future, truth_anchor, truth_futur
 
 
 def score_rgb_outcomes(prediction, truth, anchor_labels, future_labels, actor_ids, robot_ids,
-                       times, alternative_rgb=None, alternative_labels=None):
+                       times, alternative_rgb=None, alternative_labels=None, alternative_valid=None):
     prediction, truth = _image_float(prediction), _image_float(truth)
     other = _image_float(alternative_rgb) if alternative_rgb is not None else None
     rows = []
     for frame, time in enumerate(times):
         mask = future_labels[frame]
+        has_alternative = other is not None and (alternative_valid is None or bool(alternative_valid[frame]))
         excluded = np.isin(mask, robot_ids)
-        if alternative_labels is not None:
+        if alternative_labels is not None and has_alternative:
             excluded |= np.isin(alternative_labels[frame], robot_ids)
         regions, actor_rows = [], []
         for actor in actor_ids:
             region = (mask == actor) | (anchor_labels == actor)
-            if alternative_labels is not None:
+            if alternative_labels is not None and has_alternative:
                 region |= alternative_labels[frame] == actor
             region &= ~excluded
             regions.append(region)
             count = int(region.sum())
             own_error = float(abs(prediction[frame]-truth[frame])[region].mean()) if count else None
-            alt_error = float(abs(prediction[frame]-other[frame])[region].mean()) if count and other is not None else None
+            alt_error = float(abs(prediction[frame]-other[frame])[region].mean()) if count and has_alternative else None
             actor_rows.append({"body_id": int(actor), "pixels": count, "rgb_l1": own_error,
                                "opposite_order_rgb_l1": alt_error})
         region = np.logical_or.reduce(regions)
         count = int(region.sum())
         own_error = float(abs(prediction[frame]-truth[frame])[region].mean()) if count else None
-        alt_error = float(abs(prediction[frame]-other[frame])[region].mean()) if count and other is not None else None
+        alt_error = float(abs(prediction[frame]-other[frame])[region].mean()) if count and has_alternative else None
         rows.append({"frame": frame, "seconds": float(time), "actor_region_pixels": count,
+                     "paired_target_available": has_alternative,
                      "full_rgb_l1": float(abs(prediction[frame]-truth[frame]).mean()),
                      "actor_region_rgb_l1": own_error, "opposite_order_rgb_l1": alt_error,
                      "order_preference_margin": alt_error-own_error if alt_error is not None else None,

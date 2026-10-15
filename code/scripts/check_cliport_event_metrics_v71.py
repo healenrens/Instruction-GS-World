@@ -8,9 +8,12 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from igsw.object_event_wm.data import SequenceConfig, write_json
+from igsw.object_event_wm.codec import letterbox_video
+from igsw.object_event_wm.native_view import native_rgb
 from igsw.object_event_wm.independent_metrics import score_entities, score_rgb_outcomes, physical_motion_context
 from igsw.object_event_wm.paired_event_summary import summarize_paired_events
 from igsw.object_event_wm.simulation_data import load_episode, load_truth, nearest_indices, requested_times
@@ -28,6 +31,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--collection", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--save-predictions", action="store_true", help="Export real controls for common-view re-scoring, including resolution-only references.")
     args = parser.parse_args()
     collection = Path(args.collection)
     source = json.loads(collection.read_text())
@@ -60,15 +64,36 @@ def main():
                     "identity_swap": (rgb[th:], swapped),
                     "two_outcome_rgb_mean": ((rgb[th:].astype(np.float32)+other_rgb[th:].astype(np.float32))/510., None),
                 }
+                sizes = {}
+                if args.save_predictions:
+                    image_batch = {"rgb": torch.from_numpy(rgb[th:]).permute(0, 3, 1, 2)[None],
+                                   "native_hw": torch.tensor([rgb.shape[1:3]]),
+                                   "frame_valid": torch.ones((1, len(rgb)-th), dtype=torch.bool)}
+                    for size in (128, 512):
+                        name = f"resize_reference_{size}"
+                        images, _ = letterbox_video(image_batch, size)
+                        controls[name] = (native_rgb(images[0], rgb.shape[1:3]), None)
+                        sizes[name] = size
                 results = {}
                 for name, (predicted, predicted_labels) in controls.items():
-                    result = {"reference_combination": meta["combination"],
+                    result = {"mode": "resize_reference" if name in sizes else name,
+                              "model_image_size": sizes.get(name), "reference_combination": meta["combination"],
                               "rgb": score_rgb_outcomes(predicted, rgb[th:], anchor, labels, actors,
                                 meta["robot_and_tool_body_ids"], times[th:], other_rgb[th:], other_truth["segmentation"][th:])}
                     if predicted_labels is not None:
                         result["objects"] = score_entities(anchor, predicted_labels, anchor, labels, meta["entities"], times[th:])
+                    if args.save_predictions:
+                        folder = out/entry["case_id"]
+                        folder.mkdir(parents=True, exist_ok=True)
+                        path = folder/f"{name}.npz"
+                        np.savez_compressed(path, rgb=predicted, times_seconds=times[th:])
+                        result["file"] = str(path.relative_to(out))
                     results[name] = result
                 oracle = results["oracle"]
+                other_available = np.ones(len(rgb)-th, dtype=bool)
+                other_available[-1] = False
+                missing_alternative = score_rgb_outcomes(rgb[th:], rgb[th:], anchor, labels, actors,
+                    meta["robot_and_tool_body_ids"], times[th:], other_rgb[th:], other_truth["segmentation"][th:], other_available)
                 checks = {"fixed_requested_grid_available": exact and other_exact,
                           "both_requested_programs_realized": meta["status"] == other_meta["status"] == "completed",
                           "paired_history_pixels_identical": bool(np.array_equal(rgb[:th], other_rgb[:th])),
@@ -81,6 +106,10 @@ def main():
                           "identity_swap_changes_tracking_not_rgb": results["identity_swap"]["rgb"]["full_rgb_l1"] == 0 and any(
                               row["mean_visible_iou"] < 1. for row in results["identity_swap"]["objects"]["entities"] if row["body_id"] in actors and row["scored_visible_frames"]),
                           "copy_has_nonzero_actor_error": results["current_copy"]["rgb"]["actor_region_rgb_l1"] > 0}
+                checks["missing_alternative_does_not_replace_endpoint"] = (
+                    missing_alternative["frames"][-1]["order_preference_margin"] is None
+                    and not missing_alternative["frames"][-1]["paired_target_available"]
+                    and missing_alternative["frames"][-1]["full_rgb_l1"] == 0)
                 row = {"case_id": entry["case_id"], "scene_seed": entry["scene_seed"],
                        "combination": meta["combination"], "oracle_status": meta["status"],
                        "alternative_case_id": alternative["case_id"], "instruction": meta["instruction"],
