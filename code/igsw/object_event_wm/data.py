@@ -200,6 +200,8 @@ class ObjectEventVideoDataset(Dataset):
             "history_frames": th, "frame_indices": indices, "time_source": basis,
             "instruction": instruction, "language_provenance": provenance, "window_id": window_id,
             "case_id": entry["case_id"], "source": entry["source"],
+            "camera": case["camera"], "media_path": case["record"]["path"],
+            "frame_offset": case["record"].get("frame_offset", 0), "fps": case["record"]["fps"],
             "episode_index": entry["episode_index"], "partition": entry["partition"],
             "sample_index": index, "epoch": epoch, "occurrence": occurrence,
         }

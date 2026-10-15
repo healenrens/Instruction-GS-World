@@ -453,7 +453,7 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 - [x] 经SWXC确认阿里GPU、CPFS和百度源metadata。
 - [x] 完成首个RGB数据适配与PFS展开入口。
 - [x] GitHub发布数据准备与基础主干代码，在阿里PFS建立独立checkout。
-- [ ] 在阿里PFS完整展开数据并取得真实manifest准备结果。
+- [x] 在阿里PFS完整展开数据并取得真实manifest准备结果。
 - [x] 补迁语言sidecar到阿里PFS。
 - [ ] 运行真实RGB读取和完整训练/恢复/评测链路。
 - [ ] 配置PFS独立运行环境和已匹配的视觉/成像权重。
@@ -488,3 +488,25 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 本轮只完成Python/Shell语法解析，不能代表GPU完整训练。阿里直连Hugging Face/Astral已确认，系统已有PyTorch、Transformers、PyAV、PyYAML、einops和HF Hub；uv、独立PFS环境及RAE权重未准备。用户已批准 `deps=allow`，范围仅为阿里PFS中的uv、PyTorch2.7/torchvision、Transformers、HF Hub、PyAV、NumPy/Pillow、PyYAML/einops、LPIPS、SwanLab和官方RAE/DINO权重；不修改系统环境，不在Mac安装或下载。授权范围不包含新模拟器或其他模型依赖。
 
 环境准备获准后，在PFS下载配套资产并运行上述完整测试，使用真实反馈修正实现。之后继续条件prior、独立对象-次序数据与正式baseline比较；当前goal保持active，不因基础代码写完而完成。
+
+### 14.4 数据准备完成与实际语言覆盖
+
+2026-10-15 13:23:46 CST解包结束，`EXTRACT_EXIT_CODE=0`；13:24:09生成 `/mnt/pfs/xuhaoming/wm-align/metadata/object_event_v71.json`，原执行会话最终退出0。报告保留全部17816条clip，`excluded=[]`。没有重追踪或重编码。
+
+| 来源 | Clip/episode | 有语言窗口的clip | 语言窗口 | 原始尺寸与相机 |
+| --- | ---: | ---: | ---: | --- |
+| AgiBot | 4000 | 4000 | 16000 | 640x480，head |
+| Bridge | 2075 | 2002 | 8008 | 256x256，image_0 |
+| HY | 4000 | 3393 | 13572 | 424x240，cam_high |
+| RoboMIND | 4000 | 3960 | 15840 | 640x480，front 2641条/top 1359条 |
+| RoboTwin | 3741 | 3741 | 14964 | 518x518，cam_high |
+
+共17096条clip有语言、720条无语言。54812个窗口是episode级目标，13572个HY窗口是history-anchor级任务；后一类不直接复制到任意重新采样的时间点。Bridge为5FPS，其余四源30FPS；都按真实时间生成3秒历史和5秒未来。此结果确认文件映射和metadata，不代表逐视频解码或模型测试完成。
+
+新增 `inspect_object_event_data_v71.py` 从正式dataset读取每源视频，保存整段8秒预览、六时点timeline及原文件/帧索引/PTS映射。预览等比例缩放仅用于显示，不改portable媒体。该入口不读取teacher、不加载预训练模型，输出全部写PFS。
+
+### 14.5 条件prior的代码接口
+
+- **What changed**：新增 `ObjectEffectPrior`，复用历史对象候选的局部tokens、geometry和相对时间；对当前预测state生成Gaussian innovation及对象级更新边界。对象版只在对应候选的历史内读取局部证据，再做跨候选交互；全局对照读取全部历史候选。语言以带有效mask的冻结text tokens输入，不假定固定slot号就是主体。
+- **Why**：posterior能解释真实未来，不等于生成期能够从历史选择正确变化。两个路径必须有独立输入边界与结果。
+- **Impact**：prior训练目标为冻结posterior到prior的Gaussian KL，以及片段版的边界交叉熵；训练允许teacher-force此前的effect，但不把当前目标effect送入当前预测。生成只读取历史、请求时间、语言和随机数，然后递归调用共同Dynamics。当前新增的是prior模块/目标/生成接口；完整语言encoder、prior训练入口和生成比较尚未交付。完整工程测试追加一次history-only prior更新和自由rollout，未把它写成语言能力验证。

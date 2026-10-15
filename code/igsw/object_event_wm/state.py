@@ -38,10 +38,11 @@ class AttentionBlock(nn.Module):
         self.feedforward = nn.Sequential(nn.LayerNorm(width), nn.Linear(width, width*4),
                                         nn.GELU(), nn.Linear(width*4, width))
 
-    def forward(self, x, context=None):
+    def forward(self, x, context=None, context_valid=None):
         query = self.norm(x)
         keys = query if context is None else self.norm(context)
-        x = x + self.attention(query, keys, keys, need_weights=False)[0]
+        padding = None if context_valid is None else ~context_valid
+        x = x + self.attention(query, keys, keys, key_padding_mask=padding, need_weights=False)[0]
         return x + self.feedforward(x)
 
 

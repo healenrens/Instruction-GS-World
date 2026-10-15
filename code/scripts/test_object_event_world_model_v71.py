@@ -16,6 +16,7 @@ from igsw.object_event_wm.config import ModelConfig
 from igsw.object_event_wm.data import ObjectEventVideoDataset, collate_object_event_video, write_json
 from igsw.object_event_wm.evaluation import evaluate
 from igsw.object_event_wm.model import ObjectEventWorldModel
+from igsw.object_event_wm.prior import ObjectEffectPrior, prior_objective
 from igsw.object_event_wm.training import device_batch, read_checkpoint
 
 
@@ -77,12 +78,38 @@ def main():
         prefix_difference = max(float((a.tokens-b.tokens).abs().max())
                                 for a, b in zip(original[:th], other[:th]))
     assert prefix_difference < 1e-6, prefix_difference
+    model.requires_grad_(False)
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.precision == "bf16"):
+        teacher = model(batch, codec, deterministic=True)
+    prior = ObjectEffectPrior(model.config, text_width=model.config.width).cuda().train()
+    optimizer = torch.optim.AdamW(prior.parameters(), lr=2e-4)
+    history = teacher["observed_states"][:th]
+    future_times = batch["times"][:, th:]
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.precision == "bf16"):
+        prior_loss, prior_parts = prior_objective(
+            prior, history, teacher["predicted_states"], teacher["effects"],
+            future_times, batch["frame_valid"][:, th:])
+    prior_loss.backward()
+    prior_norm = torch.nn.utils.clip_grad_norm_(prior.parameters(), 1.)
+    optimizer.step()
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.precision == "bf16"):
+        generated = prior.generate(history, future_times, model.dynamics,
+                                   generator=torch.Generator(device="cuda").manual_seed(17))
+    prior_report = {"loss": float(prior_loss.detach()), "gradient_norm": float(prior_norm),
+                    "effect_shape": list(generated["effects"].shape),
+                    "generated_state_count": len(generated["states"]),
+                    "language_encoder_tested": False,
+                    "finite_generated_effects": bool(torch.isfinite(generated["effects"]).all()),
+                    "parts": {key: float(value.detach()) for key, value in prior_parts.items()}}
+    assert torch.isfinite(prior_norm) and prior_norm > 0 and prior_report["finite_generated_effects"], prior_report
+    del teacher, prior, optimizer, generated
     reconstruction = evaluate(model, codec, data, out/"reconstruction", items_per_source=1,
                                precision=args.precision, videos_per_source=1)
     report = {"status": "passed", "source_revision": args.source_revision,
               "real_assets": codec.asset_config, "model_config": saved["model_config"],
               "modes": reports, "future_feature_swap_prefix_max_difference": prefix_difference,
               "codec_parameters_frozen": all(not p.requires_grad for p in codec.parameters()),
+              "history_prior_update_rollout": prior_report,
               "reconstruction_cases": reconstruction["cases"],
               "reconstruction_sources": reconstruction["sources"],
               "scope": "engineering end-to-end execution; not a representation-quality result"}
