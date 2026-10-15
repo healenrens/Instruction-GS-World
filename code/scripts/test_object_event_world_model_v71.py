@@ -51,6 +51,7 @@ def main():
     parser.add_argument("--assets", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--modes", default="global_step,object_step,object_segment")
+    parser.add_argument("--model-config", default="")
     parser.add_argument("--train-partition", default="train")
     parser.add_argument("--evaluation-partition", default="development")
     parser.add_argument("--precision", default="bf16", choices=("bf16", "fp32"))
@@ -68,6 +69,7 @@ def main():
                   "--steps", "2", "--batch", "1", "--accum", "1", "--workers", "0",
                   "--log-every", "1", "--save-every", "1", "--snapshot-every", "0",
                   "--rollout-ramp", "1", "--warmup", "1", "--effect-mode", mode,
+                  "--model-config", args.model_config,
                   "--precision", args.precision, "--source-revision", args.source_revision]
         reports[mode] = exercise_resume(common, out/mode)
     selected = args.modes.split(",")[-1]
@@ -133,6 +135,11 @@ def main():
                                precision=args.precision, videos_per_source=1)
     report = {"status": "passed", "source_revision": args.source_revision,
               "real_assets": codec.asset_config, "model_config": saved["model_config"],
+              "model_parameters": sum(p.numel() for p in model.parameters()),
+              "module_parameters": {name: sum(p.numel() for p in module.parameters())
+                                    for name, module in model.named_children()},
+              "state_token_budget": model.config.slots*model.config.local_tokens,
+              "effect_scalars_per_step": model.config.slots*model.config.effect_dim,
               "modes": reports, "future_feature_swap_prefix_max_difference": prefix_difference,
               "codec_parameters_frozen": all(not p.requires_grad for p in codec.parameters()),
               "history_prior_update_rollout": prior_report,

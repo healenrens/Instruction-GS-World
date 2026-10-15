@@ -150,7 +150,9 @@ def main():
                     "alternative_instruction": other_meta["instruction"] if other_meta else None,
                     "prediction_horizon_seconds": data.config.future_seconds, "scored_frames": int(valid.sum()),
                     "terminal_target_available": bool(valid[-1]),
-                    "field_labels_meaning": "upsampled feature-field ownership, not an RGB segmentation head",
+                    "state_layout": model.config.state_layout,
+                    "field_labels_meaning": ("upsampled feature-field ownership, not an RGB segmentation head"
+                        if model.config.state_layout == "object" else "single global field; no entity labels"),
                     "gt_physical_motion": physical_motion_context(truth["poses_xyz_xyzw"][th-1, :, :3],
                         truth["poses_xyz_xyzw"][th:, :, :3][valid], truth["body_ids"]),
                     "conditions": {}}
@@ -170,8 +172,10 @@ def main():
                     "condition_is_ambiguous": name == "no_language",
                     "rgb": score_rgb_outcomes(rgb[valid], reference_rgb, gt_anchor, reference_labels, actors,
                         meta["robot_and_tool_body_ids"], times, other_rgb, other_labels),
-                    "field_ownership": score_entities(anchor_labels, predicted_labels[valid], gt_anchor,
-                                                       reference_labels, meta["entities"], times)}
+                    "field_ownership": (score_entities(anchor_labels, predicted_labels[valid], gt_anchor,
+                                                       reference_labels, meta["entities"], times)
+                        if model.config.state_layout == "object" else
+                        {"available": False, "reason": "scene control has no independently composited entity fields"})}
                 np.savez_compressed(case_dir/f"{name}.npz", rgb=rgb, field_labels=predicted_labels,
                                     anchor_field_labels=anchor_labels, times_seconds=desired[th:])
                 preview = torch.from_numpy(np.concatenate((actual_rgb[:th].astype(np.float32)/255, rgb))).permute(0, 3, 1, 2)
@@ -193,6 +197,7 @@ def main():
             print(json.dumps(summaries[-1]), flush=True)
     write_json(out/"report.json", {"manifest": args.manifest, "checkpoint": args.checkpoint,
                 "prior_checkpoint": args.prior_checkpoint, "partition": args.partition, "cases": summaries,
+                "state_layout": model.config.state_layout,
                 "paired_outcome_preference": summarize_paired_events(paired_cases),
                 "truth_origin": "CLIPort simulator; never model mask or tracker",
                 "posterior_uses_future": True, "prior_uses_future_rgb": False,

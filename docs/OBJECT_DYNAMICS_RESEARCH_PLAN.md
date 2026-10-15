@@ -1163,3 +1163,9 @@ printf 'EVAL_RC=%s\nREPORT=%s/report.json\n' "$?" "${OUT}"
 - **What changed**：再次读取[LPWM官方LanguageTable准备脚本](https://github.com/taldatech/lpwm/blob/main/datasets/langtable_preparation.py)、[loader](https://github.com/taldatech/lpwm/blob/main/datasets/langtable_ds.py)与[运行说明](https://github.com/taldatech/lpwm)。官方路径从RLDS读取，选择15至50帧episode，用seed42划分80/10/10，保存逐帧PNG和T5-large文本；loader默认128尺寸、存在末帧padding及有效标记，valid默认只取100个episode。此处记录的是代码事实，不声称已经复现论文表格或取得其精确划分清单。
 - **Why**：不能用已有multirobot或四条模拟工程样例替代已规划的LanguageTable主实验，也不能把三种V71内部effect变体当全部外部baseline。
 - **Impact**：下一步先取得官方原始数据/episode身份与真实准备结果，再冻结共同窗口与评价清单；padding帧不当作真实未来，T5默认32-token截断与本项目完整指令cache的条件差异需分开报告。新增TensorFlow/TFDS、T5及LPWM依赖的独立PFS环境已向用户询问，尚未安装下载。正式主对照与non-object容量对照仍未完成，不据此标记goal完成。
+
+## 20. 相同token预算的非对象对照
+
+- **What changed**：新增 `scene_state.py` 与 `code/configs/object_event_scene_control_v71.json`。保留相同DINOv2/RAE、68个384维state tokens、17个64维global effect tokens、Dynamics层数、目标和采样；每个scene token独立读取全图，取消对象之间的竞争分配，memory在68个tokens之间全局attention。renderer将所有tokens汇成一个场景field，不再为每个候选对象独立成像和mask合成。使用 `global_step` effect路径，历史和effect cross-attention都是全局的。
+- **Why**：只有global-step/object-step/object-segment三个对象模型，不能隔离对象状态组织本身的价值。此对照与object-layout/global-step先比较状态与renderer组织；后者再与object-step比较effect绑定，object-step与object-segment比较持续时间。它是受控内部对照，不替代LPWM/TextOCVP外部主比较。
+- **Impact**：场景对照的 `[17,4]` 只是共享存储接口，不代表17个物体。参数形状除renderer去掉一个输出mask logit外保持一致，参数差为384+1=385；run/test报告记录实际模块参数、state tokens及effect维度，不能把近同参数写成同FLOPs。场景renderer不输出实体分割，因此独立evaluator将ownership列为不可用，而非把整图label当物体真值；外部actor区域RGB与配对顺序分数仍使用同一GT。旧checkpoint默认object-layout，新scene模型从头训练，不重写已有实验。完整单卡训练/恢复/prior/生成测试仍待服务器执行，尚未宣称对照有效。

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 @dataclass
 class ModelConfig:
+    state_layout: str = "object"
     feature_dim: int = 768
     width: int = 384
     heads: int = 8

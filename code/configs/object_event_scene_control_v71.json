@@ -1,0 +1,11 @@
+{
+  "state_layout": "scene",
+  "feature_dim": 768,
+  "width": 384,
+  "heads": 8,
+  "object_slots": 16,
+  "local_tokens": 4,
+  "observation_iterations": 3,
+  "dynamics_layers": 6,
+  "effect_dim": 64
+}

@@ -68,6 +68,15 @@ class ObjectStateEncoder(nn.Module):
         centers = tokens.new_zeros((*tokens.shape[:-1], 2))
         return ObjectState(tokens, centers, time)
 
+    def observation_weights(self, scores, valid):
+        ownership = scores.logsumexp(2).softmax(1) * valid[:, None].float()
+        local = scores.softmax(2) * ownership[:, :, None]
+        return local / local.sum(-1, keepdim=True).clamp_min(1e-8)
+
+    def mix_tokens(self, tokens):
+        b, k, r, d = tokens.shape
+        return self.output_norm(self.memory(tokens.reshape(b*k, r, d))).reshape(b, k, r, d)
+
     def observe(self, state, features, xy, valid, time):
         b, k, r, d = state.tokens.shape
         content = self.input(features.float()) + self.spatial(position_features(xy))[None]
@@ -77,9 +86,7 @@ class ObjectStateEncoder(nn.Module):
             queries = self.queries(self.norm(tokens))
             scores = torch.einsum("bkrd,bnd->bkrn", queries, keys).float()/math.sqrt(d)
             # Object competition, then local carriers divide the object's observations.
-            ownership = scores.logsumexp(2).softmax(1) * valid[:, None].float()
-            local = scores.softmax(2) * ownership[:, :, None]
-            weights = local / local.sum(-1, keepdim=True).clamp_min(1e-8)
+            weights = self.observation_weights(scores, valid)
             evidence = torch.einsum("bkrn,bnd->bkrd", weights.to(values.dtype), values)
             joined = torch.cat((self.norm(tokens.float()), evidence.float()), -1)
             candidate = self.update(joined).float()
@@ -87,7 +94,7 @@ class ObjectStateEncoder(nn.Module):
             # Correct the persistent state instead of accumulating its own unbounded projection.
             tokens = (1-gate)*tokens.float() + gate*candidate
         centers = torch.einsum("bkrn,nd->bkrd", weights, xy.float())
-        tokens = self.output_norm(self.memory(tokens.reshape(b*k, r, d))).reshape(b, k, r, d)
+        tokens = self.mix_tokens(tokens)
         observed = valid.any(-1)[:, None, None, None]
         return ObjectState(torch.where(observed, tokens, state.tokens),
                            torch.where(observed, centers, state.centers), time)
@@ -102,12 +109,12 @@ class ObjectStateEncoder(nn.Module):
 
 
 class ObjectFeatureRenderer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, output_mask=True):
         super().__init__()
         d = config.width
         self.local_radius = nn.Parameter(torch.tensor(-1.))
         self.field = nn.Sequential(nn.LayerNorm(d*2+18), nn.Linear(d*2+18, d),
-                                   nn.GELU(), nn.Linear(d, config.feature_dim+1))
+                                   nn.GELU(), nn.Linear(d, config.feature_dim+int(output_mask)))
 
     def forward(self, state, xy):
         root = state.tokens[:, :, 0]

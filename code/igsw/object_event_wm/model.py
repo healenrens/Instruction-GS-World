@@ -7,6 +7,7 @@ from torch.nn import functional as F
 from .codec import letterbox_video
 from .dynamics import EffectPosterior, ObjectDynamics
 from .state import ObjectFeatureRenderer, ObjectStateEncoder, coordinates
+from .scene_state import SceneFeatureRenderer, SceneStateEncoder
 
 
 def weighted_mean(value, weight):
@@ -18,8 +19,10 @@ class ObjectEventWorldModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.encoder = ObjectStateEncoder(config)
-        self.renderer = ObjectFeatureRenderer(config)
+        encoder, renderer = {"object": (ObjectStateEncoder, ObjectFeatureRenderer),
+                             "scene": (SceneStateEncoder, SceneFeatureRenderer)}[config.state_layout]
+        self.encoder = encoder(config)
+        self.renderer = renderer(config)
         self.posterior = EffectPosterior(config)
         self.dynamics = ObjectDynamics(config)
 

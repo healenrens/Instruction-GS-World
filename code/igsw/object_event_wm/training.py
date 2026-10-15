@@ -211,6 +211,10 @@ def train(args):
                                      "sequence": dataset.manifest["sequence"],
                                      "time_unit": dataset.manifest.get("time_unit", "seconds"),
                                      "trainable_parameters": sum(p.numel() for p in model.parameters()),
+                                     "module_parameters": {name: sum(p.numel() for p in module.parameters())
+                                                           for name, module in model.named_children()},
+                                     "state_token_budget": config.slots*config.local_tokens,
+                                     "effect_scalars_per_step": config.slots*config.effect_dim,
                                      "frozen_codec_parameters": sum(p.numel() for p in codec.parameters()),
                                      "frozen_teacher_parameters": sum(p.numel() for p in teacher.parameters()) if teacher else 0,
                                      "assets": codec.asset_config, "checkpoint_metadata": checkpoint_metadata})
