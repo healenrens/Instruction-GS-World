@@ -2,6 +2,7 @@
 
 ## 2026-10-15 研究重规划入口
 
+- **执行交付与下一项**：研究计划第16节给出独立的GitHub同步、单卡完整测试、八卡joint/prior前台训练、显式恢复和配对评测指令，代码固定为 `4bc9ddf`，沿用百度旧目录。第17节启动公开TextOCVP归档准备，尚未认定其包含独立object/order GT；正式长训未启动，goal仍active。
 - **逐例与batch证据**：`d9bc431` 已完成40例配对统计，重建38/40例改善，但effect相对zero仅18/40且区间跨0；同源不同task-group的语言控制已执行。batch4单卡两步实测峰值57.05GiB、退出0，因此八卡默认采用4x8x8=256。详见研究计划15.5，正式八卡长训尚未启动。
 - **完整语言链路已运行**：`a74a43c` 完成4564条冻结Qwen全文cache、三模式joint恢复、真实step100 teacher下的prior训练/恢复、配对生成、history-only forecast和PTS检查，均退出0。prior仅两步，未证明语言或effect有效；近义“打乱文本”已改为不同task-group对照。证据与路径见研究计划15.4，后续仍需独立主体/顺序评价及正式训练。
 - **100步pilot结果**：`93f5ae1` 的训练和40例固定窗口评测均正常退出。Posterior RGB L1由0.3064降至0.1924，但仍不优于zero-effect的0.1918和state-copy的0.1872；不能写成effect已有效。完整prior训练、冻结Qwen文本cache、history-only forecast和配对生成评测已补代码，待实测；详见研究计划14.11与第15节。

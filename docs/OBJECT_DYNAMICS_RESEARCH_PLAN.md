@@ -469,10 +469,12 @@ V71逐源评测采用固定种子、source内部episode-uniform无放回抽样�
 - [x] 运行完整模型训练/恢复/评测链路，取得真实结果。
 - [x] 定位并修正初始化状态/后验量级异常，重新执行完整链路及逐帧trace。
 - [x] 在修正后的完整模型上完成100步优化和固定40例held对照。
-- [ ] 配置PFS独立运行环境和已匹配的视觉/成像权重。
-- [ ] 实现基础Object State、posterior、Dynamics、renderer并做真实数据端到端试验。
-- [ ] 实现对象片段effects、条件prior和独立组合评测。
-- [ ] 形成大规模阿里训练配置与前台运行交付。
+- [x] 百度旧环境与配套DINOv2/RAE资产已可执行；阿里独立环境仍待准备。
+- [x] 实现基础Object State、posterior、Dynamics、renderer并做真实数据端到端试验。
+- [x] 实现对象片段effects、条件prior和完整训练/恢复/生成链路。
+- [ ] 建立独立主体/事件顺序组合评测与正式baseline比较。
+- [x] 形成百度八卡前台训练、显式恢复和单卡评测指令，见第16节；尚未启动正式长训。
+- [ ] 完成阿里备用环境和配套权重准备。
 
 ## 14. 基础主干实施进度（2026-10-15）
 
@@ -641,3 +643,201 @@ Posterior变化加权L1从0.301292降至0.229818，但zero effect为0.219842。�
 逐例CSV/JSON保存在旧运行根 `outputs/object_event_v71_paired_d9bc431`。新语言控制在五例上完成，替换文本都能回连到同源不同task group，报告保存真实指令/替代指令及来源，不写成已验证语义反事实。结果在 `outputs/object_event_v71_language_controls_d9bc431_20261015T095529Z`。
 
 单A100、512/BF16、batch4、accum1、原模型和损失的两步训练退出0。峰值allocated显存57.05GiB；第二步4.723秒、0.847样例/秒，梯度17.72、KL0.260。第一步包含3.62秒数据等待，不能用它或第二步单独推断八卡稳态吞吐。结果在 `outputs/object_event_v71_batch4_d9bc431_20261015T095529Z`。据此将八卡默认改为每卡batch4、累积8、global batch256；没有宣称已在八卡实测。
+
+## 16. 百度执行指令
+
+- **What changed**：固定可执行代码 `4bc9ddf2ddc747d7dbbb3d33d69a99246823df4c`，将源码同步、单卡完整测试、八卡joint训练、恢复、prior训练和评测分开；每段命令独立设置路径。
+- **Why**：百度容器没有Git/curl，但旧Python能经代理读取GitHub源码归档；训练必须离线使用服务器已有资产。
+- **Impact**：保留旧源码目录与旧环境。版本源码只放在原运行根的 `runtime/object_event_world_model_v71/releases`。以下正式训练是待用户提交的实验，不表示已在八卡运行。
+
+### 16.1 同步源码，只在准备机执行
+
+这一段允许联网。它不安装依赖、不下载数据或模型，也不改共享源码checkout。服务器已经有DINOv2/RAE、RGB manifest和4564条文本cache，无需重做。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=4bc9ddf2ddc747d7dbbb3d33d69a99246823df4c
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export http_proxy=http://10.66.65.186:18000
+export https_proxy=http://10.66.65.186:18000
+export ARCHIVE="${WORK_ROOT}/tmp/object_event_v71_${SOURCE_REVISION}.tar.gz"
+mkdir -p "${WORK_ROOT}/tmp"
+if [ ! -d "${ROOT}" ]; then
+  "${PYTHON}" -c 'import os, urllib.request; urllib.request.urlretrieve("https://codeload.github.com/healenrens/Instruction-GS-World/tar.gz/" + os.environ["SOURCE_REVISION"], os.environ["ARCHIVE"])' &&
+  mkdir -p "${ROOT}" &&
+  tar -xzf "${ARCHIVE}" --strip-components=1 -C "${ROOT}"
+fi
+printf 'SOURCE_ROOT=%s\n' "${ROOT}"
+```
+
+### 16.2 单卡完整测试
+
+使用已完成的真实step100作为prior工程测试teacher，不把它称为训练达标模型。测试同时运行三种joint模式、保存恢复、语言prior和仅历史生成；约束与实际结果见15.4。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=4bc9ddf2ddc747d7dbbb3d33d69a99246823df4c
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/object_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export CUDA_VISIBLE_DEVICES=0
+export RUN_NAME="object_event_v71_test_$(date +%Y%m%d_%H%M%S)"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export LOG_ROOT="${WORK_ROOT}/logs/${RUN_NAME}"
+bash "${ROOT}/code/scripts/test_object_event_world_model_v71.sh" \
+  --text-cache "${WORK_ROOT}/metadata/object_event_text_v71" \
+  --prior-base-checkpoint "${WORK_ROOT}/outputs/object_event_v71_pilot100_93f5ae1_20261015T075006Z/recovery_00000100.pt"
+TEST_RC=$?
+printf 'TEST_RC=%s\nREPORT=%s/test_report.json\nLOG=%s/test.log\n' "${TEST_RC}" "${OUT}" "${LOG_ROOT}"
+```
+
+### 16.3 八卡joint训练，前台
+
+本轮先提交 `object_step`。另两种匹配对照仅将 `EFFECT_MODE` 分别改为 `global_step`、`object_segment`；RUN_NAME随之变化，其余配置相同，不复用输出目录。每卡4、累积8、八卡global batch256。观察目标与posterior rollout联合学习，默认每步对4个未来时点计算RGB loss，feature目标覆盖25帧；不是先跑旧V69 State再跑旧Stage 2。
+
+```bash
+set -o pipefail
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=4bc9ddf2ddc747d7dbbb3d33d69a99246823df4c
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/object_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export NNODES=1 NODE_RANK=0 NPROC_PER_NODE=8
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export BATCH_PER_GPU=4 GRAD_ACCUM=8 WORKERS_PER_RANK=2
+export ENCODER_FRAME_BATCH=4 DECODER_FRAME_BATCH=2
+export EFFECT_MODE=object_step STEPS=10000
+export RUN_NAME="object_event_v71_${EFFECT_MODE}_seed17_main"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export LOG_ROOT="${WORK_ROOT}/logs/${RUN_NAME}"
+export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
+unset RESUME INIT_FROM
+mkdir -p "${LOG_ROOT}"
+bash "${ROOT}/code/scripts/train_object_event_world_model_v71.sh" \
+  --seed 17 --precision bf16 --lr 0.0002 --warmup 500 --rollout-ramp 1000 \
+  --save-every 500 --snapshot-every 2500 --log-every 10 \
+  2>&1 | tee "${LOG_ROOT}/launcher.log"
+TRAIN_RC=${PIPESTATUS[0]}
+printf 'TRAIN_RC=%s\nOUT=%s\nLOG=%s/launcher.log\n' "${TRAIN_RC}" "${OUT}" "${LOG_ROOT}"
+```
+
+SwanLab使用服务器已有登录或任务注入的 `SWANLAB_API_KEY`，只上传训练标量。需要纯本地日志时，在运行前 `unset SWANLAB_PROJECT SWANLAB_WORKSPACE`；不在命令或仓库写入key。checkpoint为 `recovery_00000500.pt` 等，`latest.json`指向最近恢复点，`step_00002500.pt` 等编号快照保留；不生成 `latest.pt`。
+
+### 16.4 同一实验八卡恢复
+
+先把 `RUN_NAME` 设置为要恢复的已存在run。程序从checkpoint恢复原参数、optimizer、scheduler、每rank RNG和数据游标；本例仍使用相同八卡。不能用这一命令宣称跨卡数严格等价恢复。
+
+```bash
+set -o pipefail
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=4bc9ddf2ddc747d7dbbb3d33d69a99246823df4c
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/object_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export NNODES=1 NODE_RANK=0 NPROC_PER_NODE=8
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export RUN_NAME=object_event_v71_object_step_seed17_main
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export LOG_ROOT="${WORK_ROOT}/logs/${RUN_NAME}"
+export RESUME="${OUT}/latest.json"
+unset INIT_FROM
+mkdir -p "${LOG_ROOT}"
+bash "${ROOT}/code/scripts/train_object_event_world_model_v71.sh" \
+  2>&1 | tee -a "${LOG_ROOT}/launcher.log"
+TRAIN_RC=${PIPESTATUS[0]}
+printf 'TRAIN_RC=%s\n' "${TRAIN_RC}"
+```
+
+同一个入口也可恢复prior run：改为该prior的RUN_NAME即可，stage/固定teacher/text cache均从checkpoint恢复；不要重新创建teacher依赖。
+
+### 16.5 单卡配对评测
+
+例子使用joint的2500步编号快照。按实际完成快照改 `CHECKPOINT`，不以不存在的快照或最新文件名代替。每源64例，共最多320例；逐例指标保存全部，视频每源4例。历史held仍称development。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=4bc9ddf2ddc747d7dbbb3d33d69a99246823df4c
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export CUDA_VISIBLE_DEVICES=0
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+export CHECKPOINT="${WORK_ROOT}/outputs/object_event_v71_object_step_seed17_main/step_00002500.pt"
+export EVAL_OUT="${WORK_ROOT}/outputs/object_event_v71_eval_object_step_2500_$(date +%Y%m%d_%H%M%S)"
+"${PYTHON}" "${ROOT}/code/scripts/evaluate_object_event_world_model_v71.py" \
+  --checkpoint "${CHECKPOINT}" \
+  --manifest "${WORK_ROOT}/metadata/object_event_v71.json" \
+  --assets "${WORK_ROOT}/metadata/rae_assets_512.json" \
+  --partition development --items-per-source 64 --videos-per-source 4 \
+  --precision bf16 --out "${EVAL_OUT}"
+EVAL_RC=$?
+printf 'EVAL_RC=%s\nREPORT=%s/report.json\nCASES=%s/cases.jsonl\nVIDEOS=%s/videos\n' \
+  "${EVAL_RC}" "${EVAL_OUT}" "${EVAL_OUT}" "${EVAL_OUT}"
+```
+
+### 16.6 八卡语言prior训练
+
+选择joint评测后的固定编号快照作为 `BASE_CHECKPOINT`，本例填写2500步仅说明路径。不要自动跟随joint的latest，也不要将100步工程teacher用于正式语言能力结论。prior只训练历史/语言到effect的生成模块，冻结joint模型；全文Qwen cache已完成，运行不加载Qwen或下载模型。
+
+```bash
+set -o pipefail
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=4bc9ddf2ddc747d7dbbb3d33d69a99246823df4c
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/object_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export TEXT_CACHE="${WORK_ROOT}/metadata/object_event_text_v71"
+export BASE_CHECKPOINT="${WORK_ROOT}/outputs/object_event_v71_object_step_seed17_main/step_00002500.pt"
+export NNODES=1 NODE_RANK=0 NPROC_PER_NODE=8
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export BATCH_PER_GPU=4 GRAD_ACCUM=8 WORKERS_PER_RANK=2
+export ENCODER_FRAME_BATCH=4 DECODER_FRAME_BATCH=2
+export STEPS=10000 LANGUAGE_DROPOUT=0.1
+export RUN_NAME=object_event_prior_v71_object_step_teacher2500_seed17_main
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export LOG_ROOT="${WORK_ROOT}/logs/${RUN_NAME}"
+export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
+unset RESUME INIT_FROM
+mkdir -p "${LOG_ROOT}"
+bash "${ROOT}/code/scripts/train_object_event_prior_v71.sh" \
+  --seed 17 --precision bf16 --lr 0.0002 --warmup 500 \
+  --save-every 500 --snapshot-every 2500 --log-every 10 \
+  2>&1 | tee "${LOG_ROOT}/launcher.log"
+TRAIN_RC=${PIPESTATUS[0]}
+printf 'TRAIN_RC=%s\nOUT=%s\nLOG=%s/launcher.log\n' "${TRAIN_RC}" "${OUT}" "${LOG_ROOT}"
+```
+
+### 16.7 单卡语言生成评测
+
+同一teacher与renderer比较正确语言、无语言、不同task-group语言、posterior和copy；固定单样本与4样本期望分栏，best-of-4只作为oracle。具体替代指令和逐帧结果保存本地，不上传评测视频到SwanLab。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=4bc9ddf2ddc747d7dbbb3d33d69a99246823df4c
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export CUDA_VISIBLE_DEVICES=0
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+export PRIOR_CHECKPOINT="${WORK_ROOT}/outputs/object_event_prior_v71_object_step_teacher2500_seed17_main/step_00002500.pt"
+export EVAL_OUT="${WORK_ROOT}/outputs/object_event_v71_eval_prior_2500_$(date +%Y%m%d_%H%M%S)"
+"${PYTHON}" "${ROOT}/code/scripts/evaluate_object_event_world_model_v71.py" \
+  --prior-checkpoint "${PRIOR_CHECKPOINT}" \
+  --text-cache "${WORK_ROOT}/metadata/object_event_text_v71" \
+  --manifest "${WORK_ROOT}/metadata/object_event_v71.json" \
+  --assets "${WORK_ROOT}/metadata/rae_assets_512.json" \
+  --partition development --items-per-source 64 --videos-per-source 4 --samples 4 \
+  --precision bf16 --out "${EVAL_OUT}"
+EVAL_RC=$?
+printf 'EVAL_RC=%s\nREPORT=%s/report.json\nCASES=%s/cases.jsonl\nVIDEOS=%s/videos\n' \
+  "${EVAL_RC}" "${EVAL_OUT}" "${EVAL_OUT}" "${EVAL_OUT}"
+```
+
+## 17. 独立benchmark准备
+
+- **What changed**：新增作者公开TextOCVP/CLIPort视频归档的下载与实际结构清单入口 `prepare_textocvp_archive_v71.py`。先下载/读取ZIP目录及少量caption、图像，再决定adapter；默认不解压、不占GPU、不修改既有训练数据。
+- **Why**：现有multirobot数据没有独立主体/事件顺序GT，不能用模型自己的mask或训练tracker来替代这项证据。
+- **Impact**：公开archive只作为待核对的benchmark资产；21k、mask、时间信息等论文描述不直接当作已读取的文件事实。实际schema、可复用标签及最终组合协议待归档读取后记录。此次下载通过指定代理，在百度旧运行根 `data/benchmarks/textocvp_cliport` 进行；未改为新的训练分布。
