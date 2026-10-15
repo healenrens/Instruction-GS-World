@@ -852,11 +852,11 @@ printf 'EVAL_RC=%s\nREPORT=%s/report.json\nCASES=%s/cases.jsonl\nVIDEOS=%s/video
 
 ### 17.2 图像序列准备与单卡测试命令
 
-代码提交 `b07951ddaf89cbb947bc54d9fb422d338f077f7b`。先按16.1的方法将SOURCE_REVISION替换为该完整提交，在准备机从GitHub取得源码。下面只读取已下载的ZIP及既有模型，不联网、不解压整份归档。执行过的步骤可直接使用其结果；无需重复跑完整测试来刷新报告日期。
+代码提交 `33378841aab3db4f4bfc008d2b91ded1d6830906`，明确只索引RGB本体。先按16.1的方法将SOURCE_REVISION替换为该完整提交，在准备机从GitHub取得源码。下面只读取已下载的ZIP及既有模型，不联网、不解压整份归档。执行过的步骤可直接使用其结果；无需重复跑完整测试来刷新报告日期。
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=b07951ddaf89cbb947bc54d9fb422d338f077f7b
+export SOURCE_REVISION=33378841aab3db4f4bfc008d2b91ded1d6830906
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/.venv/bin/python"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
@@ -874,7 +874,7 @@ printf 'PREPARE_RC=%s\n' "${PREPARE_RC}"
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=b07951ddaf89cbb947bc54d9fb422d338f077f7b
+export SOURCE_REVISION=33378841aab3db4f4bfc008d2b91ded1d6830906
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/.venv/bin/python"
 export MANIFEST="${WORK_ROOT}/metadata/textocvp_v71_1to9.json"
