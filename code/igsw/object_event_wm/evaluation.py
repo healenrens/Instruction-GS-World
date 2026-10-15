@@ -70,7 +70,12 @@ def balanced_indices(dataset, items_per_source):
     by_source = defaultdict(list)
     for index, episodes in enumerate(dataset.episodes):
         by_source[episodes[0]["source"]].append(index)
-    return [index for source in sorted(by_source) for index in by_source[source][:items_per_source]]
+    rng = np.random.default_rng(dataset.seed)
+    selected = []
+    for source in sorted(by_source):
+        indices = by_source[source]
+        selected.extend(rng.choice(indices, size=min(items_per_source, len(indices)), replace=False).tolist())
+    return selected
 
 
 @torch.no_grad()
@@ -139,6 +144,7 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
                 if values:
                     scores[condition][key].append(float(np.mean(values)))
     report = {"task": "posterior_conditioned_reconstruction", "cases": len(records),
+              "sampling": "fixed_seed_episode_uniform_within_source", "sampling_seed": dataset.seed,
               "sources": dict(counts), "excluded": excluded,
               "conditional_prior_evaluated": False, "independent_object_semantics_evaluated": False,
               "conditions": {condition: {key: {"cases": len(values), "mean": float(np.mean(values)),

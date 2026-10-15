@@ -453,6 +453,8 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 
 旧 `language_effect_evaluation_v70.py` 的逐轨迹绝对/运动归一化误差、静止漂移及1/3/5秒分布可作为辅助。必须补充同一renderer下的observed-state重建、posterior rollout和prior生成；主体与时间事件采用独立数据真值或明确标注，不由模型mask自行定义。先实现共同输出，再选择与LPWM/TextOCVP可比的正式协议。
 
+V71逐源评测采用固定种子、source内部episode-uniform无放回抽样，不按排序截取最前面的任务。各模型使用同一manifest和seed，逐例保留实际case_id与时间窗口；较少样例的完整运行测试仅检查工程执行，不用于比较总体效果。
+
 ### 13.5 当前进度
 
 - [x] 建立active goal并读取历史数据/评测实现。
