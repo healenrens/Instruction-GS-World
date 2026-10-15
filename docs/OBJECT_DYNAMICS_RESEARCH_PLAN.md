@@ -1271,3 +1271,5 @@ printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
 - **Impact**：world最高peak allocated13.87884GiB，prior1.44398GiB；独立eval没有单独采集峰值，不沿用训练数值冒充。四例六种模型条件共24/24正确标明ownership不可用，scene不伪造对象分割；actor RGB/order仍按相同模拟器真值计算。正式CPU进程随后确认仍活着，141场景/225程序、223个oracle完成，另2条保留；不重启它。
 
 本次输出根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/cliport_scene_control_e2e_0fcca58_20261015T162702Z`。主要证据为 `test_report.json`、`global_step/resume_report.json`、`language_prior/resume_report.json`、`independent_cliport_events/report.json` 和 `independent_cliport_events/cases.jsonl`。新增组合标签统计的 `7c3612d` 只安排既有四例的CPU评分检查，不重复模型训练或GPU生成。
+
+**评分元数据CPU实测完成**：`7c3612d21f0d699a46e3e3b0822a5b3d13e80d70` 的既有四例检查退出0、status=passed；两scene的全部paired checks通过。组合分组明确为engineering，5个条件各含2个scene pair；参考类别的绝对误差分组同为engineering，各条件含4个case。unscored与unpaired列表均空，没有把工程样例标为正式seen/held。报告为 `outputs/cliport_metric_composition_7c3612d_20261015T164619Z/report.json`，model_evaluated=false。真实held/失败program的正式统计仍等待完整集合与后续评价，不能由这四例代替。
