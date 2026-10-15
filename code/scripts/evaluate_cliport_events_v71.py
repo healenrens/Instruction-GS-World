@@ -144,6 +144,7 @@ def main():
             times = desired[th:][valid]
             actors = sorted({event["actor_body_id"] for event in meta["program"]})
             case = {"case_id": sample["case_id"], "scene_seed": meta["seed"], "partition": args.partition,
+                    "combination": meta["combination"],
                     "instruction": sample["instruction"], "events": meta["events"], "program": meta["program"],
                     "oracle_status": meta["status"],
                     "physics_hz": meta["physics_hz"], "history_seconds": meta["history_seconds"],
@@ -169,6 +170,7 @@ def main():
                 other_labels = labels if reversed_instruction else alternative_truth
                 case["conditions"][name] = {
                     "reference_instruction": other_meta["instruction"] if reversed_instruction else sample["instruction"],
+                    "reference_combination": other_meta["combination"] if reversed_instruction else meta["combination"],
                     "condition_is_ambiguous": name == "no_language",
                     "rgb": score_rgb_outcomes(rgb[valid], reference_rgb, gt_anchor, reference_labels, actors,
                         meta["robot_and_tool_body_ids"], times, other_rgb, other_labels),
@@ -180,17 +182,19 @@ def main():
                                     anchor_field_labels=anchor_labels, times_seconds=desired[th:])
                 preview = torch.from_numpy(np.concatenate((actual_rgb[:th].astype(np.float32)/255, rgb))).permute(0, 3, 1, 2)
                 write_video(case_dir/f"{name}.mp4", preview, sample["times"])
-            case["conditions"]["current_image_copy"] = {"rgb": score_rgb_outcomes(
+            case["conditions"]["current_image_copy"] = {"reference_combination": meta["combination"], "rgb": score_rgb_outcomes(
                 np.broadcast_to(actual_rgb[th-1], target.shape), target, gt_anchor, labels,
                 actors, meta["robot_and_tool_body_ids"], times, alternative_rgb, alternative_truth)}
             stream.write(json.dumps(case, allow_nan=False)+"\n")
             stream.flush()
             paired_cases.append({"case_id": case["case_id"], "scene_seed": case["scene_seed"],
-                                 "instruction": case["instruction"],
+                                 "instruction": case["instruction"], "combination": case["combination"],
                                  "conditions": {name: {"rgb": result["rgb"],
+                                     "reference_combination": result["reference_combination"],
                                      "reference_instruction": result.get("reference_instruction", case["instruction"])}
                                      for name, result in case["conditions"].items()}})
             summaries.append({"case_id": case["case_id"], "scene_seed": meta["seed"],
+                              "combination": meta["combination"],
                               "conditions": {name: {key: result["rgb"][key] for key in
                                   ("full_rgb_l1", "actor_region_rgb_l1", "order_preference_margin")}
                                   for name, result in case["conditions"].items()}})

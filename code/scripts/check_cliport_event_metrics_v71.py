@@ -62,7 +62,8 @@ def main():
                 }
                 results = {}
                 for name, (predicted, predicted_labels) in controls.items():
-                    result = {"rgb": score_rgb_outcomes(predicted, rgb[th:], anchor, labels, actors,
+                    result = {"reference_combination": meta["combination"],
+                              "rgb": score_rgb_outcomes(predicted, rgb[th:], anchor, labels, actors,
                                 meta["robot_and_tool_body_ids"], times[th:], other_rgb[th:], other_truth["segmentation"][th:])}
                     if predicted_labels is not None:
                         result["objects"] = score_entities(anchor, predicted_labels, anchor, labels, meta["entities"], times[th:])
@@ -81,6 +82,7 @@ def main():
                               row["mean_visible_iou"] < 1. for row in results["identity_swap"]["objects"]["entities"] if row["body_id"] in actors and row["scored_visible_frames"]),
                           "copy_has_nonzero_actor_error": results["current_copy"]["rgb"]["actor_region_rgb_l1"] > 0}
                 row = {"case_id": entry["case_id"], "scene_seed": entry["scene_seed"],
+                       "combination": meta["combination"],
                        "alternative_case_id": alternative["case_id"], "instruction": meta["instruction"],
                        "alternative_instruction": other_meta["instruction"], "checks": checks, "conditions": results}
                 row["gt_physical_motion"] = physical_motion_context(truth["poses_xyz_xyzw"][th-1, :, :3],

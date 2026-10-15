@@ -1016,6 +1016,8 @@ printf 'GENERATE_RC=%s\nREVIEW=%s/index.html\n' "${GENERATE_RC}" "${OUT}"
 
 **实际配对汇总完成**：百度两个CPU入口均退出0，未重算模型/视频，使用 `280021f`。两场景各50个共同未来帧，无未配对场景。正确真实结果的scene平均margin为0.15500595772638917，反序为对应负数；copy和两结果RGB均值严格为0。两步模型正确语言margin仅0.0000048857927322387695，无语言为0，posterior为0.00000184670090675354；正确语言主体RGB L1为0.5475552627，copy为0.1698028974。前述单例正负偏好不再被解释成语言遵循。原始结果目录下均新增 `paired_summary_280021f.json`；identity-swap的RGB完全未变，因此仍得到oracle的RGB分数，其身份错误由独立ownership测量识别。
 
+**组合切片接入**：正式evaluator保留每个program的 `combination`，反序语言同时切换 `reference_combination`。配对汇总分别报告contains-held-order与seen-only场景；单方向的绝对actor RGB误差按实际参考指令的seen/held类别报告，并保留逐例值。这里不把某一方向的单例margin当语言收益，也不将工程样例归入正式seen/held。旧报告若缺标签明确列为unspecified；不根据case编号反推标签。标签只进入评价记录，不成为模型输入或训练监督。
+
 ### 18.7 平台范围更新
 
 - **What changed**：用户本轮明确回复skip，跳过阿里备用阶段的网络、环境和权重准备；不再查询或重试其代理访问。已完成的阿里数据和只读记录保留。
