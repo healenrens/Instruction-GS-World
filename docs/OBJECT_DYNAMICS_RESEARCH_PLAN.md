@@ -465,7 +465,8 @@ V71逐源评测采用固定种子、source内部episode-uniform无放回抽样�
 - [x] 补迁语言sidecar到阿里PFS。
 - [x] 每源两个episode完成真实RGB读取，保存时间线和文件映射。
 - [x] 运行完整模型训练/恢复/评测链路，取得真实结果。
-- [ ] 修正完整运行中发现的状态/后验量级异常，再做短程优化实验。
+- [x] 定位并修正初始化状态/后验量级异常，重新执行完整链路及逐帧trace。
+- [ ] 在修正后的完整模型上做短程优化和固定held对照。
 - [ ] 配置PFS独立运行环境和已匹配的视觉/成像权重。
 - [ ] 实现基础Object State、posterior、Dynamics、renderer并做真实数据端到端试验。
 - [ ] 实现对象片段effects、条件prior和独立组合评测。
@@ -556,3 +557,21 @@ V71逐源评测采用固定种子、source内部episode-uniform无放回抽样�
 - **What changed**：观测更新从无界自反馈残差，改为归一化状态输入、候选状态和门控凸组合；每帧memory输出再经过LayerNorm。新增首/末observed state RMS、末rollout state RMS和posterior mean最大幅度日志。
 - **Why**：原renderer对输入做LayerNorm，使重建loss看起来普通，但posterior直接读取持续增大的state残差；两条路径对数值尺度的反应不同，单看重建loss会漏掉这个问题。
 - **Impact**：不改DINO/RAE资产、不改KL权重；新模型从头执行完整测试，旧两步checkpoint只作诊断记录，不作为新结构resume起点。新增RMS字段仅用于数值健康，不用于证明物体语义或变化预测质量。
+
+### 14.10 状态更新修正版的实际结果
+
+执行提交 `93f5ae17fc9c78e13fd31276287e450b76e84162`；百度单A100、512/BF16、原17x4状态预算和KL权重0.001。2026-10-15 15:32:53 CST完整测试退出0，15:33:45两次trace也均退出0。没有安装包、重新下载权重或修改远端源码。
+
+| 模式 | Step 1/2 KL | Step 1/2 preclip gradient norm | Resume参数差异 |
+| --- | --- | --- | --- |
+| global_step | 0.2420 / 0.2491 | 10.7337 / 6.3444 | 0 |
+| object_step | 0.2560 / 0.2479 | 10.7216 / 5.2151 | 0 |
+| object_segment | 0.1416 / 0.1235 | 12.0202 / 4.2640 | 0 |
+
+三模式恢复后的样本顺序及同一步loss逐项相同。history prefix在future feature swap后差异0；codec保持冻结。history-only prior的loss为1.5362、gradient norm为63.2519，生成25个state；语言encoder仍未参与该工程测试。单样本峰值显存最高约21.89GiB，这不是更大batch的已测上限。
+
+同一真实样例的初始化41帧state RMS范围为0.999962-0.999988；训练两步后为1.000113-1.000175，state abs-max最高5.77、posterior mean abs-max最高2.11。DINO输入与此前trace相同，支持修正解决了本次复现中的自反馈放大。归一化后的RMS近1是结构带来的数值性质，不能作为对象语义或动态信息有效性的证明。
+
+结果根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/object_event_v71_e2e_93f5ae1_20261015T072730Z`。保留 `test_report.json`、三模式日志及checkpoint、`numerics/initial.json`、`numerics/trained_step2.json`、五源重建报告和40个视频。对应日志位于旧运行根下 `logs/object_event_v71_e2e_93f5ae1_20261015T072730Z`。会话27988最终退出0，测试PID13419已结束。
+
+下一项是短程真实优化与固定episode对照，之后补全条件prior训练和独立组合实验。此处完成的是完整工程链路和一个具体数值故障的修正，不是长期训练或科学效果验收。
