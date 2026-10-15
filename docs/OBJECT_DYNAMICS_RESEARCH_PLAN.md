@@ -1055,6 +1055,8 @@ done
 
 **正式生成当前状态**：已向授权SWXC对话发送048a3fc的4进程启动请求，但远控返回 `Timed out waiting for MCP response to fs/createDirectory`，随后读取同一thread暂不可达。尚无本次正式生成的session/PID/progress证据，因此不记为running或failed，也不因观察超时重复启动。恢复后先读取该对话与同一集合的实际进程状态，再决定继续观察或启动；四例d1301eb已完成的结果不受此项影响。
 
+**随后实际核对（2026-10-15 23:45 CST）**：SWXC恢复后在百度查询到对应生成进程为空、collection目录不存在，确认此前请求没有启动正式生成。新提交0fd4346随后经GitHub取得，正式数据参数和计划保持不变；已让同一授权对话直接运行已有prepare入口，不新增封装。之后远控再次暂不可达，尚未取得这次新请求的进程回执，不把“源码到达”记成“数据生成运行中”。
+
 ### 18.10 正式数据与首轮八卡命令
 
 准备机先按16.1取得 `048a3fcd95b8041577929be8a29d7381b526a529` release。下面各段可独立执行，训练不访问GitHub或下载模型；数据生成完毕后再使用其manifest。测试数据仍保留，不依据测试结果选择模型。
@@ -1164,6 +1166,8 @@ printf 'EVAL_RC=%s\nREPORT=%s/report.json\n' "$?" "${OUT}"
 - **Why**：不能用已有multirobot或四条模拟工程样例替代已规划的LanguageTable主实验，也不能把三种V71内部effect变体当全部外部baseline。
 - **Impact**：下一步先取得官方原始数据/episode身份与真实准备结果，再冻结共同窗口与评价清单；padding帧不当作真实未来，T5默认32-token截断与本项目完整指令cache的条件差异需分开报告。新增TensorFlow/TFDS、T5及LPWM依赖的独立PFS环境已向用户询问，尚未安装下载。正式主对照与non-object容量对照仍未完成，不据此标记goal完成。
 
+**已经核对的LPWM调用边界**：[官方 `DLP.sample_from_x`](https://github.com/taldatech/lpwm/blob/main/models.py) 支持直接传history RGB。部署生成必须使用 `use_all_ctx=False`、`n_pred_eq_gt=False`，明确给 `cond_steps`、`num_steps` 和文本embedding；后一个参数关闭“输入GT长度必须等于输出长度”的假设，不需要把真实未来或dummy future拼进模型输入。`use_all_ctx=True` 会从完整视频提取context，只用于标明读未来的posterior reconstruction。构造可复用[官方配置loader](https://github.com/taldatech/lpwm/blob/main/generate_lpwm_video_prediction.py)的无checkpoint路径，再直接 `load_state_dict` 加载指定快照；不沿用其捕获所有加载错误后继续生成的分支。尚未据此声称baseline已运行。
+
 ## 20. 相同token预算的非对象对照
 
 - **What changed**：新增 `scene_state.py` 与 `code/configs/object_event_scene_control_v71.json`。保留相同DINOv2/RAE、68个384维state tokens、17个64维global effect tokens、Dynamics层数、目标和采样；每个scene token独立读取全图，取消对象之间的竞争分配，memory在68个tokens之间全局attention。renderer将所有tokens汇成一个场景field，不再为每个候选对象独立成像和mask合成。使用 `global_step` effect路径，历史和effect cross-attention都是全局的。
@@ -1243,3 +1247,7 @@ printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
 ```
 
 恢复时保留完整环境，替换 `unset RESUME INIT_FROM` 为 `unset INIT_FROM`，增加 `export RESUME="${OUT}/latest.json"`；实际scene配置从checkpoint恢复。正式评价仍使用18.10的同一evaluator和development清单，只将prior-checkpoint与OUT切换为对应scene run，不为scene单独挑case或改变actor评分区域。
+
+### 20.3 当前执行事实
+
+`0fd4346` 已在百度release中取得，实际文本cache路径从旧prior记录读出为 `metadata/cliport_event_text_v71_c682ec9`。单卡完整测试及四例独立评价已交由同一SWXC对话执行，但截至本轮尚无新训练进程或test_report回执，远控读取暂不可达。模型/模块参数、恢复数值和运行显存仍需实际结果，不以代码差值或旧object-layout测试替代新scene对照的运行证据。正式八卡命令已交付，GPU长训尚未启动。

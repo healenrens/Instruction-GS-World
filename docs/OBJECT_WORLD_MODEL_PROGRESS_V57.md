@@ -1,5 +1,11 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
+## 2026-10-16 V71继续实施
+
+- **What changed**：scene-layout非对象对照已提交`0fd4346`，完整单卡测试、八卡joint/prior与恢复命令已写入研究计划第20节并推送。源码已由SWXC通过GitHub拉到百度，复用已存在的四例指令cache。
+- **Why**：需要分别识别对象状态组织、effect绑定、更新时间三种机制的作用；不能把内部三种effect消融当全部对照。
+- **Impact**：此前正式数据请求已由服务器确认未启动；新请求与scene测试尚待进程回执，远控当前不可达，不重复启动。上一轮通过的四例CPU生成/续跑与评分仍有效，但不代替新模型实测。外部LPWM/LanguageTable准备仍等待已提出的独立依赖授权，阿里继续skip。
+
 ## 2026-10-15 研究重规划入口
 
 - **非对象对照实现**：新增scene-layout控制，保持68个state tokens与1088个effect标量、同一视觉资产/Dynamics/loss，移除对象竞争、局部memory分组和逐对象field合成；global effect读取全局状态。与object/global对比状态组织，再用原三模式分离effect绑定和持续时间。它不输出对象mask，不能伪造ownership评分。代码及完整测试入口已适配，尚待单卡实测，见研究计划第20节。
