@@ -167,6 +167,8 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
                     outputs[name] = forecast["rgb"][0]
                     del forecast
             case = {"case_id": sample["case_id"], "source": sample["source"],
+                    "group": sample["group"], "camera": sample["camera"],
+                    "native_hw": sample["native_hw"].tolist(), "language_provenance": sample["language_provenance"],
                     "episode_index": sample["episode_index"], "partition": sample["partition"],
                     "frame_indices": sample["frame_indices"].tolist(), "times": sample["times"].tolist(),
                     "instruction": sample["instruction"], "history_frames": th,

@@ -206,6 +206,7 @@ class ObjectEventVideoDataset(Dataset):
             "history_frames": th, "frame_indices": indices, "time_source": basis,
             "instruction": instruction, "language_provenance": provenance, "window_id": window_id,
             "case_id": entry["case_id"], "source": entry["source"],
+            "group": entry["group"],
             "camera": case["camera"], "media_path": case["record"]["path"],
             "adapter": case["record"]["adapter"],
             "frame_offset": case["record"].get("frame_offset", 0), "fps": case["record"]["fps"],

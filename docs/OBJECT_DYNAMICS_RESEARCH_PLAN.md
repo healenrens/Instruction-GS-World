@@ -455,6 +455,8 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 
 V71逐源评测采用固定种子、source内部episode-uniform无放回抽样，不按排序截取最前面的任务。各模型使用同一manifest和seed，逐例保留实际case_id与时间窗口；较少样例的完整运行测试仅检查工程执行，不用于比较总体效果。
 
+`compare_object_event_evaluations_v71.py`仅配对case、完整帧索引、实际时间与输出尺寸相同的记录，先导出逐例CSV，再按episode汇总和source内bootstrap。报告绝对误差、逐例gain、分来源分位数与未配对情况；末帧缺失不拿更早帧替代。development上的区间描述这批配对样例，不替代独立test或对象语义评价。
+
 ### 13.5 当前进度
 
 - [x] 建立active goal并读取历史数据/评测实现。
