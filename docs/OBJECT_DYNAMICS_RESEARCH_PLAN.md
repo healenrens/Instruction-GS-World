@@ -405,6 +405,8 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 
 ### 13.1 运行位置
 
+**当前平台优先级（用户2026-10-15更新）**：百度8732优先执行模型测试和后续实验，阿里仅准备备用，不因阿里排队等待测试。两端运行同一GitHub提交，数据与环境不落Mac；百度优先复用已有环境及portable数据，阿里继续使用独立PFS环境。下述先前的阿里盘点和数据准备结果仍保留。
+
 通过 SWXC 的「等待其他机器召唤」对话实际访问：thread `01a13dca-00cb-7c80-82ac-e61d655f9585`，主线程路由 host 为 `remote-control:env_e_6a2b6ece3898832eb9572cdf504d14cd`。该对话中的 `local` 指 SWXC 自身，不是本主线程的 Mac。
 
 - 阿里：`ssh -p 22 root@10.67.16.10`，hostname `dsw-533922-6c5d8b7884-x7fnz`；1张空闲 H20，97871 MiB 显存；系统 Python3.12.3、torch2.7.0+cu126、CUDA可用。
@@ -519,3 +521,7 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 命令为 `inspect_object_event_data_v71.py --manifest /mnt/pfs/xuhaoming/wm-align/metadata/object_event_v71.json --out /mnt/pfs/xuhaoming/wm-align/outputs/v71_rgb_review_5b8cd9b --items-per-source 2`。实际退出0，五源各2条，共10条成功、0失败/排除。共410帧的frame_valid均为true；每条为16历史+25未来，相对时间-3至+5秒，约0.2秒间隔。前四源使用实际video PTS；RoboTwin使用RGB cache帧号/fps。Bridge原生5FPS，不伪称其被恢复为30FPS。
 
 预览入口为 `/mnt/pfs/xuhaoming/wm-align/outputs/v71_rgb_review_5b8cd9b/index.html`，每例保留 `input_sequence.mp4`、`timeline.jpg`、`source.json`；日志为 `logs/v71_rgb_review_5b8cd9b.log`。RoboMIND这次两个样例均为front，没有由这两个样例推断全部top相机的画面语义。结果证明所选真实窗口可读和时间映射可检查，不代表全部数据质量或模型能力。
+
+### 14.7 环境准备入口
+
+`setup_object_event_env_v71.sh` 仅用于联网准备：在指定WORK_ROOT内通过uv创建独立环境，安装torch2.7.0/torchvision0.22.0及批准的软件包，取得官方RAE固定版本和512版配套DINO/decoder/statistics。uv、临时文件、HF/Torch缓存、Python环境和版本报告全部位于PFS。不修改系统Python或shell配置，不在训练脚本中调用下载。已有可用环境的平台直接运行资产准备和模型测试，无需重复安装PyTorch。
