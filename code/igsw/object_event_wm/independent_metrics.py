@@ -66,11 +66,12 @@ def score_entities(predicted_anchor, predicted_future, truth_anchor, truth_futur
             g0, p0 = _center(source_gt, body), _center(source_pred, slot)
             visible = g_center is not None
             current = {"frame": frame, "seconds": float(time), "gt_visible": visible,
-                       "prediction_missing": p_center is None, "gt_centroid_xy": g_center.tolist() if visible else None,
+                       "prediction_missing": p_center is None if body in seen else None,
+                       "gt_centroid_xy": g_center.tolist() if visible else None,
                        "predicted_centroid_xy": p_center.tolist() if p_center is not None else None,
                        "iou": None, "centroid_error_px": None, "relative_centroid_error_px": None,
                        "gt_displacement_px": None, "predicted_displacement_px": None}
-            if visible:
+            if visible and body in seen:
                 matched = pred == slot if slot is not None else np.zeros_like(gt, dtype=bool)
                 actual = gt == body
                 current["iou"] = float(np.count_nonzero(matched & actual)/np.count_nonzero(matched | actual))
@@ -87,11 +88,12 @@ def score_entities(predicted_anchor, predicted_future, truth_anchor, truth_futur
                         current["relative_centroid_error_px"] = diagonal
             output[body]["frames"].append(current)
     for row in output.values():
-        frames = [f for f in row["frames"] if f["gt_visible"]]
+        frames = [f for f in row["frames"] if f["iou"] is not None]
         relative = [f for f in frames if f["relative_centroid_error_px"] is not None]
         amplitude = _rms([f["gt_displacement_px"] for f in relative])
         error = _rms([f["relative_centroid_error_px"] for f in relative])
-        row["visible_frames"] = len(frames)
+        row["visible_frames"] = sum(f["gt_visible"] for f in row["frames"])
+        row["scored_visible_frames"] = len(frames)
         row["missing_prediction_frames"] = sum(f["prediction_missing"] for f in frames)
         row["mean_visible_iou"] = float(np.mean([f["iou"] for f in frames])) if frames else None
         row["centroid_rmse_px"] = _rms([f["centroid_error_px"] for f in frames])
@@ -100,6 +102,7 @@ def score_entities(predicted_anchor, predicted_future, truth_anchor, truth_futur
         row["motion_normalized_relative_centroid_rmse"] = error/amplitude if amplitude is not None and amplitude >= 1. else None
         row["near_static_visible_centroid_drift_rms_px"] = _rms([f["predicted_displacement_px"] for f in relative]) if amplitude is not None and amplitude < 1. else None
     return {"assignment_uses": "last_observed_frame_only; no future rematching",
+            "newly_visible_entities": "reported but not identity-scored without an observed anchor match",
             "trajectory_quantity": "visible_silhouette_centroid; not projected 3D body center",
             "missing_prediction_penalty_px": diagonal, "ratio_resolution_floor_px": 1.,
             "entities": list(output.values())}

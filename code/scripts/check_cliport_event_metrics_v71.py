@@ -71,13 +71,13 @@ def main():
                           "both_requested_programs_realized": meta["status"] == other_meta["status"] == "completed",
                           "paired_history_pixels_identical": bool(np.array_equal(rgb[:th], other_rgb[:th])),
                           "oracle_rgb_error_zero": oracle["rgb"]["full_rgb_l1"] == 0,
-                          "oracle_visible_instance_iou_one": all(row["mean_visible_iou"] == 1. for row in oracle["objects"]["entities"] if row["visible_frames"]),
-                          "oracle_centroid_error_zero": all(row["centroid_rmse_px"] == 0. for row in oracle["objects"]["entities"] if row["visible_frames"]),
+                          "oracle_visible_instance_iou_one": all(row["mean_visible_iou"] == 1. for row in oracle["objects"]["entities"] if row["scored_visible_frames"]),
+                          "oracle_centroid_error_zero": all(row["centroid_rmse_px"] == 0. for row in oracle["objects"]["entities"] if row["scored_visible_frames"]),
                           "correct_outcome_preferred": oracle["rgb"]["order_preference_margin"] > 0,
                           "opposite_outcome_rejected": results["opposite_order"]["rgb"]["order_preference_margin"] < 0,
                           "outcome_mean_has_no_order_preference": abs(results["two_outcome_rgb_mean"]["rgb"]["order_preference_margin"]) < 1e-6,
                           "identity_swap_changes_tracking_not_rgb": results["identity_swap"]["rgb"]["full_rgb_l1"] == 0 and any(
-                              row["mean_visible_iou"] < 1. for row in results["identity_swap"]["objects"]["entities"] if row["body_id"] in actors),
+                              row["mean_visible_iou"] < 1. for row in results["identity_swap"]["objects"]["entities"] if row["body_id"] in actors and row["scored_visible_frames"]),
                           "copy_has_nonzero_actor_error": results["current_copy"]["rgb"]["actor_region_rgb_l1"] > 0}
                 row = {"case_id": entry["case_id"], "scene_seed": entry["scene_seed"],
                        "alternative_case_id": alternative["case_id"], "instruction": meta["instruction"],
