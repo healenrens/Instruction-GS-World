@@ -1498,11 +1498,13 @@ LPWM完成自身测试和训练后，先用 `export_lpwm_cliport_predictions_v71
 
 这些差异在模型之外就存在。因此只统一评分分辨率仍不足以将提升归因于object机制。新加 `object_event_view128_v71.json` 和 `object_event_scene_view128_v71.json`，明确把V71观察输入与RGB训练目标都先变为同一128全视野图像；预测也以128输出。DINO内部仍按448计算、RAE仍为原512 decoder，其输出经过固定、不重叠的area平均到128，未新增或声称有128原生RAE权重。它匹配信息输入/成像输出的尺寸，不匹配预训练资产或内部计算成本。
 
-默认view_size=0保留原512主版本，旧checkpoint默认行为不变。匹配128配置贯穿joint、冻结teacher标签、prior、history-only forecast和所有decode控制，不仅仅在evaluator最后缩图。`aab8913`完整单卡链路已退出0：实际input/target/prediction均为128x128，内部encoder/decoder仍为448/512。world和prior第1步及最终恢复参数差均0，两项因果差均0，梯度有限；world最高allocated为30.94620GiB、prior为1.28516GiB。四例独立评测与共同评分仍在执行，不能用上述两步测试宣布模型质量。
+默认view_size=0保留原512主版本，旧checkpoint默认行为不变。匹配128配置贯穿joint、冻结teacher标签、prior、history-only forecast和所有decode控制，不仅仅在evaluator最后缩图。`aab8913`完整单卡链路已退出0：实际input/target/prediction均为128x128，内部encoder/decoder仍为448/512。world和prior第1步及最终恢复参数差均0，两项因果差均0，梯度有限；world最高allocated为30.94620GiB、prior为1.28516GiB。后续四例独立评测与共同评分均退出0，共同评分覆盖四例、每例七条件，unscored为空。
 
 CPU证据根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/cliport_common_score_6a120b9_20261015T193640Z`。包含 `calibration/report.json`、`common_calibration/report.json`、`common_object/report.json`、`common_scene/report.json` 和 `native_score_difference.json`；原预测与原报告未修改，没有重跑GPU。
 
 新单卡测试根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/cliport_view128_e2e_aab8913_20261015T200205Z`，完整过程日志位于运行根 `logs/cliport_view128_e2e_aab8913_20261015T200205Z/test.log`。另一个CPU比较入口已确认旧object与scene的四例全部配对、协议差异和排除清单均为空；这些是两步且effect模式不同的工程模型，不用其误差差值证明object结构优劣。
+
+**view128四例实际结果**：逐例预测/分数在 `independent_cliport_events/`，共同评分在 `common_view/`。正确语言的共同RGB L1为0.34515754、SSIM为0.50522388，native actor L1为0.45846309；无语言actor L1为0.45878868，当前图像复制为0.16980290。正确语言paired margin仅7.98e-7，无语言和copy均为0；posterior actor L1为0.47817518，zero effect为0.47423290。这只证明完整测量链路可执行，两步模型没有展示有效运动还原或顺序遵循，不据此宣称128优于512或对象结构优于scene控制。后续使用正式训练及同输入/预算的对照判断机制。
 
 ### 22.5 匹配128实验的独立命令
 
