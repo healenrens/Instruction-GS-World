@@ -464,7 +464,8 @@ V71逐源评测采用固定种子、source内部episode-uniform无放回抽样�
 - [x] 在阿里PFS完整展开数据并取得真实manifest准备结果。
 - [x] 补迁语言sidecar到阿里PFS。
 - [x] 每源两个episode完成真实RGB读取，保存时间线和文件映射。
-- [ ] 运行完整模型训练/恢复/评测链路。
+- [x] 运行完整模型训练/恢复/评测链路，取得真实结果。
+- [ ] 修正完整运行中发现的状态/后验量级异常，再做短程优化实验。
 - [ ] 配置PFS独立运行环境和已匹配的视觉/成像权重。
 - [ ] 实现基础Object State、posterior、Dynamics、renderer并做真实数据端到端试验。
 - [ ] 实现对象片段effects、条件prior和独立组合评测。
@@ -535,3 +536,15 @@ V71逐源评测采用固定种子、source内部episode-uniform无放回抽样�
 测试入口 `test_object_event_world_model_v71.sh` 与训练入口默认复用百度旧运行根；阿里通过显式WORK_ROOT切换到其已有PFS根。测试默认单卡、前台执行，日志落 `logs/<run>/test.log`；训练默认八卡、前台执行。两个运行入口均不访问GitHub或下载模型。
 
 百度8732现有环境实测为Python3.11.13、torch2.8.0+cu126、torchvision0.23.0、Transformers5.10.2、PyAV17.0.1、SwanLab0.10.1；当前完整测试不调用未安装的LPIPS。用户确认继续使用DINOv2-B与配套RAE，不切换已有DINOv3。百度下载使用 `http_proxy=https_proxy=http://10.66.65.186:18000`。容器未安装Git，但代理访问GitHub/HF已成功；源码可从GitHub固定提交归档取得并放在旧runtime的版本目录，仍不允许从Mac直接传源码。资产清单通过显式 `--rae-revision` 记录所用官方源码版本，不依赖运行机器安装Git。
+
+### 14.8 百度首次完整模型执行
+
+2026-10-15 15:04:31-15:09:50 CST，提交 `a5a69301e5feaf4f0d9ced2ddcb2c7f23373c5de` 在百度单卡A100 80GB上完成512/BF16完整入口，退出0。源码/官方RAE归档通过旧Python标准库经指定代理下载；旧环境没有安装或升级包。资产和metadata准备均退出0。
+
+三种effect模式都完成连续2步与1步保存后恢复到2步的对照，参数最大差异均为0，样本顺序相同；future feature swap后的history prefix差异0。history-only prior完成一次更新并生成25个state，effect形状 `[1,25,17,64]`。五源各一例产出八种条件的MP4。语言encoder及条件prior的生成质量没有在这次测试中评估。
+
+**执行通过不代表优化正常**：global/object-step的初始effect KL约6045万、preclip gradient norm约2.91e14；object-segment的初始KL约1145万、gradient约1.24e11。Prior loss约1.866e11。与此同时观测feature MSE约0.907，观测RGB L1约0.090，说明只看重建标量和有限值断言会漏掉内部数值问题。下一项是逐帧记录state及posterior幅度，定位异常后改计算结构，不以降低KL权重或只增大clip阈值掩盖问题。
+
+这次五例、两步模型的codec-reference RGB L1/PSNR/SSIM为0.0528/22.25/0.733；observed-state为0.2027/12.60/0.581；posterior为0.2110/12.35/0.569，zero-effect几乎相同。这仅是初始化附近的工程输出，不构成表示或effect效果结论；样例也采用当时的首项抽取，而非后续固定种子抽样。
+
+实际结果根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/object_event_v71_e2e_a5a6930_20261015T070431Z`。其中 `test_report.json`、三种模式的 `uninterrupted/train.jsonl`/`recovered/train.jsonl`、`reconstruction/report.json`/`cases.jsonl`和视频均落盘。日志在同一旧运行根的 `logs/object_event_v71_e2e_a5a6930_20261015T070431Z`。原测试PID1238已正常结束，没有重启。
