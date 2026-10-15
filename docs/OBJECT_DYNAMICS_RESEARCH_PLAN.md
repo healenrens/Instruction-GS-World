@@ -1263,3 +1263,11 @@ printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
 - **Impact**：新增训练 `--deterministic`，在CUDA初始化前明确设置cuBLAS workspace、确定性算法和cuDNN选项，跟随args进入checkpoint；默认高吞吐训练不变。完整数值恢复测试默认使用该设置，保留原1e-5阈值，并先报告恢复前第1步的差异。每段测试在断言前写 `resume_report.json`，失败也保留实际数值，不吞异常、不改loss。依据为[PyTorch2.8重现性说明](https://docs.pytorch.org/docs/2.8/notes/randomness.html)及[SDPA实现说明](https://docs.pytorch.org/docs/2.8/generated/torch.nn.functional.scaled_dot_product_attention.html)；尚未把该设置写成已经修复。高吞吐模式完整状态恢复与逐位数值等价分开描述。
 
 正式CPU集合已实际启动，session32782、generator PID440957，沿用0fd4346和四进程原计划。最近读取为100/1300场景、160/2200程序，其中159个oracle完成；未完成样本保留，未重复启动。进度文件为 `data/benchmarks/cliport_ordered_v71/progress.json`，日志 `logs/cliport_ordered_v71_data/20261015T155452Z.log`。这是运行中快照，不是数据完成报告。
+
+### 20.5 确定性完整链路实测完成
+
+- **What changed**：`0fcca583f4b475fae6cc1f05ff8e65b20f4eea7b` 在百度单A100完成scene完整测试与四例独立评价，两个入口退出0。world与语言prior在第1步和最终恢复后的参数差异均0，sample顺序相同、梯度有限；原阈值1e-5没有放宽。future-feature swap前缀差异与later-state swap首次预测差异均0，history-only forecast记录future_rgb_read=false、生成50个states。
+- **Why**：同一数据/RNG不能自动保证CUDA运算逐次一致。此次明确计算设置后，恢复前的独立启动与恢复后的路径均对齐，解决了该完整测试中混入的数值歧义；这不等于已定位某一个具体kernel，也不把两步优化视为方法收益。
+- **Impact**：world最高peak allocated13.87884GiB，prior1.44398GiB；独立eval没有单独采集峰值，不沿用训练数值冒充。四例六种模型条件共24/24正确标明ownership不可用，scene不伪造对象分割；actor RGB/order仍按相同模拟器真值计算。正式CPU进程随后确认仍活着，141场景/225程序、223个oracle完成，另2条保留；不重启它。
+
+本次输出根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/cliport_scene_control_e2e_0fcca58_20261015T162702Z`。主要证据为 `test_report.json`、`global_step/resume_report.json`、`language_prior/resume_report.json`、`independent_cliport_events/report.json` 和 `independent_cliport_events/cases.jsonl`。新增组合标签统计的 `7c3612d` 只安排既有四例的CPU评分检查，不重复模型训练或GPU生成。
