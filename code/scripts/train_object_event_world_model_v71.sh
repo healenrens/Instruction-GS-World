@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WORK_ROOT="${WORK_ROOT:-/mnt/pfs/xuhaoming/wm-align}"
+WORK_ROOT="${WORK_ROOT:-${RUNTIME_ROOT:-/mnt/pfs/public/xuhaoming/instruct_gs_world}}"
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON="${PYTHON:-${WORK_ROOT}/.venv/bin/python}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
@@ -13,6 +13,7 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
 export HF_HOME="${WORK_ROOT}/cache/huggingface" TORCH_HOME="${WORK_ROOT}/cache/torch"
 export XDG_CACHE_HOME="${WORK_ROOT}/cache" TMPDIR="${WORK_ROOT}/tmp"
 export PYTHONPYCACHEPREFIX="${WORK_ROOT}/cache/pycache"
+mkdir -p "${TMPDIR}" "${WORK_ROOT}/logs"
 
 launch=(--nproc_per_node "${NPROC_PER_NODE}")
 if [ "${NNODES}" -eq 1 ]; then

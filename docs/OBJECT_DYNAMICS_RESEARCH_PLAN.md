@@ -407,6 +407,10 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 
 **当前平台优先级（用户2026-10-15更新）**：百度8732优先执行模型测试和后续实验，阿里仅准备备用，不因阿里排队等待测试。两端运行同一GitHub提交，数据与环境不落Mac；百度优先复用已有环境及portable数据，阿里继续使用独立PFS环境。下述先前的阿里盘点和数据准备结果仍保留。
 
+**百度统一目录**：源码仓库继续为 `/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source`，运行根继续为 `/mnt/pfs/public/xuhaoming/instruct_gs_world`，Python优先用该根下的 `.venv/bin/python`。V71发布代码放现有运行根的 `runtime/object_event_world_model_v71/releases/<revision>`，日志/结果仍放 `logs`/`outputs`。取消新增 `/mnt/pfs/public/xuhaoming/wm-align` 根目录的提议，不移动、复制或删除旧实验数据。
+
+**Active goal的执行约束**：完整目标仍覆盖可解码状态、对象绑定时序effects、共同Dynamics、条件生成、独立评测和运行交付。当前工具中的原始goal描述仍写有“阿里优先”，平台顺序以本节用户最新指令为准；已有goal保持active，不建立重复goal，不把准备完成当作研究完成。当前待完成的是配套资产、真实模型训练/恢复/评测、完整条件prior及正式实验交付。
+
 通过 SWXC 的「等待其他机器召唤」对话实际访问：thread `01a13dca-00cb-7c80-82ac-e61d655f9585`，主线程路由 host 为 `remote-control:env_e_6a2b6ece3898832eb9572cdf504d14cd`。该对话中的 `local` 指 SWXC 自身，不是本主线程的 Mac。
 
 - 阿里：`ssh -p 22 root@10.67.16.10`，hostname `dsw-533922-6c5d8b7884-x7fnz`；1张空闲 H20，97871 MiB 显存；系统 Python3.12.3、torch2.7.0+cu126、CUDA可用。
@@ -525,3 +529,5 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 ### 14.7 环境准备入口
 
 `setup_object_event_env_v71.sh` 仅用于联网准备：在指定WORK_ROOT内通过uv创建独立环境，安装torch2.7.0/torchvision0.22.0及批准的软件包，取得官方RAE固定版本和512版配套DINO/decoder/statistics。uv、临时文件、HF/Torch缓存、Python环境和版本报告全部位于PFS。不修改系统Python或shell配置，不在训练脚本中调用下载。已有可用环境的平台直接运行资产准备和模型测试，无需重复安装PyTorch。
+
+测试入口 `test_object_event_world_model_v71.sh` 与训练入口默认复用百度旧运行根；阿里通过显式WORK_ROOT切换到其已有PFS根。测试默认单卡、前台执行，日志落 `logs/<run>/test.log`；训练默认八卡、前台执行。两个运行入口均不访问GitHub或下载模型。
