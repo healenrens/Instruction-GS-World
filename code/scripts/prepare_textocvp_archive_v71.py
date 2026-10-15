@@ -6,7 +6,7 @@ from collections import Counter, defaultdict
 import json
 from pathlib import Path, PurePosixPath
 import time
-from urllib.request import urlopen
+from urllib.request import urlretrieve
 from zipfile import ZipFile
 
 from PIL import Image
@@ -24,18 +24,21 @@ def main():
     root = Path(args.out)
     root.mkdir(parents=True, exist_ok=True)
     archive_path = root / "PutInBowl.zip"
+    input_path = archive_path
     if not archive_path.is_file():
         partial = root / "PutInBowl.zip.partial"
-        received, last_print = 0, time.monotonic()
-        with urlopen(args.url, timeout=120) as source, partial.open("wb") as destination:
-            while chunk := source.read(8*1024*1024):
-                destination.write(chunk)
-                received += len(chunk)
-                if time.monotonic()-last_print >= 15:
-                    print(json.dumps({"event": "benchmark_archive_download", "bytes": received}), flush=True)
-                    last_print = time.monotonic()
-        partial.replace(archive_path)
-    with ZipFile(archive_path) as archive:
+        last_print = time.monotonic()
+
+        def progress(blocks, block_size, total):
+            nonlocal last_print
+            if time.monotonic()-last_print >= 15:
+                received = min(blocks*block_size, total) if total > 0 else blocks*block_size
+                print(json.dumps({"event": "benchmark_archive_download", "bytes": received, "total": total}), flush=True)
+                last_print = time.monotonic()
+
+        urlretrieve(args.url, partial, reporthook=progress)
+        input_path = partial
+    with ZipFile(input_path) as archive:
         files = [entry for entry in archive.infolist() if not entry.is_dir()]
         by_episode = defaultdict(list)
         for entry in files:
@@ -68,14 +71,17 @@ def main():
             word in PurePosixPath(entry.filename).name.lower() or word in PurePosixPath(entry.filename).parent.name.lower()
             for word in ("mask", "segm", "pose", "depth", "camera", "metadata", "timestamp", "fps"))]
         report = {"source_url": args.url, "archive": str(archive_path.resolve()),
-                  "archive_bytes": archive_path.stat().st_size, "files": len(files),
+                  "archive_bytes": input_path.stat().st_size, "files": len(files),
                   "uncompressed_bytes": sum(entry.file_size for entry in files),
                   "episodes": len(by_episode), "split_counts": dict(splits),
                   "extensions": dict(Counter(PurePosixPath(entry.filename).suffix for entry in files)),
                   "sample_episodes": sample_episodes, "possible_truth_or_time_files": len(evidence_files),
                   "possible_truth_or_time_examples": evidence_files[:40], "extracted": args.extract,
                   "truth_semantics_verified": False, "physical_fps_assumed": False}
-        if args.extract:
+    if input_path != archive_path:
+        input_path.replace(archive_path)
+    if args.extract:
+        with ZipFile(archive_path) as archive:
             archive.extractall(root / "extracted")
     (root / "archive_inventory.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print(json.dumps(report, ensure_ascii=False), flush=True)
