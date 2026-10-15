@@ -13,6 +13,8 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--seeds", default="17,18")
     parser.add_argument("--history-seconds", type=float, default=3.)
+    parser.add_argument("--future-seconds", type=float, default=10.)
+    parser.add_argument("--plan", default="", help="Scene-disjoint program plan; overrides --seeds.")
     parser.add_argument("--tail-seconds", type=float, default=1.)
     parser.add_argument("--source-revision", default="")
     args = parser.parse_args()
@@ -23,7 +25,8 @@ def main():
     from igsw.object_event_wm.cliport_sequence import generate
     result = generate(repository/"cliport/environments/assets", args.out,
                       [int(seed) for seed in args.seeds.split(",")],
-                      args.history_seconds, args.tail_seconds, args.source_revision)
+                      args.history_seconds, args.tail_seconds, args.source_revision,
+                      args.future_seconds, args.plan)
     print(json.dumps(result), flush=True)
 
 

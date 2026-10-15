@@ -51,6 +51,8 @@ def main():
     parser.add_argument("--assets", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--modes", default="global_step,object_step,object_segment")
+    parser.add_argument("--train-partition", default="train")
+    parser.add_argument("--evaluation-partition", default="development")
     parser.add_argument("--precision", default="bf16", choices=("bf16", "fp32"))
     parser.add_argument("--source-revision", default="")
     parser.add_argument("--text-cache", default="", help="Include the real language prior and history-only CLI path.")
@@ -62,6 +64,7 @@ def main():
     reports = {}
     for mode in args.modes.split(","):
         common = [sys.executable, str(train_script), "--manifest", args.manifest, "--assets", args.assets,
+                  "--partition", args.train_partition,
                   "--steps", "2", "--batch", "1", "--accum", "1", "--workers", "0",
                   "--log-every", "1", "--save-every", "1", "--snapshot-every", "0",
                   "--rollout-ramp", "1", "--warmup", "1", "--effect-mode", mode,
@@ -72,7 +75,7 @@ def main():
     model = ObjectEventWorldModel(ModelConfig(**saved["model_config"])).cuda().eval()
     model.load_state_dict(saved["model"])
     codec = FrozenVisualCodec(args.assets).cuda().eval()
-    data = build_video_dataset(args.manifest, partition="development")
+    data = build_video_dataset(args.manifest, partition=args.evaluation_partition)
     sample = data[0]
     batch = device_batch(collate_object_event_video([sample]), torch.device("cuda"))
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.precision == "bf16"):
@@ -138,6 +141,7 @@ def main():
               "scope": "engineering end-to-end execution; not a representation-quality result"}
     if args.text_cache:
         common = [sys.executable, str(train_script), "--manifest", args.manifest, "--assets", args.assets,
+                  "--partition", args.train_partition,
                   "--steps", "2", "--batch", "1", "--accum", "1", "--workers", "0",
                   "--log-every", "1", "--save-every", "1", "--snapshot-every", "0", "--warmup", "1",
                   "--stage", "prior", "--base-checkpoint", args.prior_base_checkpoint or str(out/selected/"recovered/latest.json"),
@@ -146,7 +150,7 @@ def main():
         report["language_prior_training"] = exercise_resume(common, out/"language_prior")
         conditional_model, conditional_prior, _ = load_prior_model(out/"language_prior/recovered/latest.json", torch.device("cuda"))
         text_store = TextFeatureStore(args.text_cache)
-        conditional_data = build_video_dataset(args.manifest, partition="development", sampling="language_windows")
+        conditional_data = build_video_dataset(args.manifest, partition=args.evaluation_partition, sampling="language_windows")
         evaluated = evaluate(conditional_model, codec, conditional_data, out/"conditional_generation",
                              items_per_source=1, precision=args.precision, videos_per_source=1,
                              prior=conditional_prior, text_store=text_store, samples=2)
@@ -157,6 +161,8 @@ def main():
                         str(out/"conditional_generation/videos"/first_case["case_id"]/"history_request.json"),
                         "--instruction", first_case["instruction"], "--text-model", text_store.metadata["model"],
                         "--future-frames", str(conditional_data.config.future_frames),
+                        "--future-seconds", str(conditional_data.config.future_seconds if
+                            conditional_data.manifest.get("time_unit", "seconds") == "seconds" else conditional_data.config.future_frames),
                         "--precision", args.precision,
                         "--out", str(out/"history_only_forecast")], check=True)
         report["language_prior_training"].update(generation_cases=evaluated["cases"],

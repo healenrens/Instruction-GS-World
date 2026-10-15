@@ -101,6 +101,7 @@ def read_checkpoint(path):
 def parse_args(default_stage="joint"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
+    parser.add_argument("--partition", default="train")
     parser.add_argument("--assets", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--model-config", default="")
@@ -183,7 +184,7 @@ def train(args):
         scheduler.load_state_dict(checkpoint["scheduler"])
         step, cursor = checkpoint["step"], checkpoint["cursor"]
         restore_rng(checkpoint["rng"][rank])
-    dataset = build_video_dataset(args.manifest, seed=args.seed,
+    dataset = build_video_dataset(args.manifest, partition=args.partition, seed=args.seed,
                                       sampling="language_windows" if args.stage == "prior" else None,
                                       text_cache=args.text_cache if args.stage == "prior" else "")
     sampler = EpisodeBatchSampler(len(dataset), args.batch, rank, world, args.seed, cursor)

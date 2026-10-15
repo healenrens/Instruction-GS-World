@@ -44,6 +44,9 @@ def build_video_dataset(manifest, **kwargs):
     if contract == "object_event_image_sequence_v1":
         from .image_sequences import ImageSequenceDataset
         return ImageSequenceDataset(manifest, **kwargs)
+    if contract == "object_event_sim_sequence_v1":
+        from .simulation_data import SimulationVideoDataset
+        return SimulationVideoDataset(manifest, **kwargs)
     return ObjectEventVideoDataset(manifest, **kwargs)
 
 

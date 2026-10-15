@@ -28,16 +28,17 @@ def write_json(path, value):
 
 
 class OrderedPlacement(Task):
-    def __init__(self, order):
+    def __init__(self, order, colors=None):
         super().__init__()
         self.order = tuple(order)
+        self.colors = colors
         self.max_steps = len(order)+2
         self.pos_eps = .05
         self.task_completed_desc = "ordered placements completed"
 
     def reset(self, env):
         super().reset(env)
-        colors = random.sample(("red", "green", "blue", "yellow", "cyan", "brown"), 6)
+        colors = self.colors or random.sample(("red", "green", "blue", "yellow", "cyan", "brown"), 6)
         self.entities, bowls, blocks = [], [], []
         for kind, urdf, size, selected, destination in (
                 ("bowl", "bowl/bowl.urdf", (.12, .12, 0), colors[:3], bowls),
@@ -74,6 +75,13 @@ class RecordedEnvironment(Environment):
         self.physics_tick = 0
         self.frames, self.masks, self.poses, self.frame_ticks, self.contacts = [], [], [], [], []
         self.body_ids = sorted(entity["body_id"] for entity in self.task.entities)
+        self.robot_body_ids = {self.ur5}
+        connections = [p.getConstraintInfo(p.getConstraintUniqueId(index)) for index in range(p.getNumConstraints())]
+        for _ in connections:
+            for connection in connections:
+                parent, child = connection[0], connection[2]
+                if parent in self.robot_body_ids or child in self.robot_body_ids:
+                    self.robot_body_ids.update(body for body in (parent, child) if body >= 0)
         self.camera = deepcopy(self.agent_cams[0])
         self.camera["noise"] = False
         self.recording = True
@@ -106,12 +114,14 @@ class RecordedEnvironment(Environment):
         self.recording = False
 
 
-def save_recording(env, output, events, seed, history_seconds, source_revision):
+def save_recording(env, output, events, seed, history_seconds, source_revision, future_seconds, partition, combination):
     output.mkdir(parents=True, exist_ok=True)
     frames = np.stack(env.frames)
     masks = np.stack(env.masks)
     seconds = np.array(env.frame_ticks, dtype=np.float64)/env.physics_hz-history_seconds
     np.savez_compressed(output/"rgb.npz", rgb=frames, times_seconds=seconds)
+    past = seconds <= 0
+    np.savez_compressed(output/"history.npz", rgb=frames[past], times_seconds=seconds[past])
     with av.open(str(output/"video.mp4"), "w") as video:
         stream = video.add_stream("libx264", rate=Fraction(env.physics_hz, env.capture_stride))
         stream.height, stream.width = frames.shape[1:3]
@@ -137,13 +147,17 @@ def save_recording(env, output, events, seed, history_seconds, source_revision):
                 "status": "completed" if env.task.get_reward() >= .99 else "oracle_incomplete",
                 "physics_hz": env.physics_hz, "capture_every_physics_steps": env.capture_stride,
                 "history_seconds": history_seconds, "frame_count": len(frames),
+                "prediction_horizon_seconds": future_seconds, "partition": partition,
+                "combination": combination,
                 "frame_times_seconds": seconds, "image_hw": list(frames.shape[1:3]),
                 "camera": env.camera, "camera_position_convention": "CLIPort camera in world coordinates",
                 "segmentation_encoding": "CLIPort uint8 body IDs; 255 is renderer background",
                 "entity_body_ids": env.body_ids, "robot_body_id": env.ur5,
+                "robot_and_tool_body_ids": sorted(env.robot_body_ids),
                 "body_count": p.getNumBodies(), "contacts_by_frame": env.contacts,
                 "event_time_meaning": "oracle primitive start/end, not inferred object-motion onset",
                 "rgb": "rgb.npz", "rgb_storage": "lossless_uint8_THWC",
+                "history_rgb": "history.npz",
                 "preview": "video.mp4", "truth": "truth.npz",
                 "model_training_inputs": "RGB history and instruction only; no action/pose/mask input"}
     write_json(output/"episode.json", metadata)
@@ -162,18 +176,26 @@ def save_recording(env, output, events, seed, history_seconds, source_revision):
     return metadata
 
 
-def generate(assets, output, seeds, history_seconds=3., tail_seconds=1., source_revision=""):
+def generate(assets, output, seeds, history_seconds=3., tail_seconds=1., source_revision="",
+             future_seconds=10., plan_path=""):
     root = Path(output)
     root.mkdir(parents=True, exist_ok=True)
     env = RecordedEnvironment(str(assets))
     records, pairs, sections = [], [], []
-    for seed in seeds:
+    plan = json.loads(Path(plan_path).read_text()) if plan_path else None
+    scenes = plan["scenes"] if plan else [
+        {"scene_seed": seed, "partition": "engineering", "programs": [
+            {"order": [0, 1], "combination": "engineering"},
+            {"order": [1, 0], "combination": "engineering"}]} for seed in seeds]
+    for scene in scenes:
+        seed = scene["scene_seed"]
         prefixes = []
-        for order in ((0, 1), (1, 0)):
+        for program in scene["programs"]:
+            order = program["order"]
             random.seed(seed)
             np.random.seed(seed)
             env.seed(seed)
-            task = OrderedPlacement(order)
+            task = OrderedPlacement(order, scene.get("colors_bowls_then_blocks"))
             env.set_task(task)
             obs = env.reset()
             oracle = task.oracle(env)
@@ -195,11 +217,13 @@ def generate(assets, output, seeds, history_seconds=3., tail_seconds=1., source_
                                "actor_body_id": task.program[goal_index]["actor_body_id"],
                                "control_start_tick": start, "control_end_tick": env.physics_tick,
                                "goal_completed": len(task.goals) < before, "reward": reward})
-            env.idle(tail_seconds)
+            env.idle(max(tail_seconds, history_seconds+future_seconds-env.physics_tick/env.physics_hz))
             env.finish_recording()
             name = f"scene_{seed:06d}_order_{''.join(map(str, order))}"
-            metadata = save_recording(env, root/name, events, seed, history_seconds, source_revision)
-            records.append({"case_id": name, "episode": f"{name}/episode.json", "status": metadata["status"]})
+            metadata = save_recording(env, root/name, events, seed, history_seconds, source_revision,
+                                      future_seconds, scene["partition"], program["combination"])
+            records.append({"case_id": name, "episode": f"{name}/episode.json", "status": metadata["status"],
+                            "scene_seed": seed, "partition": scene["partition"], "combination": program["combination"]})
             print(json.dumps({"event": "simulated_episode", "case_id": name,
                               "status": metadata["status"], "reward": metadata["official_task_reward"],
                               "frames": metadata["frame_count"], "seconds": float(metadata["frame_times_seconds"][-1])}), flush=True)
@@ -208,13 +232,14 @@ def generate(assets, output, seeds, history_seconds=3., tail_seconds=1., source_
                             f'<img src="{name}/timeline.jpg" alt="Actual simulator timeline">'
                             f'<video src="{name}/video.mp4" controls preload="none"></video>'
                             f'<p><a href="{name}/episode.json">Entities, events and camera</a></p></section>')
-        pairs.append({"scene_seed": seed, "history_frames": len(prefixes[0]),
-                      "identical_history_rgb": bool(np.array_equal(prefixes[0], prefixes[1]))})
+        pairs.append({"scene_seed": seed, "history_frames": len(prefixes[0]), "programs": len(prefixes),
+                      "identical_history_rgb": bool(np.array_equal(prefixes[0], prefixes[1])) if len(prefixes) == 2 else None})
     p.disconnect()
     report = {"contract": "cliport_ordered_video_collection_v1", "source_revision": source_revision,
               "episodes": records, "paired_initial_scenes": pairs,
               "completed_episodes": sum(row["status"] == "completed" for row in records),
-              "partition": "engineering_collection_no_train_test_claim",
+              "partition": "scene_disjoint_plan" if plan else "engineering_collection_no_train_test_claim",
+              "plan": plan, "history_seconds": history_seconds, "future_seconds": future_seconds,
               "physics_engine": "PyBullet through official CLIPort Environment and Task.oracle"}
     write_json(root/"manifest.json", report)
     (root/"index.html").write_text('<!doctype html><html lang="en"><meta charset="utf-8">'
