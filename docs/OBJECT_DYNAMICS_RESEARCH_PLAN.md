@@ -452,8 +452,10 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 - [x] 建立active goal并读取历史数据/评测实现。
 - [x] 经SWXC确认阿里GPU、CPFS和百度源metadata。
 - [x] 完成首个RGB数据适配与PFS展开入口。
-- [ ] GitHub发布并在阿里PFS完整展开数据。
-- [ ] 补迁语言sidecar，运行真实数据读取和manifest准备链路。
+- [x] GitHub发布数据准备与基础主干代码，在阿里PFS建立独立checkout。
+- [ ] 在阿里PFS完整展开数据并取得真实manifest准备结果。
+- [x] 补迁语言sidecar到阿里PFS。
+- [ ] 运行真实RGB读取和完整训练/恢复/评测链路。
 - [ ] 配置PFS独立运行环境和已匹配的视觉/成像权重。
 - [ ] 实现基础Object State、posterior、Dynamics、renderer并做真实数据端到端试验。
 - [ ] 实现对象片段effects、条件prior和独立组合评测。
@@ -465,7 +467,9 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 
 首个数据包已推送：`2d5a91c664326f4390ed1f973acc02ea2a2bf4de`，分支 `codex/object-event-world-model-v71`。阿里通过GitHub直接HTTPS取到同一提交；百度旧代理在阿里超时，未修改系统网络配置，仅对下载命令取消失效代理。
 
-语言sidecar已从百度8732流式迁入PFS：`metadata/language_manifest_v70.json`，367044123 bytes，68384个窗口；没有在Mac落盘。完整portable包在阿里PFS解包，既有storage PID27713、tar PID27717及SSH会话46234已确认实际运行。2026-10-15 12:54:21 CST读取约204.789GiB/25.437%，没有退出码或完成报告；这一数字是读取进度，不是数据质量完成度。
+语言sidecar已从百度8732流式迁入PFS：`metadata/language_manifest_v70.json`，367044123 bytes，68384个窗口；没有在Mac落盘。完整portable包在阿里PFS解包，既有storage PID27713、tar PID27717及SSH会话46234已确认实际运行。2026-10-15 13:16:30 CST读取718418075785 bytes，约669.079GiB/83.108%，没有退出码或完成报告；这一数字是读取进度，不是数据质量完成度。
+
+基础主干提交为 `1048682e4c1ca68c3fe5c8ba289fa5b7eb665cdb`，已通过GitHub同步到阿里独立worktree `/mnt/pfs/xuhaoming/wm-align/releases/1048682`。运行中的数据准备仍使用 `repo` 下的 `2d5a91c`，没有在进程运行中切换源码。当前未启动模型训练。
 
 ### 14.2 本轮实现范围
 
@@ -481,6 +485,6 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 
 ### 14.3 未完成项与下一步
 
-本轮只完成Python/Shell语法解析，不能代表GPU完整训练。阿里直连Hugging Face/Astral已确认，系统已有PyTorch、Transformers、PyAV、PyYAML、einops和HF Hub；uv、独立PFS环境及RAE权重未准备。新增依赖脚本被当前 `deps=ask` 权限拦截，已向用户请求具体依赖授权；没有绕过该限制安装。
+本轮只完成Python/Shell语法解析，不能代表GPU完整训练。阿里直连Hugging Face/Astral已确认，系统已有PyTorch、Transformers、PyAV、PyYAML、einops和HF Hub；uv、独立PFS环境及RAE权重未准备。用户已批准 `deps=allow`，范围仅为阿里PFS中的uv、PyTorch2.7/torchvision、Transformers、HF Hub、PyAV、NumPy/Pillow、PyYAML/einops、LPIPS、SwanLab和官方RAE/DINO权重；不修改系统环境，不在Mac安装或下载。授权范围不包含新模拟器或其他模型依赖。
 
 环境准备获准后，在PFS下载配套资产并运行上述完整测试，使用真实反馈修正实现。之后继续条件prior、独立对象-次序数据与正式baseline比较；当前goal保持active，不因基础代码写完而完成。
