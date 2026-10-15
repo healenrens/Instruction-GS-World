@@ -458,3 +458,29 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 - [ ] 实现基础Object State、posterior、Dynamics、renderer并做真实数据端到端试验。
 - [ ] 实现对象片段effects、条件prior和独立组合评测。
 - [ ] 形成大规模阿里训练配置与前台运行交付。
+
+## 14. 基础主干实施进度（2026-10-15）
+
+### 14.1 数据准备的实际进展
+
+首个数据包已推送：`2d5a91c664326f4390ed1f973acc02ea2a2bf4de`，分支 `codex/object-event-world-model-v71`。阿里通过GitHub直接HTTPS取到同一提交；百度旧代理在阿里超时，未修改系统网络配置，仅对下载命令取消失效代理。
+
+语言sidecar已从百度8732流式迁入PFS：`metadata/language_manifest_v70.json`，367044123 bytes，68384个窗口；没有在Mac落盘。完整portable包在阿里PFS解包，既有storage PID27713、tar PID27717及SSH会话46234已确认实际运行。2026-10-15 12:54:21 CST读取约204.789GiB/25.437%，没有退出码或完成报告；这一数字是读取进度，不是数据质量完成度。
+
+### 14.2 本轮实现范围
+
+已编写 `code/igsw/object_event_wm/` 下的 codec/config/state/dynamics/model/training/evaluation，以及训练、评测、资产准备和一个真实资产端到端测试入口。尚未在GPU执行，不写成已通过。
+
+- **共同视觉空间**：官方RAE的DINOv2-with-registers-base与ViT-XL decoder；RAE代码版本 `a4d18c4db766419cbe7cb8c02cd9f7ceb0ec9041`。512版使用官方 `ViTXL_n08_i512/model.pt` 和匹配统计量。输入从原始RGB等比例letterbox到512，DINO内部448，输出512；不声称这是原生像素分辨率预测。256版可选并使用其独立匹配权重。
+- **对象状态**：竞争式对象分配与每候选局部tokens、跨帧更新；当前原型16个对象候选预算加1个额外成分，每成分4个局部tokens、width384。候选/alpha不自动等于物理实体或背景真值。
+- **Effects**：`global_step`、`object_step`、`object_segment`。前两者每步更新；片段版以可学习边界选择更新或沿用effect。它们共享主要模块和数据，参数量由实际inventory报告，不预报效果。
+- **联合目标**：观测/rollout的标准化视觉feature差、RGB L1、相邻feature变化误差、effect KL；片段版增加更新代价。RGB梯度穿过冻结decoder进入renderer/State/Dynamics。默认每次优化解码4个future时点，feature目标覆盖全部future；评测解码全部future。
+- **训练运行**：single GPU或DDP，默认3s/16帧历史和5s/25帧未来，episode-uniform；数据游标、optimizer、scheduler、每rank RNG保存恢复；保留两个rolling recovery及编号snapshot。主训练前台运行，不访问GitHub或下载模型。
+- **当前评测**：codec reference、observed State、posterior、zero effect、反向effect次序、State-copy与RGB-copy；输出逐帧L1/PSNR/SSIM和视频。`appearance_change_weighted_l1`仅表示RGB变化加权，不称物理运动GT。语言prior与独立对象/事件评测尚未实现。
+- **一次完整测试**：三个effect模式各执行不间断两步与一步保存后恢复，再检查样本序列、模型差异、history prefix隔离，并在每源真实视频上输出重建。没有用小型假backbone代替正式资产。
+
+### 14.3 未完成项与下一步
+
+本轮只完成Python/Shell语法解析，不能代表GPU完整训练。阿里直连Hugging Face/Astral已确认，系统已有PyTorch、Transformers、PyAV、PyYAML、einops和HF Hub；uv、独立PFS环境及RAE权重未准备。新增依赖脚本被当前 `deps=ask` 权限拦截，已向用户请求具体依赖授权；没有绕过该限制安装。
+
+环境准备获准后，在PFS下载配套资产并运行上述完整测试，使用真实反馈修正实现。之后继续条件prior、独立对象-次序数据与正式baseline比较；当前goal保持active，不因基础代码写完而完成。

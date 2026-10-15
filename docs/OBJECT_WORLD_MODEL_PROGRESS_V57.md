@@ -2,6 +2,7 @@
 
 ## 2026-10-15 研究重规划入口
 
+- **基础主干实施**：新模块已写入可解码State、三种effect组织、共享Dynamics、联合重建训练、保存恢复和重建评测；真实GPU测试待PFS环境/权重准备。语法解析不算训练成功。数据准备首包已经GitHub推送并在阿里运行，完整状态见研究计划第14节；条件prior、独立组合评测和大规模实验仍未完成。
 - **实施启动更新**：用户已授权建立active goal并开始数据与主干实施。阿里 `10.67.16.10:22` 的 `/mnt/pfs/xuhaoming` 已确认独立CPFS、约35TiB可用；统一运行根为 `/mnt/pfs/xuhaoming/wm-align`。源数据目前是OSS上的26个分片tar。Mac不承载数据、环境或实验产物；代码仍走GitHub发布。原数据支持RGB重建/变化训练，语言sidecar需补迁，独立组合评测数据尚缺；实际进度见研究计划第13节。
 - **What changed**：按用户要求重新审视主干，不再把旧架构、冻结顺序、effect 形状及阶段门槛作为新方案前提。完整模型/训练/数据/实验计划与六组论文证据集中在 [Object Dynamics 研究计划](OBJECT_DYNAMICS_RESEARCH_PLAN.md)。
 - **Why**：已有工作已覆盖大部分“objects + latent actions + renderer + language”组合；新的候选问题收敛到主体绑定、持续时间与事件顺序共同组织能否改善实际组合生成，而不是把已有组件重新命名。

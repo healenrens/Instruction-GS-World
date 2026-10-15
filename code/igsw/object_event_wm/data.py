@@ -103,6 +103,9 @@ def prepare_manifest(source_path, output, config, language_path="", media_root=N
             "seconds_min": min(seconds), "seconds_median": statistics.median(seconds),
             "seconds_max": max(seconds),
             "fps_counts": dict(Counter(str(e["case"]["record"]["fps"]) for e in rows)),
+            "camera_counts": dict(Counter(e["case"]["camera"] for e in rows)),
+            "native_resolution_counts": dict(Counter(
+                f"{e['case']['width']}x{e['case']['height']}" for e in rows)),
         }
     report = {
         "input_clips": len(source["entries"]), "rgb_clips": len(entries),
