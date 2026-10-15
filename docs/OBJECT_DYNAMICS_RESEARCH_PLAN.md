@@ -911,3 +911,40 @@ printf 'TEST_RC=%s\nREPORT=%s/test_report.json\nVIDEOS=%s/conditional_generation
 独立环境准备退出0，`environments/cliport-v71` 实际安装torch2.7.0+cpu/torchvision0.22.0+cpu，官方CLIPort固定源码已到 `third_party/cliport-2be5c47`；运行环境清单位于 `metadata/object_event_benchmark_environment_v71.json`。旧训练环境未改动。
 
 首次完整模拟入口 `9c2db59` 在导入官方CLIport utils时因缺少matplotlib退出1，没有生成轨迹。源码修订 `cb53f5d26beed6f39833bbad25fa42264035a978` 只补充matplotlib3.10.3，已推送并交由SWXC从GitHub获取，用同一场景、seeds17/18重跑。此次失败日志在旧运行根 `logs/cliport_event_sequences_v71_9c2db59_20261015T121641Z/generate.log`；修订后的实际结果待返回。不能把包安装完成写成物理生成、事件标签或模型能力验证完成。
+
+### 17.6 四条真实物理轨迹已完成
+
+`cb53f5d` 经GitHub在百度取得，独立环境更新退出0，完整模拟生成也退出0。两组seed17/18各执行正反顺序，共四条，未更换seed或丢弃失败样例；四条官方目标reward均为1.0，每次放置事件各得到0.5。相同seed两条序列的3秒、16帧历史RGB逐像素一致，后续指令和实际执行次序不同。
+
+| 场景/顺序 | 总帧数 | 历史终点后的记录长度 | 完成的放置事件 |
+| --- | ---: | ---: | ---: |
+| seed17 / 01 | 48 | 6.3083秒 | 2 |
+| seed17 / 10 | 52 | 7.0792秒 | 2 |
+| seed18 / 01 | 58 | 8.2917秒 | 2 |
+| seed18 / 10 | 53 | 7.3292秒 | 2 |
+
+RGB为640x480，240Hz物理引擎每48步采样一次，并保留不满0.2秒的最终时点。每例实际落盘 `video.mp4`、`timeline.jpg`、`episode.json`、`truth.npz`；后者含 `[T,480,640]` uint8直接分割ID、`[T,6,7]` XYZ/四元数、`[T,6]`可见像素数、真实tick与秒。六个实体ID为5--10，机器人body ID为2；标签来自实际模拟器，不来自模型mask或tracker。
+
+结果目录：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/cliport_event_sequences_v71_cb53f5d_20261015T122104Z`，入口 `index.html`；日志在同名 `logs` 目录。举例seed17的指令是先把green block放入cyan bowl，再把brown block放入yellow bowl；反序样例交换这两个事件，场景初始内容不变。事件tick记录oracle控制开始/结束，不以此冒充物体实际motion onset。上述reward只确认数据生成任务完成，不是所训练模型的预测成功率。
+
+下一项使用这些真实标签建立独立主体/顺序/轨迹评测，再冻结按scene与组合划分的规模化生成协议；四条工程样例本身不构成正式benchmark结果。常规TextOCVP GPU测试仍待空闲GPU，不能以CPU模拟成功替代。
+
+已准备服务器上可独立重跑以下CPU生成命令，不联网：
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=cb53f5d26beed6f39833bbad25fa42264035a978
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/environments/cliport-v71/bin/python"
+export CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+export TMPDIR="${WORK_ROOT}/tmp/benchmark-v71"
+export XDG_CACHE_HOME="${WORK_ROOT}/cache/benchmark"
+export PYTHONPYCACHEPREFIX="${WORK_ROOT}/cache/benchmark-pycache"
+export OUT="${WORK_ROOT}/outputs/cliport_event_sequences_v71_$(date +%Y%m%d_%H%M%S)"
+"${PYTHON}" "${ROOT}/code/scripts/generate_cliport_event_sequences_v71.py" \
+  --environment-report "${WORK_ROOT}/metadata/object_event_benchmark_environment_v71.json" \
+  --out "${OUT}" --seeds 17,18 --source-revision "${SOURCE_REVISION}"
+GENERATE_RC=$?
+printf 'GENERATE_RC=%s\nREVIEW=%s/index.html\n' "${GENERATE_RC}" "${OUT}"
+```
