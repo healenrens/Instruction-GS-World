@@ -1317,3 +1317,124 @@ LPWM训练联合使用语言条件，因此使用与V71 prior相同的有效语�
 | `test_lpwm_object_events_v71.py/.sh` | 一次真实短更新、保存恢复、history-only生成、future swap及视频评价。 |
 
 LPWM的CUDA STN含grid_sample，其backward可能非确定，见[PyTorch2.8说明](https://docs.pytorch.org/docs/2.8/generated/torch.nn.functional.grid_sample.html)。测试验证模型/优化器/RNG的精确序列化往返、恢复后的step与采样顺序，并报告独立轨迹的参数差异，不把浮点逐位一致当已保证能力。测试只有在后续RGB评价也完成后才写passed；当前所有运行结果仍待真实PFS环境与资产。
+
+### 21.4 独立执行命令
+
+以下命令在百度准备机/训练任务中执行，不在Mac运行。当前LPWM环境、权重的安装下载授权尚未收到，准备命令先保留，不自动执行；后面的完整测试/训练也尚未运行。
+
+**源码同步，仅此段和资产准备段联网**：
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export http_proxy=http://10.66.65.186:18000
+export https_proxy=http://10.66.65.186:18000
+"${WORK_ROOT}/.venv/bin/python" - <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+from urllib.request import urlretrieve
+root = Path(os.environ["WORK_ROOT"])
+revision = os.environ["SOURCE_REVISION"]
+destination = root/"runtime/object_event_world_model_v71/releases"/revision
+temporary = root/"tmp/lpwm-v71"
+temporary.mkdir(parents=True, exist_ok=True)
+if not destination.is_dir():
+    archive = temporary/f"source-{revision}.tar.gz"
+    urlretrieve(f"https://codeload.github.com/healenrens/Instruction-GS-World/tar.gz/{revision}", archive)
+    stage = Path(tempfile.mkdtemp(prefix="release-", dir=temporary))
+    subprocess.run(["tar", "-xzf", str(archive), "--strip-components=1", "-C", str(stage)], check=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    stage.rename(destination)
+print("ROOT="+str(destination))
+PY
+```
+
+**授权后准备独立环境和资产**：使用已安装的PFS uv，不动旧训练 `.venv`。不包含LanguageTable全量下载或TensorFlow安装。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export http_proxy=http://10.66.65.186:18000
+export https_proxy=http://10.66.65.186:18000
+unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
+"${WORK_ROOT}/.venv/bin/python" "${ROOT}/code/scripts/setup_lpwm_environment_v71.py" \
+  --work-root "${WORK_ROOT}" --python "${WORK_ROOT}/.venv/bin/python" &&
+"${WORK_ROOT}/environments/lpwm-v71/bin/python" "${ROOT}/code/scripts/prepare_lpwm_assets_v71.py" \
+  --work-root "${WORK_ROOT}"
+printf 'PREPARE_RC=%s\nASSETS=%s/metadata/lpwm_assets_v71.json\n' "$?" "${WORK_ROOT}"
+```
+
+**四例已有视频的T5 cache与单卡完整测试**：复用已有RGB，不生成新视频数据，不下载任何模型。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/environments/lpwm-v71/bin/python"
+export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71_engineering_c682ec9.json"
+export ASSETS="${WORK_ROOT}/metadata/lpwm_assets_v71.json"
+export TEXT_CACHE="${WORK_ROOT}/metadata/lpwm_cliport_engineering_text_v71"
+export RUN_NAME="lpwm_v71_e2e_e985f0e_$(date +%Y%m%d_%H%M%S)"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export LOG_ROOT="${WORK_ROOT}/logs/${RUN_NAME}"
+"${PYTHON}" "${ROOT}/code/scripts/prepare_lpwm_instruction_cache_v71.py" \
+  --manifest "${MANIFEST}" --model "${WORK_ROOT}/models/lpwm-v71/t5-large" \
+  --out "${TEXT_CACHE}" --batch 16 &&
+bash "${ROOT}/code/scripts/test_lpwm_object_events_v71.sh"
+printf 'TEST_RC=%s\nREPORT=%s/test_report.json\n' "$?" "${OUT}"
+```
+
+**正式集合完成后的文本cache**：
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+"${WORK_ROOT}/environments/lpwm-v71/bin/python" "${ROOT}/code/scripts/prepare_lpwm_instruction_cache_v71.py" \
+  --manifest "${WORK_ROOT}/metadata/cliport_event_v71.json" \
+  --model "${WORK_ROOT}/models/lpwm-v71/t5-large" \
+  --out "${WORK_ROOT}/metadata/lpwm_cliport_text_v71" --batch 16
+```
+
+**八卡前台模板**：这是原生recipe的执行模板，batch3尚未做本项目的实际容量测试；单卡完整链路与正式数据完成前，不把它当已验证的长训启动。默认150个scene访问epoch，实际步数由数据量/global batch计算，日志记录真实访问数。没有Git、模型下载或后台启动。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/environments/lpwm-v71/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/lpwm_assets_v71.json"
+export TEXT_CACHE="${WORK_ROOT}/metadata/lpwm_cliport_text_v71"
+export RUN_NAME=lpwm_cliport_v71_native_seed17_e985f0e
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
+export BATCH_PER_GPU=3 GRAD_ACCUM=1 EPOCHS=150 WORKERS_PER_RANK=2
+export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
+unset STEPS RESUME
+bash "${ROOT}/code/scripts/train_lpwm_object_events_v71.sh"
+printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
+```
+
+恢复使用同一完整环境，将 `unset STEPS RESUME` 改为 `unset STEPS`，并设置 `export RESUME="${OUT}/latest.json"`。单卡RGB评价可用：
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+"${WORK_ROOT}/environments/lpwm-v71/bin/python" "${ROOT}/code/scripts/evaluate_lpwm_rgb_v71.py" \
+  --checkpoint "${WORK_ROOT}/outputs/lpwm_cliport_v71_native_seed17_e985f0e/latest.json" \
+  --manifest "${WORK_ROOT}/metadata/cliport_event_v71.json" --partition development \
+  --items-per-source 200 --samples 1 \
+  --out "${WORK_ROOT}/outputs/lpwm_cliport_v71_native_seed17_e985f0e_development"
+printf 'EVAL_RC=%s\n' "$?"
+```
+
+上述评价是当前逐帧RGB接口，不自动包含共同分辨率主表、FVD或独立主体/事件成功率；这些属于仍需完成的外部对照工作，不沿用内部V71结果冒充。
