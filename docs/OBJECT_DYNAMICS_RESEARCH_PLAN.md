@@ -405,7 +405,7 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 
 ### 13.1 运行位置
 
-**当前平台优先级（用户2026-10-15更新）**：百度8732优先执行模型测试和后续实验，阿里仅准备备用，不因阿里排队等待测试。两端运行同一GitHub提交，数据与环境不落Mac；百度优先复用已有环境及portable数据，阿里继续使用独立PFS环境。下述先前的阿里盘点和数据准备结果仍保留。
+**当前平台优先级（用户2026-10-15更新）**：百度8732执行模型测试和后续实验。用户随后回复skip，阿里环境/权重准备已移出本阶段，不再重试其网络；已完成的阿里数据保留。代码经GitHub到百度，数据与环境不落Mac；百度复用旧运行根和独立benchmark环境。下述先前的阿里盘点和数据准备结果仍保留。
 
 **百度统一目录**：源码仓库继续为 `/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source`，运行根继续为 `/mnt/pfs/public/xuhaoming/instruct_gs_world`，Python优先用该根下的 `.venv/bin/python`。V71发布代码放现有运行根的 `runtime/object_event_world_model_v71/releases/<revision>`，日志/结果仍放 `logs`/`outputs`。取消新增 `/mnt/pfs/public/xuhaoming/wm-align` 根目录的提议，不移动、复制或删除旧实验数据。
 
@@ -1048,3 +1048,11 @@ done
 - **What changed**：生成入口新增 `--workers`，每个spawn子进程独立创建PyBullet环境并处理一整个scene的程序；子进程只写自己的scene目录，主进程统一写集合manifest和review。`progress.json`区分已落盘程序、oracle成功程序和本轮复用程序。显式 `--resume` 在同一plan/时间协议下复用已落盘 `episode.json`，包括oracle未完成的样本；不替换seed、不为成功而重试。
 - **Why**：正式计划有1300场景、2200程序，串行生成与中断后全部重做会重复消耗CPU时间。续跑应恢复生成进度，而不是选择更容易成功的数据。
 - **Impact**：每条RGB、truth、history及preview写完后才原子发布episode元数据。未发布的程序可重新生成；已发布程序不改写。默认workers=1保留原入口，完整真实测试采用2个CPU进程生成四例并再次续跑，再做已有独立评分；不新增训练环境、GPU依赖或大量单元门禁。正式集合尚未因实现此入口而被标记已完成。
+
+统一CPU入口 `prepare_cliport_ordered_benchmark_v71.sh` 只顺序执行真实生成与manifest准备，不联网、不使用GPU、不启动训练。默认沿用已冻结的 `metadata/cliport_event_v71_plan_c682ec9.json`，数据写入旧运行根 `data/benchmarks/cliport_ordered_v71`，完成后写 `metadata/cliport_event_v71.json`。`GENERATE_WORKERS`默认4，续跑显式设 `RESUME_DATA=1`；中断后不改plan或时间协议。每次启动有独立日志，进度文件区分生成落盘和oracle成功，不能把两者混为一谈。
+
+## 19. 外部对照的实际接口准备
+
+- **What changed**：再次读取[LPWM官方LanguageTable准备脚本](https://github.com/taldatech/lpwm/blob/main/datasets/langtable_preparation.py)、[loader](https://github.com/taldatech/lpwm/blob/main/datasets/langtable_ds.py)与[运行说明](https://github.com/taldatech/lpwm)。官方路径从RLDS读取，选择15至50帧episode，用seed42划分80/10/10，保存逐帧PNG和T5-large文本；loader默认128尺寸、存在末帧padding及有效标记，valid默认只取100个episode。此处记录的是代码事实，不声称已经复现论文表格或取得其精确划分清单。
+- **Why**：不能用已有multirobot或四条模拟工程样例替代已规划的LanguageTable主实验，也不能把三种V71内部effect变体当全部外部baseline。
+- **Impact**：下一步先取得官方原始数据/episode身份与真实准备结果，再冻结共同窗口与评价清单；padding帧不当作真实未来，T5默认32-token截断与本项目完整指令cache的条件差异需分开报告。新增TensorFlow/TFDS、T5及LPWM依赖的独立PFS环境已向用户询问，尚未安装下载。正式主对照与non-object容量对照仍未完成，不据此标记goal完成。
