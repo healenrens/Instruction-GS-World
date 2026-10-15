@@ -847,3 +847,45 @@ printf 'EVAL_RC=%s\nREPORT=%s/report.json\nCASES=%s/cases.jsonl\nVIDEOS=%s/video
 - **What changed**：按[作者loader](https://github.com/angelvillar96/TextOCVP/blob/master/src/data/CLIPort.py)实现独立图像序列manifest，直接读取ZIP里的 `color/*_color.png` 与 `task_description.txt`，不展开或重编码RGB。保留作者train/val/test和四个明确排除的episode；默认首帧到后九帧，可另建十九帧预测manifest。沿用原joint/prior训练、episode-uniform采样、单卡完整测试与配对评测，真实机器人数据的时间契约不变。
 - **Why**：公开loader按连续帧序号读取，没有提供物理FPS；不能把它改写为三秒历史/五秒未来。新数据以 `sampled_frame` 表示相邻发布图像的步数，历史请求仅列出实际历史图像，不列未来文件。预览采用5FPS并明确只是播放速度，逐帧指标使用frame offset而非seconds。
 - **Impact**：这是公开语言条件成像benchmark的接口，不是独立实体/事件真值评价。原生图像尺寸由实际PIL读取，成像仍使用既有RAE512；现阶段结果必须标明该输出尺寸，不能直接与其他尺寸的论文数值混比。公开archive完成后执行真实数据端到端测试；在此之前仅为已实现接口。独立主体/顺序实验仍待模拟器GT或已核实的发布标注，不以模型mask替代。
+
+### 17.2 图像序列准备与单卡测试命令
+
+代码提交 `b07951ddaf89cbb947bc54d9fb422d338f077f7b`。先按16.1的方法将SOURCE_REVISION替换为该完整提交，在准备机从GitHub取得源码。下面只读取已下载的ZIP及既有模型，不联网、不解压整份归档。执行过的步骤可直接使用其结果；无需重复跑完整测试来刷新报告日期。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=b07951ddaf89cbb947bc54d9fb422d338f077f7b
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+export CUDA_VISIBLE_DEVICES=0
+export MANIFEST="${WORK_ROOT}/metadata/textocvp_v71_1to9.json"
+export TEXT_CACHE="${WORK_ROOT}/metadata/textocvp_text_v71"
+"${PYTHON}" "${ROOT}/code/scripts/prepare_textocvp_dataset_v71.py" \
+  --archive "${WORK_ROOT}/data/benchmarks/textocvp_cliport/PutInBowl.zip" --out "${MANIFEST}" &&
+"${PYTHON}" "${ROOT}/code/scripts/prepare_object_event_text_v71.py" \
+  --manifest "${MANIFEST}" \
+  --model /mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct --out "${TEXT_CACHE}" --batch 16
+PREPARE_RC=$?
+printf 'PREPARE_RC=%s\n' "${PREPARE_RC}"
+```
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=b07951ddaf89cbb947bc54d9fb422d338f077f7b
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/textocvp_v71_1to9.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export CUDA_VISIBLE_DEVICES=0
+export RUN_NAME="textocvp_v71_e2e_$(date +%Y%m%d_%H%M%S)"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export LOG_ROOT="${WORK_ROOT}/logs/${RUN_NAME}"
+bash "${ROOT}/code/scripts/test_object_event_world_model_v71.sh" \
+  --text-cache "${WORK_ROOT}/metadata/textocvp_text_v71"
+TEST_RC=$?
+printf 'TEST_RC=%s\nREPORT=%s/test_report.json\nVIDEOS=%s/conditional_generation/videos\n' \
+  "${TEST_RC}" "${OUT}" "${OUT}"
+```
+
+正式benchmark训练复用16.3/16.6，但将manifest/text cache切换为本节路径，并使用独立的 `textocvp_v71_*` run名称。它是域内训练比较，不把多源100步模型的zero-shot结果当成与TextOCVP的公平主表。仍需对齐输出分辨率、预训练资产、训练预算和评测实现后再报告外部方法优劣。
