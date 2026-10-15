@@ -105,4 +105,5 @@ class FrozenVisualCodec(nn.Module):
 
     def patch_valid(self, pixel_valid):
         shape = pixel_valid.shape[:2]
-        return F.avg_pool2d(pixel_valid.flatten(0, 1).float(), 16).flatten(1).reshape(*shape, -1) > 0
+        return F.adaptive_avg_pool2d(pixel_valid.flatten(0, 1).float(),
+                                    (self.grid_size, self.grid_size)).flatten(1).reshape(*shape, -1) > 0

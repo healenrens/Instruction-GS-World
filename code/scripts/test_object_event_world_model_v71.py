@@ -91,7 +91,7 @@ def main():
     sample = data[0]
     batch = device_batch(collate_object_event_video([sample]), torch.device("cuda"))
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.precision == "bf16"):
-        images, mask = letterbox_video(batch, codec.image_size)
+        images, mask = letterbox_video(batch, model.view_size(codec))
         features = codec.encode(images)
         valid = codec.patch_valid(mask)
         original = model.observe(features, valid, batch["times"])
@@ -105,6 +105,11 @@ def main():
     model.requires_grad_(False)
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.precision == "bf16"):
         teacher = model(batch, codec, deterministic=True)
+    view_contract = {"input_rgb_hw": list(images.shape[-2:]), "target_rgb_hw": list(teacher["target_rgb"].shape[-2:]),
+                     "predicted_rgb_hw": list(teacher["posterior_rgb"].shape[-2:]),
+                     "encoder_internal_size": codec.encoder_size, "decoder_internal_size": codec.image_size}
+    expected_hw = [model.view_size(codec)]*2
+    assert all(view_contract[key] == expected_hw for key in ("input_rgb_hw", "target_rgb_hw", "predicted_rgb_hw")), view_contract
     prior = ObjectEffectPrior(model.config, text_width=model.config.width).cuda().train()
     optimizer = torch.optim.AdamW(prior.parameters(), lr=2e-4)
     history = teacher["observed_states"][:th]
@@ -145,6 +150,8 @@ def main():
                                precision=args.precision, videos_per_source=1)
     report = {"status": "passed", "source_revision": args.source_revision,
               "real_assets": codec.asset_config, "model_config": saved["model_config"],
+              "view_size": model.view_size(codec), "codec_decoder_size": codec.image_size,
+              "view_contract": view_contract,
               "model_parameters": sum(p.numel() for p in model.parameters()),
               "module_parameters": {name: sum(p.numel() for p in module.parameters())
                                     for name, module in model.named_children()},

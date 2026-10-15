@@ -30,12 +30,24 @@ class ObjectEventWorldModel(nn.Module):
         xy = coordinates(round(features.shape[2]**.5), features.device)
         return self.encoder(features, xy, valid, times)
 
+    def view_size(self, codec):
+        return self.config.view_size or codec.image_size
+
+    def decode_features(self, codec, features):
+        images = codec.decode(features)
+        size = self.view_size(codec)
+        if size == codec.image_size:
+            return images
+        factor = codec.image_size//size
+        # Fixed non-overlapping area readout; the pretrained decoder itself is unchanged.
+        return images.reshape(*images.shape[:-2], size, factor, size, factor).mean((-1, -3))
+
     def render_features(self, states, xy):
         rows = [self.renderer(state, xy) for state in states]
         return torch.stack([row[0] for row in rows], 1), torch.stack([row[1] for row in rows], 1)
 
     def forward(self, batch, codec, deterministic=False, rollout_weight=1., render_all=False):
-        images, pixel_valid = letterbox_video(batch, codec.image_size)
+        images, pixel_valid = letterbox_video(batch, self.view_size(codec))
         features = codec.encode(images)
         patch_valid = codec.patch_valid(pixel_valid)
         xy = coordinates(codec.grid_size, features.device)
@@ -72,8 +84,8 @@ class ObjectEventWorldModel(nn.Module):
         chosen = (torch.arange(len(predicted), device=features.device) if render_all else
                   torch.linspace(0, len(predicted)-1, self.config.rgb_loss_frames,
                                  device=features.device).round().long().unique())
-        observed_rgb = codec.decode(observed_features[:, th+chosen])
-        predicted_rgb = codec.decode(predicted_features[:, chosen])
+        observed_rgb = self.decode_features(codec, observed_features[:, th+chosen])
+        predicted_rgb = self.decode_features(codec, predicted_features[:, chosen])
         image_target = images[:, th+chosen]
         image_valid = pixel_valid[:, th+chosen]
         rgb_observed = weighted_mean((observed_rgb-image_target).abs(), image_valid)

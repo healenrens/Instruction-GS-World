@@ -48,7 +48,7 @@ def main():
         times = torch.arange(1, args.future_frames+1, device=device)[None]*extent/args.future_frames
         result = generate_from_history(model, codec, prior, states, times, text, valid,
                                         generator=torch.Generator(device=device).manual_seed(args.seed))
-        history_rgb, _ = letterbox_video(observed, codec.image_size)
+        history_rgb, _ = letterbox_video(observed, model.view_size(codec))
     torch.cuda.synchronize()
     elapsed = time.perf_counter()-started
     out = Path(args.out)
@@ -59,6 +59,7 @@ def main():
                 "times": times.cpu()}, out / "generated_effects.pt")
     write_json(out / "prediction.json", {"instruction": args.instruction, "seed": args.seed,
                 "precision": args.precision,
+                "view_size": model.view_size(codec), "codec_decoder_size": codec.image_size,
                 "future_rgb_read": False, "teacher_checkpoint": saved["teacher_checkpoint"],
                 "future_frames": args.future_frames,
                 "future_seconds": args.future_seconds if observed["time_unit"] == "seconds" else None,

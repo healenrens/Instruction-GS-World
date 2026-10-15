@@ -222,6 +222,8 @@ def train(args):
                                      "state_token_budget": config.slots*config.local_tokens,
                                      "effect_scalars_per_step": config.slots*config.effect_dim,
                                      "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+                                     "view_size": config.view_size or codec.image_size,
+                                     "codec_encoder_size": codec.encoder_size, "codec_decoder_size": codec.image_size,
                                      "frozen_codec_parameters": sum(p.numel() for p in codec.parameters()),
                                      "frozen_teacher_parameters": sum(p.numel() for p in teacher.parameters()) if teacher else 0,
                                      "assets": codec.asset_config, "checkpoint_metadata": checkpoint_metadata})

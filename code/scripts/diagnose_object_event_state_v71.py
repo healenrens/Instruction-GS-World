@@ -42,7 +42,7 @@ def main():
     sample = dataset[item]
     batch = device_batch(collate_object_event_video([sample]), torch.device("cuda"))
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-        images, mask = letterbox_video(batch, codec.image_size)
+        images, mask = letterbox_video(batch, model.view_size(codec))
         features = codec.encode(images)
         states = model.observe(features, codec.patch_valid(mask), batch["times"])
         th = batch["history_frames"]

@@ -132,13 +132,13 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
                 xy = coordinates(codec.grid_size, device)
                 zero_states = model.rollout(result["source"], torch.zeros_like(effects), times)
                 reverse_states = model.rollout(result["source"], effects.flip(1), times)
-                zero = codec.decode(model.render_features(zero_states, xy)[0])
-                reverse = codec.decode(model.render_features(reverse_states, xy)[0])
-                source_image = codec.decode(model.render_features([result["source"]], xy)[0])
-                reference = codec.decode(result["target_features"])
+                zero = model.decode_features(codec, model.render_features(zero_states, xy)[0])
+                reverse = model.decode_features(codec, model.render_features(reverse_states, xy)[0])
+                source_image = model.decode_features(codec, model.render_features([result["source"]], xy)[0])
+                reference = model.decode_features(codec, result["target_features"])
             torch.cuda.synchronize()
             seconds = time.perf_counter()-started
-            images, _ = letterbox_video(batch, codec.image_size)
+            images, _ = letterbox_video(batch, model.view_size(codec))
             th = batch["history_frames"]
             current = images[0, th-1]
             target = result["target_rgb"][0]
@@ -189,7 +189,8 @@ def evaluate(model, codec, dataset, out, items_per_source=8, precision="bf16", v
                     "shuffled_instruction": shuffled_instruction,
                     "shuffled_group": shuffled_group,
                     "language_intervention": "different_group_within_source_not_verified_counterfactual" if shuffled_instruction else None,
-                    "image_size": codec.image_size, "posterior_control_seconds": seconds,
+                    "image_size": model.view_size(codec), "codec_decoder_size": codec.image_size,
+                    "posterior_control_seconds": seconds,
                     "elapsed_seconds_all_conditions": seconds+(history_seconds or 0.)+sum(prediction_times.values()),
                     "effect_update_fraction": float(result["parts"]["effect_update_fraction"]),
                     "prior_history_encode_seconds": history_seconds,

@@ -50,7 +50,7 @@ def history_batch(batch):
 
 
 def observe_history(model, codec, observed):
-    images, pixel_valid = letterbox_video(observed, codec.image_size)
+    images, pixel_valid = letterbox_video(observed, model.view_size(codec))
     features = codec.encode(images)
     states = model.observe(features, codec.patch_valid(pixel_valid), observed["times"])
     return states
@@ -61,4 +61,4 @@ def generate_from_history(model, codec, prior, states, requested_times, text_tok
     result = prior.generate(states, requested_times, model.dynamics, text_tokens, text_valid,
                             generator=generator, deterministic=deterministic)
     features, masks = model.render_features(result["states"], coordinates(codec.grid_size, requested_times.device))
-    return {**result, "rgb": codec.decode(features), "masks": masks}
+    return {**result, "rgb": model.decode_features(codec, features), "masks": masks}

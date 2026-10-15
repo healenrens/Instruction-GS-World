@@ -83,9 +83,9 @@ def main():
                 future_times = batch["times"][:, th:]
                 zero_states = model.rollout(result["source"], torch.zeros_like(effects), future_times)
                 zero_features, zero_masks = model.render_features(zero_states, xy)
-                zero_rgb = codec.decode(zero_features)
+                zero_rgb = model.decode_features(codec, zero_features)
                 source_features, source_masks = model.render_features([result["source"]], xy)
-                source_rgb = codec.decode(source_features)
+                source_rgb = model.decode_features(codec, source_features)
                 conditions = {"posterior": (result["posterior_rgb"][0], result["predicted_masks"][0]),
                               "zero_effect": (zero_rgb[0], zero_masks[0]),
                               "source_state_copy": (source_rgb[0].expand(len(effects[0]), -1, -1, -1),
@@ -100,7 +100,7 @@ def main():
                         generated = generate_from_history(model, codec, prior, history, future_times, text, text_valid,
                                     generator=torch.Generator(device=device).manual_seed(data.seed+meta["seed"]))
                         conditions[name] = (generated["rgb"][0], generated["masks"][0])
-            anchor_labels = native_field_labels(source_masks[0], hw, codec.image_size)[0]
+            anchor_labels = native_field_labels(source_masks[0], hw, model.view_size(codec))[0]
             gt_anchor = truth["segmentation"][th-1]
             labels = truth["segmentation"][th:][valid]
             target = actual_rgb[th:][valid]
@@ -115,7 +115,7 @@ def main():
                     "prediction_horizon_seconds": data.config.future_seconds, "scored_frames": int(valid.sum()),
                     "terminal_target_available": bool(valid[-1]),
                     "state_layout": model.config.state_layout,
-                    "model_image_size": codec.image_size,
+                    "model_image_size": model.view_size(codec), "codec_decoder_size": codec.image_size,
                     "field_labels_meaning": ("upsampled feature-field ownership, not an RGB segmentation head"
                         if model.config.state_layout == "object" else "single global field; no entity labels"),
                     "gt_physical_motion": physical_motion_context(truth["poses_xyz_xyzw"][th-1, :, :3],
@@ -126,7 +126,7 @@ def main():
             write_json(case_dir/"history_request.json", make_history_request(sample))
             for name, (predicted, masks) in conditions.items():
                 rgb = native_rgb(predicted, hw)
-                predicted_labels = native_field_labels(masks, hw, codec.image_size)
+                predicted_labels = native_field_labels(masks, hw, model.view_size(codec))
                 reversed_instruction = name == "opposite_order_language"
                 reference_rgb = alternative_rgb if reversed_instruction else target
                 reference_labels = alternative_truth if reversed_instruction else labels

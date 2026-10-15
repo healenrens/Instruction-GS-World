@@ -1480,3 +1480,18 @@ printf 'SCORE_RC=%s\nREPORT=%s/report.json\nCASES=%s/cases.jsonl\n' "$?" "${OUTP
 ```
 
 LPWM完成自身测试和训练后，先用 `export_lpwm_cliport_predictions_v71.py` 输出原生视图NPZ，再用同一个共同评分入口读取；不能将只含有损MP4的通用RGB evaluator目录当作无损预测目录。LPWM exporter和实际跨模型比较仍待对应资产/实验，不用当前工程模型重评分数宣布方法优劣。
+
+### 22.4 实际校准与分辨率控制
+
+`6a120b9`在百度完成四个CPU入口，全部退出0：真实控制导出、共同校准评分、已有object重评、已有scene重评。四例各12项控制检查通过；共同128下真实oracle的RGB L1=0、SSIM=1，copy与两结果均值的paired margin均为0。旧object/scene native actor/order分数只出现约1e-8的数值差异，未发生实质变化；三组未评分条件均为0。
+
+| 纯resize参考，不运行模型 | Native actor L1 | 共同128 RGB L1 | 共同128 SSIM |
+| --- | ---: | ---: | ---: |
+| 真实未来先经过128再还原 | 0.02735374 | 0.006563556 | 0.98982698 |
+| 真实未来先经过512再还原 | 0.00642120 | 0.000366225 | 0.99997446 |
+
+这些差异在模型之外就存在。因此只统一评分分辨率仍不足以将提升归因于object机制。新加 `object_event_view128_v71.json` 和 `object_event_scene_view128_v71.json`，明确把V71观察输入与RGB训练目标都先变为同一128全视野图像；预测也以128输出。DINO内部仍按448计算、RAE仍为原512 decoder，其输出经过固定、不重叠的area平均到128，未新增或声称有128原生RAE权重。它匹配信息输入/成像输出的尺寸，不匹配预训练资产或内部计算成本。
+
+默认view_size=0保留原512主版本，旧checkpoint默认行为不变。匹配128配置贯穿joint、冻结teacher标签、prior、history-only forecast和所有decode控制，不仅仅在evaluator最后缩图。测试会记录真实input/target/prediction尺寸及内部encoder/decoder尺寸；新配置尚待完整单卡执行，不以JSON设置存在当作已经生效。
+
+CPU证据根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/cliport_common_score_6a120b9_20261015T193640Z`。包含 `calibration/report.json`、`common_calibration/report.json`、`common_object/report.json`、`common_scene/report.json` 和 `native_score_difference.json`；原预测与原报告未修改，没有重跑GPU。

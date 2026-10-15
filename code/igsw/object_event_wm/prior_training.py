@@ -16,7 +16,7 @@ from .prior import ObjectEffectPrior, prior_objective
 
 @torch.no_grad()
 def infer_effect_targets(teacher, codec, batch):
-    images, valid = letterbox_video(batch, codec.image_size)
+    images, valid = letterbox_video(batch, teacher.view_size(codec))
     features = codec.encode(images)
     observed = teacher.observe(features, codec.patch_valid(valid), batch["times"])
     th = batch["history_frames"]
