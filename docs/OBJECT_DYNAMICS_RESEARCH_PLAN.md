@@ -1458,3 +1458,25 @@ printf 'EVAL_RC=%s\n' "$?"
 既有CPU控制入口增加 `--save-predictions`，输出真实oracle、反序、copy、两结果均值和identity-swap的RGB文件，供共同评分器完整读取。另输出128/512分辨率的纯resize参考：它们使用真实未来、不含模型，只测缩放与还原本身造成的误差，不叫生成能力或完整codec上限。控制还遮去一个alternative终点的可用性，确认不回填更早时刻。
 
 下一步按同一流程重评这些真实控制、已有object预测和已有scene预测，核对native actor/order旧值是否保持，以及共同128尺度的实际数值。该CPU链路无需新包或权重；尚未执行前不写成通过。
+
+### 22.3 配对比较与执行
+
+`compare_common_cliport_scores_v71.py`只比较同一manifest、请求序列、resampling协议与共同case。逐case保留两边绝对值及candidate-reference差值，缺条件、缺case或参考帧不同均列出；协议不同则不生成跨方法差值。单例顺序margin不拿来判断语言能力，顺序比较继续使用同场景两条指令的成对汇总。当前不计算显著性，也不把同输出分辨率称为同输入或同训练预算。
+
+共同评分入口代码为 `6a120b9b64eb25f0e40f655c4a8f22ea8b468273`；准备机经GitHub取得该release后，下面可直接重评已保存的scene结果，不联网、不占GPU、不重新生成视频：
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=6a120b9b64eb25f0e40f655c4a8f22ea8b468273
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=2 MKL_NUM_THREADS=2
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+export INPUT="${WORK_ROOT}/outputs/cliport_scene_control_e2e_0fcca58_20261015T162702Z/independent_cliport_events"
+export OUTPUT="${WORK_ROOT}/outputs/cliport_scene_common128_v71_$(date +%Y%m%d_%H%M%S)"
+"${WORK_ROOT}/environments/cliport-v71/bin/python" "${ROOT}/code/scripts/score_cliport_predictions_common_v71.py" \
+  --manifest "${WORK_ROOT}/metadata/cliport_event_v71_engineering_c682ec9.json" \
+  --predictions "${INPUT}" --out "${OUTPUT}" --max-edge 128 --model-image-size 512 --cpu-threads 2
+printf 'SCORE_RC=%s\nREPORT=%s/report.json\nCASES=%s/cases.jsonl\n' "$?" "${OUTPUT}" "${OUTPUT}"
+```
+
+LPWM完成自身测试和训练后，先用 `export_lpwm_cliport_predictions_v71.py` 输出原生视图NPZ，再用同一个共同评分入口读取；不能将只含有损MP4的通用RGB evaluator目录当作无损预测目录。LPWM exporter和实际跨模型比较仍待对应资产/实验，不用当前工程模型重评分数宣布方法优劣。
