@@ -897,3 +897,9 @@ printf 'TEST_RC=%s\nREPORT=%s/test_report.json\nVIDEOS=%s/conditional_generation
 - **What changed**：用户已明确允许在百度原运行根建立独立benchmark uv环境，安装PyBullet、Gym及CLIPort必需依赖。新增 `setup_object_event_benchmark_v71.py`，环境位于 `environments/cliport-v71`，使用CPU版PyTorch2.7/torchvision0.22及固定包版本；官方CLIPort源码固定 `2be5c47b5bb9bb7040ad90693288b87b1e18e7ad`。uv二进制、缓存、临时包与源码全部在旧PFS根；经指定代理下载。
 - **Why**：原训练 `.venv` 不承担模拟器依赖变更。CLIPort包入口会导入agent/model模块，因此隔离环境包含其导入依赖，但数据生成不加载策略权重、不训练动作policy。使用官方环境和oracle执行物理过程，后续采集实际body ID、位置和事件次序。
 - **Impact**：环境准备本身不算模拟器执行成功。独立生成与真实渲染仍需完整运行后记录。已读公开分割集只有前后两个action级info快照，不是逐视频帧pose；同编号 `episode00001` 的主RGB/分割集caption相同，但51/50帧且首帧像素不同，不能交叉挂载mask。segm灰度为0、25、51等11个值，尚未确认到body ID的编码，不据此生成目标物体评分。
+
+### 17.4 主体与顺序的真实生成入口
+
+- **What changed**：`generate_cliport_event_sequences_v71.py` 使用官方CLIPort Environment、Task.oracle和UR5抓放primitive，在同一随机场景执行A后B、B后A；三组彩色block/bowl中两组参与事件、一组保留作背景干扰。默认两场景四条完整轨迹，先做真实物理生成与记录检查，不预先称为正式训练/测试划分。
+- **Why**：公开文件中的同编号序列和归一化灰度mask不足以直接恢复严格的物体/时间真值。这里每帧直接保存实际body ID、六个实体的位置/姿态、可见像素数、接触对象对及模拟器物理tick。采样5Hz，physics240Hz；单独数真实stepSimulation调用，不使用上游movej重复递增的step_counter。事件记录区分oracle控制开始/结束和目标reward，不把控制开始误称物体运动onset。
+- **Impact**：每条保留原生camera RGB视频、timeline、truth.npz、episode.json，集合给出同场景两种指令的history像素是否相同及每条真实reward。模型未来输入仅为历史RGB和指令；机器人action、mask和pose只服务数据生成或独立评测。场景渲染/抓放/记录需在新独立环境执行后才算通过；正式组合留出、评测实现和规模化生成仍待后续完成。
