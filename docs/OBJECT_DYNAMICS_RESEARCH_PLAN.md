@@ -1251,3 +1251,11 @@ printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
 ### 20.3 当前执行事实
 
 `0fd4346` 已在百度release中取得，实际文本cache路径从旧prior记录读出为 `metadata/cliport_event_text_v71_c682ec9`。单卡完整测试及四例独立评价已交由同一SWXC对话执行，但截至本轮尚无新训练进程或test_report回执，远控读取暂不可达。模型/模块参数、恢复数值和运行显存仍需实际结果，不以代码差值或旧object-layout测试替代新scene对照的运行证据。正式八卡命令已交付，GPU长训尚未启动。
+
+### 20.4 实测与数值恢复问题
+
+- **What changed**：实际测试 `outputs/cliport_scene_control_e2e_0fd4346_20261015T160129Z` 已执行world训练/恢复及prior训练，但在prior最终数值对比处退出1，未运行独立eval。scene模型实测27,779,887参数（encoder3,287,040、renderer599,461、posterior2,270,344、Dynamics21,623,042），prior22,810,496参数；预算68 tokens/1088 effect标量。world两步loss2.813741/2.721269，梯度有限，峰值13.8307GiB。
+- **Why**：CPU读取既有checkpoint发现两次独立启动在第1步就不同：参数最大差0.00039067585，一阶矩最大差2.59746e-5；第2步差0.00058930879。两步的四类RNG、case顺序、cursor、scheduler与学习率相同。因此这不是已经定位的resume丢状态问题，具体CUDA数值来源仍待进一步实测。
+- **Impact**：新增训练 `--deterministic`，在CUDA初始化前明确设置cuBLAS workspace、确定性算法和cuDNN选项，跟随args进入checkpoint；默认高吞吐训练不变。完整数值恢复测试默认使用该设置，保留原1e-5阈值，并先报告恢复前第1步的差异。每段测试在断言前写 `resume_report.json`，失败也保留实际数值，不吞异常、不改loss。依据为[PyTorch2.8重现性说明](https://docs.pytorch.org/docs/2.8/notes/randomness.html)及[SDPA实现说明](https://docs.pytorch.org/docs/2.8/generated/torch.nn.functional.scaled_dot_product_attention.html)；尚未把该设置写成已经修复。高吞吐模式完整状态恢复与逐位数值等价分开描述。
+
+正式CPU集合已实际启动，session32782、generator PID440957，沿用0fd4346和四进程原计划。最近读取为100/1300场景、160/2200程序，其中159个oracle完成；未完成样本保留，未重复启动。进度文件为 `data/benchmarks/cliport_ordered_v71/progress.json`，日志 `logs/cliport_ordered_v71_data/20261015T155452Z.log`。这是运行中快照，不是数据完成报告。

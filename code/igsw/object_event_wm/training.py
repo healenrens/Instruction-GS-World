@@ -127,6 +127,7 @@ def parse_args(default_stage="joint"):
     parser.add_argument("--frame-batch", type=int, default=4)
     parser.add_argument("--decode-batch", type=int, default=2)
     parser.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
+    parser.add_argument("--deterministic", action="store_true", help="Use deterministic CUDA algorithms for numerical replay.")
     parser.add_argument("--resume", default="")
     parser.add_argument("--init-from", default="")
     parser.add_argument("--source-revision", default="")
@@ -141,6 +142,11 @@ def train(args):
         overrides = {key: getattr(args, key) for key in ("resume", "out", "stop_after", "source_revision")}
         args = argparse.Namespace(**{**vars(args), **checkpoint["args"], **overrides})
         args.stage = "prior" if checkpoint["format"] == "object_event_prior_v71" else "joint"
+    if args.deterministic:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
     rank, local_rank, world = (int(os.environ.get(name, default)) for name, default in
                                (("RANK", "0"), ("LOCAL_RANK", "0"), ("WORLD_SIZE", "1")))
     torch.cuda.set_device(local_rank)
@@ -215,6 +221,7 @@ def train(args):
                                                            for name, module in model.named_children()},
                                      "state_token_budget": config.slots*config.local_tokens,
                                      "effect_scalars_per_step": config.slots*config.effect_dim,
+                                     "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
                                      "frozen_codec_parameters": sum(p.numel() for p in codec.parameters()),
                                      "frozen_teacher_parameters": sum(p.numel() for p in teacher.parameters()) if teacher else 0,
                                      "assets": codec.asset_config, "checkpoint_metadata": checkpoint_metadata})

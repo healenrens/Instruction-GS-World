@@ -33,15 +33,22 @@ def exercise_resume(common, root):
     subprocess.run([*common, "--out", str(recovered), "--stop-after", "1"], check=True)
     subprocess.run([*common, "--out", str(recovered), "--resume", str(recovered/"latest.json")], check=True)
     first, second = read_checkpoint(full/"latest.json"), read_checkpoint(recovered/"latest.json")
+    initial_full = read_checkpoint(full/"recovery_00000001.pt")
+    initial_recovered = read_checkpoint(recovered/"recovery_00000001.pt")
+    initial_difference = max(float((value.float()-initial_recovered["model"][name].float()).abs().max())
+                             for name, value in initial_full["model"].items())
     difference = max(float((value.float()-second["model"][name].float()).abs().max())
                      for name, value in first["model"].items())
     left, right = rows(full/"train.jsonl"), rows(recovered/"train.jsonl")
     order_equal = [row["case_ids_rank0"] for row in left] == [row["case_ids_rank0"] for row in right]
-    result = {"resume_parameter_max_difference": difference, "sample_order_equal": order_equal,
+    result = {"first_step_parameter_max_difference": initial_difference,
+              "resume_parameter_max_difference": difference, "sample_order_equal": order_equal,
+              "deterministic_algorithms": first["args"].get("deterministic", False),
               "uninterrupted_losses": [row["loss"] for row in left],
               "recovered_losses": [row["loss"] for row in right],
               "finite_gradients": all(torch.isfinite(torch.tensor(row["grad_norm"])).item() for row in left+right)}
-    assert difference < 1e-5 and order_equal, result
+    write_json(root/"resume_report.json", result)
+    assert initial_difference < 1e-5 and difference < 1e-5 and order_equal, result
     return result
 
 
@@ -55,6 +62,7 @@ def main():
     parser.add_argument("--train-partition", default="train")
     parser.add_argument("--evaluation-partition", default="development")
     parser.add_argument("--precision", default="bf16", choices=("bf16", "fp32"))
+    parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--source-revision", default="")
     parser.add_argument("--text-cache", default="", help="Include the real language prior and history-only CLI path.")
     parser.add_argument("--prior-base-checkpoint", default="", help="Use a specified fixed teacher for the conditional prior path.")
@@ -71,6 +79,8 @@ def main():
                   "--rollout-ramp", "1", "--warmup", "1", "--effect-mode", mode,
                   "--model-config", args.model_config,
                   "--precision", args.precision, "--source-revision", args.source_revision]
+        if args.deterministic:
+            common.append("--deterministic")
         reports[mode] = exercise_resume(common, out/mode)
     selected = args.modes.split(",")[-1]
     saved = read_checkpoint(out/selected/"recovered/latest.json")
@@ -154,6 +164,8 @@ def main():
                   "--stage", "prior", "--base-checkpoint", args.prior_base_checkpoint or str(out/selected/"recovered/latest.json"),
                   "--text-cache", args.text_cache, "--precision", args.precision,
                   "--source-revision", args.source_revision]
+        if args.deterministic:
+            common.append("--deterministic")
         report["language_prior_training"] = exercise_resume(common, out/"language_prior")
         conditional_model, conditional_prior, _ = load_prior_model(out/"language_prior/recovered/latest.json", torch.device("cuda"))
         text_store = TextFeatureStore(args.text_cache)
