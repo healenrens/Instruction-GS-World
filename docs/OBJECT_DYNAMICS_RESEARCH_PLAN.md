@@ -455,7 +455,8 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 - [x] GitHub发布数据准备与基础主干代码，在阿里PFS建立独立checkout。
 - [x] 在阿里PFS完整展开数据并取得真实manifest准备结果。
 - [x] 补迁语言sidecar到阿里PFS。
-- [ ] 运行真实RGB读取和完整训练/恢复/评测链路。
+- [x] 每源两个episode完成真实RGB读取，保存时间线和文件映射。
+- [ ] 运行完整模型训练/恢复/评测链路。
 - [ ] 配置PFS独立运行环境和已匹配的视觉/成像权重。
 - [ ] 实现基础Object State、posterior、Dynamics、renderer并做真实数据端到端试验。
 - [ ] 实现对象片段effects、条件prior和独立组合评测。
@@ -510,3 +511,11 @@ TextOCVP 的额外核对：附录 Table 7 的 CLIPort 19 帧 LPIPS 为 TextOCVP 
 - **What changed**：新增 `ObjectEffectPrior`，复用历史对象候选的局部tokens、geometry和相对时间；对当前预测state生成Gaussian innovation及对象级更新边界。对象版只在对应候选的历史内读取局部证据，再做跨候选交互；全局对照读取全部历史候选。语言以带有效mask的冻结text tokens输入，不假定固定slot号就是主体。
 - **Why**：posterior能解释真实未来，不等于生成期能够从历史选择正确变化。两个路径必须有独立输入边界与结果。
 - **Impact**：prior训练目标为冻结posterior到prior的Gaussian KL，以及片段版的边界交叉熵；训练允许teacher-force此前的effect，但不把当前目标effect送入当前预测。生成只读取历史、请求时间、语言和随机数，然后递归调用共同Dynamics。当前新增的是prior模块/目标/生成接口；完整语言encoder、prior训练入口和生成比较尚未交付。完整工程测试追加一次history-only prior更新和自由rollout，未把它写成语言能力验证。
+
+### 14.6 真实RGB读取结果
+
+执行提交 `5b8cd9b023609f592cf0a312621624826d60f33e` 已通过GitHub拉到阿里 `/mnt/pfs/xuhaoming/wm-align/releases/5b8cd9b`。使用现有系统Python读取数据，没有安装包、加载模型或改写系统环境。
+
+命令为 `inspect_object_event_data_v71.py --manifest /mnt/pfs/xuhaoming/wm-align/metadata/object_event_v71.json --out /mnt/pfs/xuhaoming/wm-align/outputs/v71_rgb_review_5b8cd9b --items-per-source 2`。实际退出0，五源各2条，共10条成功、0失败/排除。共410帧的frame_valid均为true；每条为16历史+25未来，相对时间-3至+5秒，约0.2秒间隔。前四源使用实际video PTS；RoboTwin使用RGB cache帧号/fps。Bridge原生5FPS，不伪称其被恢复为30FPS。
+
+预览入口为 `/mnt/pfs/xuhaoming/wm-align/outputs/v71_rgb_review_5b8cd9b/index.html`，每例保留 `input_sequence.mp4`、`timeline.jpg`、`source.json`；日志为 `logs/v71_rgb_review_5b8cd9b.log`。RoboMIND这次两个样例均为front，没有由这两个样例推断全部top相机的画面语义。结果证明所选真实窗口可读和时间映射可检查，不代表全部数据质量或模型能力。
