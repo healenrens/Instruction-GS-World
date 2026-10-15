@@ -59,7 +59,7 @@ def restore_rng(state):
     torch.cuda.set_rng_state(state["cuda"])
 
 
-def save_checkpoint(out, model, optimizer, scheduler, step, cursor, args, rank, world, run_id):
+def save_checkpoint(out, model, optimizer, scheduler, step, cursor, args, rank, world, run_id, metadata=None):
     local_rng = rng_state()
     states = [None]*world
     if world > 1:
@@ -71,6 +71,7 @@ def save_checkpoint(out, model, optimizer, scheduler, step, cursor, args, rank, 
                    "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
                    "step": step, "cursor": cursor, "rng": states, "world_size": world,
                    "args": vars(args), "model_config": asdict(model.config), "swanlab_run_id": run_id}
+        payload.update(metadata or {})
         path = out / f"recovery_{step:08d}.pt"
         temporary = path.with_suffix(".partial")
         torch.save(payload, temporary)
@@ -86,19 +87,28 @@ def save_checkpoint(out, model, optimizer, scheduler, step, cursor, args, rank, 
         dist.barrier()
 
 
-def read_checkpoint(path):
-    path = Path(path)
+def checkpoint_path(path):
+    path = Path(path).resolve()
     if path.suffix == ".json":
         path = path.parent / json.loads(path.read_text())["checkpoint"]
-    return torch.load(path, map_location="cpu", weights_only=False)
+    return path
 
 
-def parse_args():
+def read_checkpoint(path):
+    return torch.load(checkpoint_path(path), map_location="cpu", weights_only=False)
+
+
+def parse_args(default_stage="joint"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--assets", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--model-config", default="")
+    parser.add_argument("--stage", choices=("joint", "prior"), default=default_stage)
+    parser.add_argument("--base-checkpoint", default="", help="Fixed world-model checkpoint for prior labels.")
+    parser.add_argument("--text-cache", default="")
+    parser.add_argument("--prior-layers", type=int, default=4)
+    parser.add_argument("--language-dropout", type=float, default=.1)
     parser.add_argument("--effect-mode", choices=("global_step", "object_step", "object_segment"), default="object_step")
     parser.add_argument("--steps", type=int, default=10000)
     parser.add_argument("--stop-after", type=int, default=0)
@@ -128,7 +138,8 @@ def train(args):
     checkpoint = read_checkpoint(args.resume) if args.resume else None
     if checkpoint is not None:
         overrides = {key: getattr(args, key) for key in ("resume", "out", "stop_after", "source_revision")}
-        args = argparse.Namespace(**{**checkpoint["args"], **overrides})
+        args = argparse.Namespace(**{**vars(args), **checkpoint["args"], **overrides})
+        args.stage = "prior" if checkpoint["format"] == "object_event_prior_v71" else "joint"
     rank, local_rank, world = (int(os.environ.get(name, default)) for name, default in
                                (("RANK", "0"), ("LOCAL_RANK", "0"), ("WORLD_SIZE", "1")))
     torch.cuda.set_device(local_rank)
@@ -143,12 +154,20 @@ def train(args):
     config = ModelConfig(**{**options, "effect_mode": args.effect_mode})
     if checkpoint is not None:
         config = ModelConfig(**checkpoint["model_config"])
-    model = ObjectEventWorldModel(config).to(device)
+    teacher, forward_arguments, checkpoint_metadata = None, {}, {"stage": args.stage}
+    if args.stage == "prior":
+        from .prior_training import prepare_prior
+        model, teacher, checkpoint_metadata = prepare_prior(args, checkpoint, rank, world, device)
+        config = model.config
+        forward_arguments["teacher"] = teacher
+    else:
+        model = ObjectEventWorldModel(config).to(device)
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model"])
     elif args.init_from:
         model.load_state_dict(read_checkpoint(args.init_from)["model"])
-    codec = FrozenVisualCodec(args.assets, args.frame_batch, args.decode_batch).to(device)
+    codec = FrozenVisualCodec(args.assets, args.frame_batch, args.decode_batch,
+                              load_decoder=args.stage == "joint").to(device)
     wrapped = DistributedDataParallel(model, device_ids=[local_rank]) if world > 1 else model
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -164,7 +183,9 @@ def train(args):
         scheduler.load_state_dict(checkpoint["scheduler"])
         step, cursor = checkpoint["step"], checkpoint["cursor"]
         restore_rng(checkpoint["rng"][rank])
-    dataset = ObjectEventVideoDataset(args.manifest, seed=args.seed)
+    dataset = ObjectEventVideoDataset(args.manifest, seed=args.seed,
+                                      sampling="language_windows" if args.stage == "prior" else None,
+                                      text_cache=args.text_cache if args.stage == "prior" else "")
     sampler = EpisodeBatchSampler(len(dataset), args.batch, rank, world, args.seed, cursor)
     loader = DataLoader(dataset, batch_sampler=sampler, num_workers=args.workers,
                         collate_fn=collate_object_event_video, pin_memory=True,
@@ -187,7 +208,8 @@ def train(args):
                                      "world_size": world, "dataset_episodes": len(dataset),
                                      "trainable_parameters": sum(p.numel() for p in model.parameters()),
                                      "frozen_codec_parameters": sum(p.numel() for p in codec.parameters()),
-                                     "assets": codec.asset_config})
+                                     "frozen_teacher_parameters": sum(p.numel() for p in teacher.parameters()) if teacher else 0,
+                                     "assets": codec.asset_config, "checkpoint_metadata": checkpoint_metadata})
     model.train()
     while step < args.steps and (not args.stop_after or step < args.stop_after):
         started = time.perf_counter()
@@ -210,7 +232,7 @@ def train(args):
             with sync:
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.precision == "bf16"):
                     ramp = min((step+1)/max(args.rollout_ramp, 1), 1.)
-                    result = wrapped(batch, codec, rollout_weight=ramp)
+                    result = wrapped(batch, codec, rollout_weight=ramp, **forward_arguments)
                 (result["loss"]/args.accum).backward()
             for key, value in {"loss": result["loss"], **result["parts"]}.items():
                 sums[key] = sums.get(key, 0.)+value.detach().float()/args.accum
@@ -242,9 +264,9 @@ def train(args):
                     import swanlab
                     swanlab.log(row, step=step)
         if step % args.save_every == 0:
-            save_checkpoint(out, model, optimizer, scheduler, step, cursor, args, rank, world, run_id)
+            save_checkpoint(out, model, optimizer, scheduler, step, cursor, args, rank, world, run_id, checkpoint_metadata)
     if step % args.save_every != 0:
-        save_checkpoint(out, model, optimizer, scheduler, step, cursor, args, rank, world, run_id)
+        save_checkpoint(out, model, optimizer, scheduler, step, cursor, args, rank, world, run_id, checkpoint_metadata)
     if rank == 0:
         write_json(out / "completion.json", {"step": step, "cursor": cursor,
                                             "scheduled_steps": args.steps, "world_size": world})

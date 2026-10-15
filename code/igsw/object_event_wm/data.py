@@ -1,7 +1,7 @@
 """RGB-only sequences from the existing relocatable video collection."""
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import statistics
@@ -142,12 +142,18 @@ def unique_frame_mask(indices, history_frames):
 class ObjectEventVideoDataset(Dataset):
     """One index per episode; multiple clips/windows do not increase episode weight."""
 
-    def __init__(self, manifest, partition="train", config=None, seed=17):
+    def __init__(self, manifest, partition="train", config=None, seed=17, text_cache="", sampling=None):
         self.path = Path(manifest).resolve()
         self.manifest = json.loads(self.path.read_text())
         self.root = (self.path.parent / self.manifest["root"]).resolve()
         self.config = config or SequenceConfig(**self.manifest["sequence"])
+        if sampling is not None:
+            self.config = replace(self.config, sampling=sampling)
         self.seed = seed
+        self.text_store = None
+        if text_cache:
+            from .text import TextFeatureStore
+            self.text_store = TextFeatureStore(text_cache)
         grouped = defaultdict(list)
         for entry in self.manifest["entries"]:
             if entry["partition"] != partition:
@@ -194,17 +200,21 @@ class ObjectEventVideoDataset(Dataset):
         if isinstance(rgb, VideoDecodeError):
             return {"decode_error": str(rgb), "case_id": entry["case_id"], "source": entry["source"]}
         th = config.history_frames
-        return {
+        sample = {
             "rgb": rgb, "frame_valid": unique_frame_mask(indices, th),
             "times": (timestamps-timestamps[th-1]).float(), "native_hw": torch.tensor(rgb.shape[-2:]),
             "history_frames": th, "frame_indices": indices, "time_source": basis,
             "instruction": instruction, "language_provenance": provenance, "window_id": window_id,
             "case_id": entry["case_id"], "source": entry["source"],
             "camera": case["camera"], "media_path": case["record"]["path"],
+            "adapter": case["record"]["adapter"],
             "frame_offset": case["record"].get("frame_offset", 0), "fps": case["record"]["fps"],
             "episode_index": entry["episode_index"], "partition": entry["partition"],
             "sample_index": index, "epoch": epoch, "occurrence": occurrence,
         }
+        if self.text_store is not None:
+            sample["text_tokens"] = self.text_store[instruction]
+        return sample
 
 
 def collate_object_event_video(samples):
@@ -222,8 +232,11 @@ def collate_object_event_video(samples):
         pixel_valid[index, :, :h, :w] = row["frame_valid"][:, None, None]
     batch = {"rgb": rgb, "pixel_valid": pixel_valid, "history_frames": samples[0]["history_frames"]}
     for key in samples[0]:
-        if key in ("rgb", "history_frames"):
+        if key in ("rgb", "history_frames", "text_tokens"):
             continue
         values = [row[key] for row in samples]
         batch[key] = torch.stack(values) if isinstance(values[0], torch.Tensor) else values
+    if "text_tokens" in samples[0]:
+        from .text import collate_text_features
+        batch["text_tokens"], batch["text_valid"] = collate_text_features([row["text_tokens"] for row in samples])
     return batch

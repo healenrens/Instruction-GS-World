@@ -15,6 +15,7 @@ class PriorContext:
     history: torch.Tensor
     language: torch.Tensor
     language_valid: torch.Tensor
+    anchor_time: torch.Tensor
 
 
 class ObjectEffectPrior(nn.Module):
@@ -29,7 +30,7 @@ class ObjectEffectPrior(nn.Module):
         self.history_input = nn.Linear(d+19, d)
         self.current_input = nn.Linear(d+18, d)
         self.previous_effect = nn.Linear(config.effect_dim, d)
-        self.time_input = nn.Sequential(nn.Linear(1, d), nn.SiLU(), nn.Linear(d, d))
+        self.time_input = nn.Sequential(nn.Linear(2, d), nn.SiLU(), nn.Linear(d, d))
         self.text_input = nn.Linear(text_width, d)
         self.null_text = nn.Parameter(torch.zeros(1, 1, d))
         self.history_attention = nn.ModuleList(AttentionBlock(d, config.heads) for _ in range(layers))
@@ -55,21 +56,29 @@ class ObjectEffectPrior(nn.Module):
         # The null token also makes an empty instruction a valid attention context.
         language = torch.cat((null, self.text_input(text_tokens.float())), 1)
         valid = torch.cat((valid, text_valid.bool()), 1)
-        return PriorContext(history, language, valid)
+        return PriorContext(history, language, valid, final_time)
 
     def forward(self, context, state, previous, time):
-        b, k, _, d = state.tokens.shape
-        value = self.current_input(torch.cat((state.tokens[:, :, 0].float(),
-                                              position_features(state.centers[:, :, 0].float())), -1))
+        result = self.forward_sequence(context, state.tokens[:, None], state.centers[:, None],
+                                       state.time[:, None], previous[:, None], time[:, None])
+        return {key: value[:, 0] if value is not None else None for key, value in result.items()}
+
+    def forward_sequence(self, context, tokens, centers, source_times, previous, times):
+        b, t, k, _, d = tokens.shape
+        value = self.current_input(torch.cat((tokens[:, :, :, 0].float(),
+                                              position_features(centers[:, :, :, 0].float())), -1))
         value = value + self.previous_effect(previous.float())
-        value = value + self.time_input((time-state.time)[:, None])[:, None]
+        time_features = torch.stack((times-source_times, times-context.anchor_time[:, None]), -1)
+        value = value + self.time_input(time_features)[:, :, None]
         for history, language, interaction in zip(self.history_attention, self.language_attention, self.interaction):
             if self.config.effect_mode == "global_step":
-                value = history(value, context.history.flatten(1, 2))
+                value = history(value.flatten(1, 2), context.history.flatten(1, 2)).reshape(b, t, k, d)
             else:
-                value = history(value.reshape(b*k, 1, d), context.history.reshape(b*k, -1, d)).reshape(b, k, d)
-            value = language(value, context.language, context.language_valid)
-            value = interaction(value)
+                queries = value.permute(0, 2, 1, 3).reshape(b*k, t, d)
+                value = history(queries, context.history.reshape(b*k, -1, d)).reshape(b, k, t, d).transpose(1, 2)
+            # Cross-attention shares fixed history/text keys; no future query is another query's key.
+            value = language(value.reshape(b, t*k, d), context.language, context.language_valid).reshape(b, t, k, d)
+            value = interaction(value.reshape(b*t, k, d)).reshape(b, t, k, d)
         mean, logvar = self.distribution(value).float().chunk(2, -1)
         return {"mean": mean, "logvar": logvar.clamp(-6, 2),
                 "boundary_logits": self.boundary(value).float().squeeze(-1) if self.boundary is not None else None}
@@ -108,26 +117,24 @@ def prior_objective(prior, observed_history, rollout_states, posterior_effects, 
                     text_tokens=None, text_valid=None):
     """Teacher-force earlier inferred effects, never the effect being predicted."""
     context = prior.condition([state.detach() for state in observed_history], text_tokens, text_valid)
-    source = observed_history[-1]
-    previous = source.tokens.new_zeros((len(source.tokens), prior.config.slots, prior.config.effect_dim))
-    kls, boundaries, used = [], [], []
-    for index, (target, time) in enumerate(zip(posterior_effects, times.unbind(1))):
-        prediction = prior(context, source.detach(), previous, time)
-        q_mean, q_logvar = target["mean"].detach(), target["logvar"].detach()
-        p_mean, p_logvar = prediction["mean"], prediction["logvar"]
-        kl = .5*(p_logvar-q_logvar + (q_logvar.exp()+(q_mean-p_mean).square())/p_logvar.exp()-1)
-        update = target["boundary"].detach()
-        kls.append(kl.mean(-1))
-        used.append(update)
-        logits = prediction["boundary_logits"]
-        if logits is not None and index:
-            probability = target["boundary_probability"].detach()
-            boundaries.append(F.binary_cross_entropy_with_logits(logits, probability, reduction="none"))
-        # The next input contains only transitions preceding that next target.
-        previous = target["value"].detach()
-        source = rollout_states[index].detach()
-    weight = frame_valid[..., None]*torch.stack(used, 1)
-    innovation = weighted_mean(torch.stack(kls, 1), weight)
-    boundary = (weighted_mean(torch.stack(boundaries, 1), frame_valid[:, 1:, None]) if boundaries
-                else innovation*0)
+    sources = [observed_history[-1], *rollout_states[:-1]]
+    values = torch.stack([row["value"].detach() for row in posterior_effects], 1)
+    previous = torch.cat((torch.zeros_like(values[:, :1]), values[:, :-1]), 1)
+    prediction = prior.forward_sequence(
+        context, torch.stack([s.tokens.detach() for s in sources], 1),
+        torch.stack([s.centers.detach() for s in sources], 1),
+        torch.stack([s.time for s in sources], 1), previous, times)
+    q_mean = torch.stack([row["mean"].detach() for row in posterior_effects], 1)
+    q_logvar = torch.stack([row["logvar"].detach() for row in posterior_effects], 1)
+    p_mean, p_logvar = prediction["mean"], prediction["logvar"]
+    kl = .5*(p_logvar-q_logvar + (q_logvar.exp()+(q_mean-p_mean).square())/p_logvar.exp()-1)
+    used = torch.stack([row["boundary"].detach() for row in posterior_effects], 1)
+    innovation = weighted_mean(kl.mean(-1), frame_valid[..., None]*used)
+    logits = prediction["boundary_logits"]
+    if logits is not None and len(posterior_effects) > 1:
+        probability = torch.stack([row["boundary_probability"].detach() for row in posterior_effects], 1)
+        boundary = weighted_mean(F.binary_cross_entropy_with_logits(
+            logits[:, 1:], probability[:, 1:], reduction="none"), frame_valid[:, 1:, None])
+    else:
+        boundary = innovation*0
     return innovation+boundary, {"innovation_kl": innovation, "boundary_cross_entropy": boundary}

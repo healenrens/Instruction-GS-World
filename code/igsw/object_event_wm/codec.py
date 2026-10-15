@@ -29,13 +29,9 @@ def letterbox_video(batch, size):
 
 
 class FrozenVisualCodec(nn.Module):
-    def __init__(self, assets, frame_batch=4, decode_batch=2):
+    def __init__(self, assets, frame_batch=4, decode_batch=2, load_decoder=True):
         super().__init__()
         config = json.loads(Path(assets).read_text())
-        sys.path.insert(0, str(Path(config["rae_repository"]) / "src"))
-        from stage1.decoders import GeneralDecoder
-        from stage1.decoders.utils import ViTMAEConfig
-
         self.asset_config = config
         self.image_size = config["image_size"]
         self.encoder_size = self.image_size * 14 // 16
@@ -51,12 +47,18 @@ class FrozenVisualCodec(nn.Module):
         processor = AutoImageProcessor.from_pretrained(config["encoder"], local_files_only=True)
         self.register_buffer("image_mean", torch.tensor(processor.image_mean).view(1, 3, 1, 1))
         self.register_buffer("image_std", torch.tensor(processor.image_std).view(1, 3, 1, 1))
-        decoder_config = ViTMAEConfig.from_pretrained(config["decoder_config"], local_files_only=True)
-        decoder_config.hidden_size = self.feature_dim
-        decoder_config.patch_size = 16
-        decoder_config.image_size = self.image_size
-        self.decoder = GeneralDecoder(decoder_config, num_patches=self.grid_size**2)
-        self.decoder.load_state_dict(torch.load(config["decoder"], map_location="cpu", weights_only=True))
+        self.decoder = None
+        if load_decoder:
+            sys.path.insert(0, str(Path(config["rae_repository"]) / "src"))
+            from stage1.decoders import GeneralDecoder
+            from stage1.decoders.utils import ViTMAEConfig
+
+            decoder_config = ViTMAEConfig.from_pretrained(config["decoder_config"], local_files_only=True)
+            decoder_config.hidden_size = self.feature_dim
+            decoder_config.patch_size = 16
+            decoder_config.image_size = self.image_size
+            self.decoder = GeneralDecoder(decoder_config, num_patches=self.grid_size**2)
+            self.decoder.load_state_dict(torch.load(config["decoder"], map_location="cpu", weights_only=True))
         stats = torch.load(config["statistics"], map_location="cpu", weights_only=True)
         self.register_buffer("latent_mean", stats["mean"])
         self.register_buffer("latent_scale", (stats["var"] + 1e-5).sqrt())
@@ -66,7 +68,8 @@ class FrozenVisualCodec(nn.Module):
     def train(self, mode=True):
         super().train(mode)
         self.encoder.eval()
-        self.decoder.eval()
+        if self.decoder is not None:
+            self.decoder.eval()
         return self
 
     @torch.no_grad()

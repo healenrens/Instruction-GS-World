@@ -466,7 +466,7 @@ V71逐源评测采用固定种子、source内部episode-uniform无放回抽样�
 - [x] 每源两个episode完成真实RGB读取，保存时间线和文件映射。
 - [x] 运行完整模型训练/恢复/评测链路，取得真实结果。
 - [x] 定位并修正初始化状态/后验量级异常，重新执行完整链路及逐帧trace。
-- [ ] 在修正后的完整模型上做短程优化和固定held对照。
+- [x] 在修正后的完整模型上完成100步优化和固定40例held对照。
 - [ ] 配置PFS独立运行环境和已匹配的视觉/成像权重。
 - [ ] 实现基础Object State、posterior、Dynamics、renderer并做真实数据端到端试验。
 - [ ] 实现对象片段effects、条件prior和独立组合评测。
@@ -575,3 +575,45 @@ V71逐源评测采用固定种子、source内部episode-uniform无放回抽样�
 结果根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/object_event_v71_e2e_93f5ae1_20261015T072730Z`。保留 `test_report.json`、三模式日志及checkpoint、`numerics/initial.json`、`numerics/trained_step2.json`、五源重建报告和40个视频。对应日志位于旧运行根下 `logs/object_event_v71_e2e_93f5ae1_20261015T072730Z`。会话27988最终退出0，测试PID13419已结束。
 
 下一项是短程真实优化与固定episode对照，之后补全条件prior训练和独立组合实验。此处完成的是完整工程链路和一个具体数值故障的修正，不是长期训练或科学效果验收。
+
+### 14.11 100步优化与40例配对结果
+
+百度继续执行同一 `93f5ae1`：object_step从头训练100 optimizer steps，batch2、accum1、workers2、warmup10、rollout-ramp10、seed17，512/BF16及原模型维度不变。2026-10-15 15:55:54 CST训练退出0，随后指定工程step-2参考与本次step-100在同一40例development窗口上评测，两次均退出0，16:03:34结束；每源8例、无排除，case顺序/帧索引/时间相同。
+
+| 条件 | Step-2参考 RGB L1 | Step-100 RGB L1 |
+| --- | ---: | ---: |
+| codec reference | 0.054364 | 0.054364 |
+| observed state | 0.208791 | 0.187191 |
+| posterior | 0.306446 | 0.192352 |
+| zero effect | 0.315927 | 0.191795 |
+| reversed effect order | 0.305534 | 0.192534 |
+| source-state copy | 0.216521 | 0.187216 |
+| RGB copy | 0.064772 | 0.064772 |
+
+Posterior变化加权L1从0.301292降至0.229818，但zero effect为0.219842。可以判断短程优化改善重建，不能判断effect已有效；重建仍明显弱于codec reference，且posterior没有超过zero/copy。两步参考与100步pilot的batch/schedule不同，本项不是正式方法消融。
+
+21个训练记录点中KL为0.1068-0.3872，gradient norm为0.6686-5.5426；observed state末帧RMS维持约1。Rollout末帧RMS最高5.7529，最后为2.2581，表明两条状态路径尺度不同，但不单凭该内部量判定动态信息质量。单步耗时中位数约3秒、吞吐0.667样例/秒，峰值allocated显存33.59GiB。
+
+结果根为 `/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/object_event_v71_pilot100_93f5ae1_20261015T075006Z`，包含 `recovery_00000100.pt`、`reference_step2_eval` 和 `pilot_step100_eval` 的逐例JSON及视频；日志在旧运行根对应 `logs/object_event_v71_pilot100_93f5ae1_20261015T075006Z`。会话93801及训练/评测进程均已结束。
+
+## 15. 完整条件prior链路实施
+
+### 15.1 固定标签与语言
+
+训练prior时，使用明确指定的world-model checkpoint。启动时将其硬链接为该run的 `teacher.pt`，随后所有恢复点引用这个固定依赖，不追随外部latest，不把冻结teacher重复写入每个checkpoint。State、posterior、Dynamics均冻结；teacher只生成状态与effect标签，不执行无用的RGB decoder。联合训练入口保持原有路径。
+
+语言使用百度已存在的 `/mnt/pfs/public/xuhaoming/model_zoo/Qwen3-VL-4B-Instruct`。实际config为qwen3_vl，text hidden size2560；tokenizer与两个权重分片均存在。本轮先固定其文本encoder，仅编码instruction并缓存逐token特征，不输入视频、不生成描述、不重训4B。`prepare_object_event_text_v71.py`从已有language_windows去重，保留全文、不截断，按文件增量恢复；不新增语言、不复制RGB。每条训练样例仍使用自己被审计的语言窗口，缺语言片段不充当语言主实验。
+
+### 15.2 训练和生成的边界
+
+`train_object_event_prior_v71.py`/`.sh`复用现有DDP、episode-uniform sampler、保存恢复和训练标量链路。仅prior参与optimizer，学习冻结posterior到prior的Gaussian KL和片段更新边界；此前effect可以teacher-force，当前target effect不得作为当前输入。历史与语言cross-attention对所有未来query批处理，query之间只在同一时刻交互，不混合未来时刻。时间条件包含相邻步长和距历史终点的请求时间，不包含episode剩余时长。
+
+10%样本丢弃语言，训练有效的无语言条件，供匹配对照使用；这是固定训练设计，不是本轮调参搜索。缓存文本不需要在prior训练进程加载Qwen，RGB decoder也不加载；只有标签所需的冻结DINO和world-model模块常驻。
+
+`forecast_object_event_world_model_v71.py`从history_request读取明确列出的历史RGB帧，在线编码用户instruction，再由prior和同一Dynamics生成未来state/RGB。history_request不包含未来帧索引；输出记录 `future_rgb_read=false`、生成effects和实际时间。视频按实际PTS写入，不因历史/未来采样间距不同改变事件显示时间。
+
+### 15.3 评测和完整运行测试
+
+同一teacher/decoder下配对报告posterior、zero/reversed effect、copy，以及正确语言、无语言、打乱语言的生成样本。相同case的语言干预使用相同随机噪声；记录实际打乱文本，不将其一律称为已确认冲突指令。逐例、逐帧、分来源报告绝对RGB指标。多样本期望误差与按整条sequence选择的best-of-N分开，后者仅是oracle。缓存文本评测的耗时明确不含Qwen；独立forecast记录包含在线文本编码的完整预测耗时。
+
+现有单一完整测试入口加入真实文本cache、固定teacher、prior更新/保存恢复、配对生成和仅历史文件的forecast；还检查批处理未来query不会改变第一步输出及MP4的实际PTS。代码已写入，尚待真实GPU执行。接下来的工程测试可引用上述100步teacher，但不能因此宣布该teacher或prior已具备有效object dynamics；正式科学实验仍需更充分训练与独立主体/顺序评价。
