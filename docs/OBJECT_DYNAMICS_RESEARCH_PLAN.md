@@ -903,3 +903,11 @@ printf 'TEST_RC=%s\nREPORT=%s/test_report.json\nVIDEOS=%s/conditional_generation
 - **What changed**：`generate_cliport_event_sequences_v71.py` 使用官方CLIPort Environment、Task.oracle和UR5抓放primitive，在同一随机场景执行A后B、B后A；三组彩色block/bowl中两组参与事件、一组保留作背景干扰。默认两场景四条完整轨迹，先做真实物理生成与记录检查，不预先称为正式训练/测试划分。
 - **Why**：公开文件中的同编号序列和归一化灰度mask不足以直接恢复严格的物体/时间真值。这里每帧直接保存实际body ID、六个实体的位置/姿态、可见像素数、接触对象对及模拟器物理tick。采样5Hz，physics240Hz；单独数真实stepSimulation调用，不使用上游movej重复递增的step_counter。事件记录区分oracle控制开始/结束和目标reward，不把控制开始误称物体运动onset。
 - **Impact**：每条保留原生camera RGB视频、timeline、truth.npz、episode.json，集合给出同场景两种指令的history像素是否相同及每条真实reward。模型未来输入仅为历史RGB和指令；机器人action、mask和pose只服务数据生成或独立评测。场景渲染/抓放/记录需在新独立环境执行后才算通过；正式组合留出、评测实现和规模化生成仍待后续完成。
+
+### 17.5 公开数据与独立环境的实际执行状态
+
+`3337884` 在百度完成仅RGB本体的manifest重建及四例development预览，均退出0。随后发现GPU0有其他compute进程、约40GiB实际占用，因此本轮没有启动文本cache与完整GPU训练测试，没有终止这些进程。该项不能沿用先前multirobot测试结论宣称新benchmark链路已通过。
+
+独立环境准备退出0，`environments/cliport-v71` 实际安装torch2.7.0+cpu/torchvision0.22.0+cpu，官方CLIPort固定源码已到 `third_party/cliport-2be5c47`；运行环境清单位于 `metadata/object_event_benchmark_environment_v71.json`。旧训练环境未改动。
+
+首次完整模拟入口 `9c2db59` 在导入官方CLIport utils时因缺少matplotlib退出1，没有生成轨迹。源码修订 `cb53f5d26beed6f39833bbad25fa42264035a978` 只补充matplotlib3.10.3，已推送并交由SWXC从GitHub获取，用同一场景、seeds17/18重跑。此次失败日志在旧运行根 `logs/cliport_event_sequences_v71_9c2db59_20261015T121641Z/generate.log`；修订后的实际结果待返回。不能把包安装完成写成物理生成、事件标签或模型能力验证完成。
