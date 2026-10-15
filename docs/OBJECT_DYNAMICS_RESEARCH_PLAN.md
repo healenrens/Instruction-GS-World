@@ -1176,17 +1176,17 @@ printf 'EVAL_RC=%s\nREPORT=%s/report.json\n' "$?" "${OUT}"
 
 ### 20.1 单卡完整测试
 
-代码提交 `0fd4346ffd3b5437ff63291e45777ad8c2fbf2fa`。准备机取得该release后运行；这段不联网、不改已有模型或数据。文本cache路径从已完成的四例prior运行记录读取，不猜测其目录名。
+当前数值测试修订为 `0fcca583f4b475fae6cc1f05ff8e65b20f4eea7b`，默认启用明确的确定性计算设置，保留原比较阈值；此前0fd4346失败证据见20.4。准备机取得该release后运行；这段不联网、不改已有模型或数据。文本cache路径从已完成的四例prior运行记录读取，不猜测其目录名。
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=0fd4346ffd3b5437ff63291e45777ad8c2fbf2fa
+export SOURCE_REVISION=0fcca583f4b475fae6cc1f05ff8e65b20f4eea7b
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/.venv/bin/python"
 export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71_engineering_c682ec9.json"
 export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
 export CUDA_VISIBLE_DEVICES=0
-export RUN_NAME="cliport_scene_control_e2e_0fd4346_$(date +%Y%m%d_%H%M%S)"
+export RUN_NAME="cliport_scene_control_e2e_0fcca58_$(date +%Y%m%d_%H%M%S)"
 export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
 export LOG_ROOT="${WORK_ROOT}/logs/${RUN_NAME}"
 export TEXT_CACHE="$("${PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1]))["args"]["text_cache"])' \
@@ -1200,11 +1200,11 @@ printf 'TEST_RC=%s\nREPORT=%s/test_report.json\n' "$?" "${OUT}"
 
 ### 20.2 八卡scene对照
 
-以下joint/prior分别前台运行；正式数据与文本cache完成后使用。预算与18.10的object对照相同，模型从头训练。内部主比较是scene/global与object/global，不把scene/global和object/segment之间的全部差异归因于单一机制。
+以下joint/prior分别前台运行；正式数据与文本cache完成后使用。预算与18.10的object对照相同，模型从头训练。内部主比较是scene/global与object/global，不把scene/global和object/segment之间的全部差异归因于单一机制。此处保留高吞吐算法默认设置，恢复完整训练状态但不宣称CUDA浮点逐位一致；20.1的数值一致性测试单独使用确定性设置。
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=0fd4346ffd3b5437ff63291e45777ad8c2fbf2fa
+export SOURCE_REVISION=0fcca583f4b475fae6cc1f05ff8e65b20f4eea7b
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/.venv/bin/python"
 export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
@@ -1212,7 +1212,7 @@ export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
 export EFFECT_MODE=global_step
-export RUN_NAME=cliport_scene_global_v71_seed17_0fd4346_1000
+export RUN_NAME=cliport_scene_global_v71_seed17_0fcca58_1000
 export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
 export BATCH_PER_GPU=2 GRAD_ACCUM=16 STEPS=1000 WORKERS_PER_RANK=2
 export ENCODER_FRAME_BATCH=4 DECODER_FRAME_BATCH=2
@@ -1226,14 +1226,14 @@ printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=0fd4346ffd3b5437ff63291e45777ad8c2fbf2fa
+export SOURCE_REVISION=0fcca583f4b475fae6cc1f05ff8e65b20f4eea7b
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/.venv/bin/python"
 export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
 export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
 export TEXT_CACHE="${WORK_ROOT}/metadata/cliport_ordered_text_v71"
-export BASE_CHECKPOINT="${WORK_ROOT}/outputs/cliport_scene_global_v71_seed17_0fd4346_1000/step_00001000.pt"
-export RUN_NAME=cliport_scene_global_prior_v71_seed17_0fd4346_1000
+export BASE_CHECKPOINT="${WORK_ROOT}/outputs/cliport_scene_global_v71_seed17_0fcca58_1000/step_00001000.pt"
+export RUN_NAME=cliport_scene_global_prior_v71_seed17_0fcca58_1000
 export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
