@@ -1136,8 +1136,8 @@ export RUN_NAME="cliport_ordered_prior_v71_${EFFECT_MODE}_seed17_048a3fc_1000"
 export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
-export BATCH_PER_GPU=2 GRAD_ACCUM=16 STEPS=1000 WORKERS_PER_RANK=2
-export ENCODER_FRAME_BATCH=4 DECODER_FRAME_BATCH=2 LANGUAGE_DROPOUT=0.1
+export BATCH_PER_GPU=32 GRAD_ACCUM=1 STEPS=1000 WORKERS_PER_RANK=2
+export ENCODER_FRAME_BATCH=64 DECODER_FRAME_BATCH=2 LANGUAGE_DROPOUT=0.1
 export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
 unset RESUME INIT_FROM
 bash "${ROOT}/code/scripts/train_object_event_prior_v71.sh" \
@@ -1241,8 +1241,8 @@ export RUN_NAME=cliport_scene_global_prior_v71_seed17_0fcca58_1000
 export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
-export BATCH_PER_GPU=2 GRAD_ACCUM=16 STEPS=1000 WORKERS_PER_RANK=2
-export ENCODER_FRAME_BATCH=4 DECODER_FRAME_BATCH=2 LANGUAGE_DROPOUT=0.1
+export BATCH_PER_GPU=32 GRAD_ACCUM=1 STEPS=1000 WORKERS_PER_RANK=2
+export ENCODER_FRAME_BATCH=64 DECODER_FRAME_BATCH=2 LANGUAGE_DROPOUT=0.1
 export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
 unset RESUME INIT_FROM
 bash "${ROOT}/code/scripts/train_object_event_prior_v71.sh" \
@@ -1273,3 +1273,9 @@ printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
 本次输出根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/cliport_scene_control_e2e_0fcca58_20261015T162702Z`。主要证据为 `test_report.json`、`global_step/resume_report.json`、`language_prior/resume_report.json`、`independent_cliport_events/report.json` 和 `independent_cliport_events/cases.jsonl`。新增组合标签统计的 `7c3612d` 只安排既有四例的CPU评分检查，不重复模型训练或GPU生成。
 
 **评分元数据CPU实测完成**：`7c3612d21f0d699a46e3e3b0822a5b3d13e80d70` 的既有四例检查退出0、status=passed；两scene的全部paired checks通过。组合分组明确为engineering，5个条件各含2个scene pair；参考类别的绝对误差分组同为engineering，各条件含4个case。unscored与unpaired列表均空，没有把工程样例标为正式seen/held。报告为 `outputs/cliport_metric_composition_7c3612d_20261015T164619Z/report.json`，model_evaluated=false。真实held/失败program的正式统计仍等待完整集合与后续评价，不能由这四例代替。
+
+### 20.6 Prior批量配置实测
+
+- **What changed**：用相同scene teacher、完整16+50帧输入测量prior的B32、累积1、encoder frame-batch64，默认高吞吐算法，单卡退出0。prior入口默认设置更新为B32/acc1/frame64；显式环境值仍优先。18.10与20.2的八卡prior命令同步，global batch仍为256，joint配置不改。
+- **Why**：prior不加载RAE decoder，也不对frozen teacher回传，其B1测试峰值只有1.44GiB。将joint的B2设置直接用于prior会留下很大的批量空间。
+- **Impact**：实际profile仅两步、effective batch32，不是八卡性能测量。第一步21.1444秒（data13.3720秒）、1.5134样例/秒、22.5032GiB；第二步4.80839秒（data0.000577秒）、6.65504样例/秒、22.6823GiB。loss2.013954/1.619500，梯度60.00037/59.24242，均有限；预取让第二步几乎不等数据，不能把该点写成长期吞吐。结果在 `outputs/cliport_prior_batch32_0fcca58_20261015T165942Z`，未启动八卡长训，也未为profile重启正式数据生成。
