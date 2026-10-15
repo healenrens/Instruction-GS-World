@@ -1169,3 +1169,77 @@ printf 'EVAL_RC=%s\nREPORT=%s/report.json\n' "$?" "${OUT}"
 - **What changed**：新增 `scene_state.py` 与 `code/configs/object_event_scene_control_v71.json`。保留相同DINOv2/RAE、68个384维state tokens、17个64维global effect tokens、Dynamics层数、目标和采样；每个scene token独立读取全图，取消对象之间的竞争分配，memory在68个tokens之间全局attention。renderer将所有tokens汇成一个场景field，不再为每个候选对象独立成像和mask合成。使用 `global_step` effect路径，历史和effect cross-attention都是全局的。
 - **Why**：只有global-step/object-step/object-segment三个对象模型，不能隔离对象状态组织本身的价值。此对照与object-layout/global-step先比较状态与renderer组织；后者再与object-step比较effect绑定，object-step与object-segment比较持续时间。它是受控内部对照，不替代LPWM/TextOCVP外部主比较。
 - **Impact**：场景对照的 `[17,4]` 只是共享存储接口，不代表17个物体。参数形状除renderer去掉一个输出mask logit外保持一致，参数差为384+1=385；run/test报告记录实际模块参数、state tokens及effect维度，不能把近同参数写成同FLOPs。场景renderer不输出实体分割，因此独立evaluator将ownership列为不可用，而非把整图label当物体真值；外部actor区域RGB与配对顺序分数仍使用同一GT。旧checkpoint默认object-layout，新scene模型从头训练，不重写已有实验。完整单卡训练/恢复/prior/生成测试仍待服务器执行，尚未宣称对照有效。
+
+### 20.1 单卡完整测试
+
+代码提交 `0fd4346ffd3b5437ff63291e45777ad8c2fbf2fa`。准备机取得该release后运行；这段不联网、不改已有模型或数据。文本cache路径从已完成的四例prior运行记录读取，不猜测其目录名。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=0fd4346ffd3b5437ff63291e45777ad8c2fbf2fa
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71_engineering_c682ec9.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export CUDA_VISIBLE_DEVICES=0
+export RUN_NAME="cliport_scene_control_e2e_0fd4346_$(date +%Y%m%d_%H%M%S)"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export LOG_ROOT="${WORK_ROOT}/logs/${RUN_NAME}"
+export TEXT_CACHE="$("${PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1]))["args"]["text_cache"])' \
+  "${WORK_ROOT}/outputs/cliport_event_e2e_92db4e7_20261015T134435Z/language_prior/recovered/run.json")"
+bash "${ROOT}/code/scripts/test_object_event_world_model_v71.sh" \
+  --model-config "${ROOT}/code/configs/object_event_scene_control_v71.json" \
+  --modes global_step --train-partition engineering --evaluation-partition engineering \
+  --text-cache "${TEXT_CACHE}"
+printf 'TEST_RC=%s\nREPORT=%s/test_report.json\n' "$?" "${OUT}"
+```
+
+### 20.2 八卡scene对照
+
+以下joint/prior分别前台运行；正式数据与文本cache完成后使用。预算与18.10的object对照相同，模型从头训练。内部主比较是scene/global与object/global，不把scene/global和object/segment之间的全部差异归因于单一机制。
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=0fd4346ffd3b5437ff63291e45777ad8c2fbf2fa
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
+export EFFECT_MODE=global_step
+export RUN_NAME=cliport_scene_global_v71_seed17_0fd4346_1000
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export BATCH_PER_GPU=2 GRAD_ACCUM=16 STEPS=1000 WORKERS_PER_RANK=2
+export ENCODER_FRAME_BATCH=4 DECODER_FRAME_BATCH=2
+export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
+unset RESUME INIT_FROM
+bash "${ROOT}/code/scripts/train_object_event_world_model_v71.sh" \
+  --model-config "${ROOT}/code/configs/object_event_scene_control_v71.json" \
+  --warmup 50 --rollout-ramp 100 --save-every 100 --snapshot-every 1000
+printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
+```
+
+```bash
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=0fd4346ffd3b5437ff63291e45777ad8c2fbf2fa
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export TEXT_CACHE="${WORK_ROOT}/metadata/cliport_ordered_text_v71"
+export BASE_CHECKPOINT="${WORK_ROOT}/outputs/cliport_scene_global_v71_seed17_0fd4346_1000/step_00001000.pt"
+export RUN_NAME=cliport_scene_global_prior_v71_seed17_0fd4346_1000
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
+export BATCH_PER_GPU=2 GRAD_ACCUM=16 STEPS=1000 WORKERS_PER_RANK=2
+export ENCODER_FRAME_BATCH=4 DECODER_FRAME_BATCH=2 LANGUAGE_DROPOUT=0.1
+export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
+unset RESUME INIT_FROM
+bash "${ROOT}/code/scripts/train_object_event_prior_v71.sh" \
+  --warmup 50 --save-every 100 --snapshot-every 1000
+printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
+```
+
+恢复时保留完整环境，替换 `unset RESUME INIT_FROM` 为 `unset INIT_FROM`，增加 `export RESUME="${OUT}/latest.json"`；实际scene配置从checkpoint恢复。正式评价仍使用18.10的同一evaluator和development清单，只将prior-checkpoint与OUT切换为对应scene run，不为scene单独挑case或改变actor评分区域。
