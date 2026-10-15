@@ -12,6 +12,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from igsw.object_event_wm.data import SequenceConfig, write_json
 from igsw.object_event_wm.independent_metrics import score_entities, score_rgb_outcomes, physical_motion_context
+from igsw.object_event_wm.paired_event_summary import summarize_paired_events
 from igsw.object_event_wm.simulation_data import load_episode, load_truth, nearest_indices, requested_times
 
 
@@ -89,9 +90,19 @@ def main():
                 stream.flush()
                 print(json.dumps({"case_id": row["case_id"], "checks": checks,
                                   "oracle_order_margin": oracle["rgb"]["order_preference_margin"]}), flush=True)
+    paired = summarize_paired_events(cases)
+    paired_checks = [{"scene_seed": pair["scene_seed"],
+                      "oracle_positive": pair["conditions"]["oracle"]["paired_order_margin"] > 0,
+                      "opposite_negative": pair["conditions"]["opposite_order"]["paired_order_margin"] < 0,
+                      "copy_bias_cancels": abs(pair["conditions"]["current_copy"]["paired_order_margin"]) < 1e-6,
+                      "fused_mean_bias_cancels": abs(pair["conditions"]["two_outcome_rgb_mean"]["paired_order_margin"]) < 1e-6}
+                     for pair in paired["scene_pairs"]]
+    pairs_passed = bool(paired_checks) and all(all(value for key, value in row.items() if key != "scene_seed")
+                                              for row in paired_checks)
     report = {"task": "metric_falsification_on_real_simulator_sequences", "collection": str(collection.resolve()),
               "cases": len(cases), "excluded_unpaired_cases": excluded,
-              "status": "passed" if cases and all(all(row["checks"].values()) for row in cases) else "failed",
+              "status": "passed" if cases and all(all(row["checks"].values()) for row in cases) and pairs_passed else "failed",
+              "paired_outcome_preference": paired, "paired_checks": paired_checks,
               "model_evaluated": False, "physical_motion_onset_classifier_used": False,
               "per_case": [{"case_id": row["case_id"], "checks": row["checks"],
                             "oracle_order_margin": row["conditions"]["oracle"]["rgb"]["order_preference_margin"]} for row in cases]}

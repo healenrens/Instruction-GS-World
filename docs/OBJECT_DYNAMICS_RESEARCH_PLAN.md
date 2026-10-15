@@ -981,3 +981,39 @@ printf 'GENERATE_RC=%s\nREVIEW=%s/index.html\n' "${GENERATE_RC}" "${OUT}"
 `make_cliport_event_plan_v71.py`在模拟前固定scene seed、颜色和允许的指令，不按未来运动或执行成功挑选场景。默认1000/100/200个train/development/test场景，同一场景的全部程序保持在一个集合内。六种颜色中的有向相邻actor-color对作为未见顺序组合，训练排除这些方向，但可学习反方向和各自原子放置。development/test同时包含已见和留出方向，并报告测试原子actor-color/target-color关系是否已在train出现。
 
 这项留出检验的是“已见原子放置的新主体先后组合”，不称新物理技能，也不把test新颜色当主要变量。正式计划和生成后的成功/失败覆盖需另列；四条工程样例不被重新包装为正式test。训练按scene均匀访问，再选其中一个可用指令，避免双指令场景自动获得双倍权重。
+
+### 18.5 百度实际端到端结果
+
+- **What changed**：`92db4e782fcc71bc93b2783ae8235a314b2d74de` 在百度完成固定10秒模拟数据读取、真实结果评分校准、完整world/prior更新与保存恢复、history-only生成，以及同一模型的独立逐例评价，所有进程正常结束。新数据根为 `outputs/cliport_event_sequences_v71_c682ec9_20261015T133041Z`，四例均66帧、reward1、16帧history相同；模型manifest为 `metadata/cliport_event_v71_engineering_c682ec9.json`。world/prior各两步，resume参数差异0，causal差异0；history-only请求只读取 `history.npz`，产生50帧/10秒结果。
+- **Why**：需要分别确认评分器能区分已知正确/错误结果、模型链路能实际运行，以及训练模型究竟表现如何，不能把三者合并成一个“通过”。
+- **Impact**：这仍是四例工程测试，不是正式留出结果。正式plan已落 `metadata/cliport_event_v71_plan_c682ec9.json`：1000/100/200场景、1600/200/400程序，scene不重叠，train覆盖30种原子颜色关系，dev/test没有未见原子关系。1300个场景尚未生成，也未开始八卡长训。
+
+评分器的真实控制结果：四例的11项检查均通过。正确结果RGB误差0、IoU1、centroid误差0；seed17/18的正确顺序margin为0.134194289/0.175817626，反序为对应负值，两真实结果RGB均值的margin约0。只交换实体标签时RGB误差仍0，但主体IoU降为0，说明成像与身份不能相互替代。证据在 `outputs/cliport_event_metric_check_92db4e7_20261015T134435Z/{report.json,cases.jsonl}`。
+
+两步模型的主体区域RGB L1：posterior 0.554148、zero 0.550133、state-copy 0.402913、正确语言0.547555、无语言0.547535、原图copy 0.169803。四例共8个actor没有匹配到候选field，400/400个可见actor帧缺少预测，IoU为0；800px数值是显式missing惩罚，不是测得的实际轨迹偏差。它说明初始化两步模型尚未建立有效表示，不能由此判断长训后方法是否成立。逐例与视频在 `outputs/cliport_event_eval_92db4e7_20261015T134435Z`；恢复证据在 `outputs/cliport_event_e2e_92db4e7_20261015T134435Z/test_report.json`。
+
+同一新协议的单A100 B2 profile完成，未改变模型或loss：
+
+| 实测项 | Step 1 | Step 2 |
+| --- | ---: | ---: |
+| Loss | 2.7984633446 | 2.7513113022 |
+| Gradient norm | 12.6962766647 | 3.2945632935 |
+| 单步秒数 | 7.124901 | 4.366188 |
+| 样例/秒 | 0.280706 | 0.458066 |
+| Peak allocated GiB | 51.331513 | 51.542677 |
+
+实际profile根：`outputs/cliport_event_batch2_92db4e7_20261015T141409Z`，日志在同名 `logs` 目录，退出0。后续受控16+50帧协议八卡采用每卡B2、累积16、global batch256；原3+5秒41帧的B4实测不直接迁移到这个更长窗口。上述吞吐只是单卡两步，不是八卡稳态测量。
+
+公开TextOCVP本体的 `3337884` 单卡完整测试也已完成：三种effect模式及prior恢复参数差异均0，78条完整指令cache可用，1+9帧单位为sampled_frame，峰值显存13.408241GiB。它同样只确认运行链路，没有正式benchmark训练成绩。
+
+### 18.6 消除固定输出的顺序偏好
+
+- **What changed**：新增 `summarize_cliport_event_pairs_v71.py`，直接读取现有 `cases.jsonl`，不加载模型或重跑视频。每个scene先保留两种指令逐帧的“另一真实结果误差减指定结果误差”，再在共同时间取两者平均，最后按scene汇总。evaluator与评分控制入口使用同一实现。绝对主体区域RGB误差继续并列报告。
+- **Why**：同一个不随语言改变的预测，可能偶然更像其中一种顺序；只看单例margin或“2/4正值”不能证明语言有效。两种指令使用相同history、噪声和对称评分区域时，固定输出的成对margin应为0。
+- **Impact**：成对分数只测真实配对结果偏好，不宣称任务成功或物理事件onset。posterior/真实oracle读取未来，只作为上限；仅history/语言条件承担部署结论。真实控制应表现为正确结果正值、反序负值、copy和两结果均值约0；已保存四例结果的CPU配对汇总待执行。
+
+### 18.7 平台范围更新
+
+- **What changed**：用户本轮明确回复skip，跳过阿里备用阶段的网络、环境和权重准备；不再查询或重试其代理访问。已完成的阿里数据和只读记录保留。
+- **Why**：百度已经完成真实数据、模拟器和GPU链路，后续实验以百度旧目录为主。
+- **Impact**：安装、数据、模型与结果仍全部放服务器PFS，不放Mac；新代码继续本地提交GitHub、SWXC从GitHub取到百度执行。阿里没有被记为GPU实验通过。

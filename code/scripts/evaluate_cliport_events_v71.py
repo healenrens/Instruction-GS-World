@@ -15,8 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from igsw.object_event_wm.codec import FrozenVisualCodec
 from igsw.object_event_wm.config import ModelConfig
 from igsw.object_event_wm.data import build_video_dataset, collate_object_event_video, write_json
-from igsw.object_event_wm.evaluation import balanced_indices, write_video
+from igsw.object_event_wm.evaluation import write_video
 from igsw.object_event_wm.independent_metrics import score_entities, score_rgb_outcomes, physical_motion_context
+from igsw.object_event_wm.paired_event_summary import summarize_paired_events
 from igsw.object_event_wm.model import ObjectEventWorldModel
 from igsw.object_event_wm.prediction import generate_from_history, history_batch, observe_history, make_history_request
 from igsw.object_event_wm.prior_training import load_prior_model
@@ -50,6 +51,19 @@ def native_field_labels(masks, hw, image_size):
     return np.stack(labels)
 
 
+def paired_indices(dataset, items):
+    scenes = defaultdict(list)
+    for index, entries in enumerate(dataset.episodes):
+        scenes[entries[0]["scene_seed"]].append(index)
+    rng = np.random.default_rng(dataset.seed)
+    indices = []
+    for scene in rng.permutation(sorted(scenes)):
+        if len(indices)+len(scenes[scene]) > items:
+            break
+        indices.extend(scenes[scene])
+    return indices
+
+
 @torch.no_grad()
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -59,7 +73,7 @@ def main():
     parser.add_argument("--prior-checkpoint", default="")
     parser.add_argument("--text-cache", default="")
     parser.add_argument("--partition", default="engineering")
-    parser.add_argument("--items", type=int, default=16)
+    parser.add_argument("--items", type=int, default=16, help="Maximum cases, keeping each selected scene's programs together")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
     device, prior, text_store = torch.device("cuda"), None, None
@@ -78,9 +92,9 @@ def main():
             groups[entry["scene_seed"]].append(entry)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    summaries = []
+    summaries, paired_cases = [], []
     with (out/"cases.jsonl").open("w") as stream:
-        for index in balanced_indices(data, args.items):
+        for index in paired_indices(data, args.items):
             sample = data[index]
             th, hw = sample["history_frames"], sample["native_hw"].tolist()
             batch = device_batch(collate_object_event_video([sample]), device)
@@ -167,6 +181,11 @@ def main():
                 actors, meta["robot_and_tool_body_ids"], times, alternative_rgb, alternative_truth)}
             stream.write(json.dumps(case, allow_nan=False)+"\n")
             stream.flush()
+            paired_cases.append({"case_id": case["case_id"], "scene_seed": case["scene_seed"],
+                                 "instruction": case["instruction"],
+                                 "conditions": {name: {"rgb": result["rgb"],
+                                     "reference_instruction": result.get("reference_instruction", case["instruction"])}
+                                     for name, result in case["conditions"].items()}})
             summaries.append({"case_id": case["case_id"], "scene_seed": meta["seed"],
                               "conditions": {name: {key: result["rgb"][key] for key in
                                   ("full_rgb_l1", "actor_region_rgb_l1", "order_preference_margin")}
@@ -174,6 +193,7 @@ def main():
             print(json.dumps(summaries[-1]), flush=True)
     write_json(out/"report.json", {"manifest": args.manifest, "checkpoint": args.checkpoint,
                 "prior_checkpoint": args.prior_checkpoint, "partition": args.partition, "cases": summaries,
+                "paired_outcome_preference": summarize_paired_events(paired_cases),
                 "truth_origin": "CLIPort simulator; never model mask or tracker",
                 "posterior_uses_future": True, "prior_uses_future_rgb": False,
                 "motion_metric_scope": "visible silhouette centroid, not 3D physical pose",
