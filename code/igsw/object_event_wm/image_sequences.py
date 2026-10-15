@@ -30,6 +30,8 @@ def prepare_textocvp_manifest(archive_path, output, history_frames=1, future_fra
     with ZipFile(archive_path) as archive:
         for name in archive.namelist():
             parts = PurePosixPath(name).parts
+            if parts[0] != "PutInBowl":
+                continue
             position = next((i for i, part in enumerate(parts)
                              if part.startswith("episode") and part[7:].isdigit()), None)
             if position is not None and not name.endswith("/"):
@@ -64,6 +66,7 @@ def prepare_textocvp_manifest(archive_path, output, history_frames=1, future_fra
                                                   "language_provenance": provenance}]})
     payload = {"contract": "object_event_image_sequence_v1", "root": str(archive_path.parent),
                "source_archive": str(archive_path), "entries": entries,
+               "archive_root": "PutInBowl",
                "sequence": vars(ImageSequenceConfig(history_frames, future_frames)),
                "time_unit": "sampled_frame", "physical_fps": None,
                "sampling": "first_contiguous_frames_in_author_episode",

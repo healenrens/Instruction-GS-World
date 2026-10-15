@@ -842,6 +842,8 @@ printf 'EVAL_RC=%s\nREPORT=%s/report.json\nCASES=%s/cases.jsonl\nVIDEOS=%s/video
 - **Why**：现有multirobot数据没有独立主体/事件顺序GT，不能用模型自己的mask或训练tracker来替代这项证据。
 - **Impact**：公开archive只作为待核对的benchmark资产；21k、mask、时间信息等论文描述不直接当作已读取的文件事实。实际schema、可复用标签及最终组合协议待归档读取后记录。此次下载通过指定代理，在百度旧运行根 `data/benchmarks/textocvp_cliport` 进行；未改为新的训练分布。
 
+**实际归档结果（2026-10-15）**：下载/目录解析于19:43:55 CST完成，退出0；文件20741534807 bytes，2269424个成员文件，未压缩体积97046404667 bytes。两套目录不能合并：`PutInBowl`本体含train20000、val500、test500；`PutInBowlSegm_new`另含val500、24588个segm文件和500个`object_info.pkl`。RGB样例360x320。新RGB manifest只取 `PutInBowl`；独立标注集单列，不能因为episode编号相同就认定RGB或标注帧对应。原本将val合计为1000的目录统计已在此分开。真实字段清单保存于百度benchmark目录 `archive_inventory.json` 与 `archive_schema_v71.json`。
+
 ### 17.1 公开RGB协议适配
 
 - **What changed**：按[作者loader](https://github.com/angelvillar96/TextOCVP/blob/master/src/data/CLIPort.py)实现独立图像序列manifest，直接读取ZIP里的 `color/*_color.png` 与 `task_description.txt`，不展开或重编码RGB。保留作者train/val/test和四个明确排除的episode；默认首帧到后九帧，可另建十九帧预测manifest。沿用原joint/prior训练、episode-uniform采样、单卡完整测试与配对评测，真实机器人数据的时间契约不变。
