@@ -113,6 +113,8 @@ def main():
         write_json(out/"run.json", {"args": vars(args), "config": asdict(config), "assets": assets,
                     "inventory": model.inventory(), "native_config_changes": changes,
                     "dataset_episodes": len(dataset), "sequence": dataset.manifest["sequence"],
+                    "dataset_contract": dataset.manifest["contract"],
+                    "sources": sorted({entry[0]["source"] for entry in dataset.episodes}),
                     "global_batch": global_batch, "world_size": world, "precision": "float32",
                     "loss": metadata["loss"], "explicit_actions_used": False,
                     "warmup_unit": "episode-uniform sample epochs",

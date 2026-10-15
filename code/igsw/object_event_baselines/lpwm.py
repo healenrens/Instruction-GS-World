@@ -122,8 +122,9 @@ def local_reconstruction_loss(assets, normalized_rgb):
             self.net = LocalVGG()
             for index, channels in enumerate(self.chns):
                 setattr(self, f"lin{index}", upstream.NetLinLayer(channels, use_dropout=True))
-            # Match upstream's partial LPIPS loading; VGG was loaded explicitly above.
-            self.load_state_dict(torch.load(assets["lpips_weights"], map_location="cpu", weights_only=True), strict=False)
+            weights = torch.load(assets["lpips_weights"], map_location="cpu", weights_only=True)
+            heads = nn.ModuleDict({f"lin{index}": getattr(self, f"lin{index}") for index in range(5)})
+            heads.load_state_dict({name: value for name, value in weights.items() if name.startswith("lin")})
             self.requires_grad_(False)
 
     class LocalLoss(upstream.LossLPIPS):
