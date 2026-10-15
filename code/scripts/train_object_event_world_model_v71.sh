@@ -25,7 +25,7 @@ fi
 args=(--manifest "${MANIFEST:-${WORK_ROOT}/metadata/object_event_v71.json}"
       --assets "${ASSETS:-${WORK_ROOT}/metadata/rae_assets_512.json}"
       --out "${OUT}" --effect-mode "${EFFECT_MODE:-object_step}"
-      --steps "${STEPS:-10000}" --batch "${BATCH_PER_GPU:-2}" --accum "${GRAD_ACCUM:-16}"
+      --steps "${STEPS:-10000}" --batch "${BATCH_PER_GPU:-4}" --accum "${GRAD_ACCUM:-8}"
       --workers "${WORKERS_PER_RANK:-2}" --frame-batch "${ENCODER_FRAME_BATCH:-4}"
       --decode-batch "${DECODER_FRAME_BATCH:-2}" --source-revision "${SOURCE_REVISION:-}")
 if [ -n "${RESUME:-}" ]; then args+=(--resume "${RESUME}"); fi

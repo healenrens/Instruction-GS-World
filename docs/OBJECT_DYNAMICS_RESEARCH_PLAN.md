@@ -633,3 +633,11 @@ Posterior变化加权L1从0.301292降至0.229818，但zero effect为0.219842。�
 独立forecast只读取16个历史帧，生成25个未来帧，记录future_rgb_read=false；MP4 PTS最大误差约0.477微秒，文本编码+历史编码+Dynamics+渲染耗时本例约1.862秒。该计时不包含首次模型加载，不能把它当作跨设备/批量的吞吐结论。
 
 文本cache位于 `/mnt/pfs/public/xuhaoming/instruct_gs_world/metadata/object_event_text_v71`。完整结果根为 `outputs/object_event_v71_language_e2e_a74a43c_20261015T085418Z`（相对于百度旧运行根），包含 `test_report.json`、`language_prior`两分支checkpoint及固定teacher、`conditional_generation`逐例报告/视频、`history_only_forecast/forecast.mp4`及prediction.json；对应日志在旧运行根同名logs目录。会话31263最终退出0，PID187032已结束。
+
+### 15.5 逐例比较、修正语言控制与batch实测
+
+`d9bc431a50396548e9f2efec862c16c1e5a561df` 完成三项实际运行。40例配对结果中，step100相对step2的posterior RGB L1平均改善0.114093、中位改善0.114448，38/40例改善，source内episode bootstrap 95%区间为[0.095664,0.131243]。但step100 posterior相对zero-effect仅18/40例改善，平均gain=-0.000558，区间[-0.006238,0.005516]跨0。HY为7/8例改善，RoboTwin仅2/8，不能用总体均值掩盖来源差异，也不能宣布effect已有效。
+
+逐例CSV/JSON保存在旧运行根 `outputs/object_event_v71_paired_d9bc431`。新语言控制在五例上完成，替换文本都能回连到同源不同task group，报告保存真实指令/替代指令及来源，不写成已验证语义反事实。结果在 `outputs/object_event_v71_language_controls_d9bc431_20261015T095529Z`。
+
+单A100、512/BF16、batch4、accum1、原模型和损失的两步训练退出0。峰值allocated显存57.05GiB；第二步4.723秒、0.847样例/秒，梯度17.72、KL0.260。第一步包含3.62秒数据等待，不能用它或第二步单独推断八卡稳态吞吐。结果在 `outputs/object_event_v71_batch4_d9bc431_20261015T095529Z`。据此将八卡默认改为每卡batch4、累积8、global batch256；没有宣称已在八卡实测。
