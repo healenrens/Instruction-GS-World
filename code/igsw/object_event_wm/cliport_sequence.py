@@ -111,6 +111,7 @@ def save_recording(env, output, events, seed, history_seconds, source_revision):
     frames = np.stack(env.frames)
     masks = np.stack(env.masks)
     seconds = np.array(env.frame_ticks, dtype=np.float64)/env.physics_hz-history_seconds
+    np.savez_compressed(output/"rgb.npz", rgb=frames, times_seconds=seconds)
     with av.open(str(output/"video.mp4"), "w") as video:
         stream = video.add_stream("libx264", rate=Fraction(env.physics_hz, env.capture_stride))
         stream.height, stream.width = frames.shape[1:3]
@@ -142,7 +143,8 @@ def save_recording(env, output, events, seed, history_seconds, source_revision):
                 "entity_body_ids": env.body_ids, "robot_body_id": env.ur5,
                 "body_count": p.getNumBodies(), "contacts_by_frame": env.contacts,
                 "event_time_meaning": "oracle primitive start/end, not inferred object-motion onset",
-                "rgb": "video.mp4", "truth": "truth.npz",
+                "rgb": "rgb.npz", "rgb_storage": "lossless_uint8_THWC",
+                "preview": "video.mp4", "truth": "truth.npz",
                 "model_training_inputs": "RGB history and instruction only; no action/pose/mask input"}
     write_json(output/"episode.json", metadata)
     panels = []
