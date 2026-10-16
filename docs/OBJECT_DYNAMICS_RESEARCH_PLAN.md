@@ -164,6 +164,8 @@ E1/E2 是解释性消融，不能代替 E3/E4 主实验。E0 不是只看训练�
 
 未来 posterior、语言 prior、真实 action 条件的结果分开。原方法没有提供某种输入接口时，不把另加适配器后的系统当作原论文原样结果。
 
+**2026-10-16实施状态**：当前已实现scene/global-step、object/global-step、object/object-step、object/object-segment四种内部配置，分别隔离状态组织、effect绑定与更新持续时间。global_step仍是逐时刻全局effect，不是整段视频共用一个z；E2的整段单一effect对照尚未实现，不能用现有global_step代替。正式对照训练尚未执行，目前只有工程短更新和100步真实视频pilot，不能宣称新版方法有效。科学证据需要先确认posterior真正还原变化且effect不可被忽略，再用相同初始历史的双指令真实后果和未见组合比较条件生成；主体区域由模拟器真值提供，不由模型自己的mask定义。分段update数量或较小Dynamics参数量也不自动等于系统更高效，成本要包含frontend、prior、Dynamics与renderer。
+
 ## 7. 代码实施工作包
 
 1. 统一视频序列与实验划分接口，复用旧 loader 与 camera/time 元数据。
@@ -1200,7 +1202,7 @@ printf 'EVAL_RC=%s\nREPORT=%s/report.json\n' "$?" "${OUT}"
 
 - **What changed**：再次读取[LPWM官方LanguageTable准备脚本](https://github.com/taldatech/lpwm/blob/main/datasets/langtable_preparation.py)、[loader](https://github.com/taldatech/lpwm/blob/main/datasets/langtable_ds.py)与[运行说明](https://github.com/taldatech/lpwm)。官方路径从RLDS读取，选择15至50帧episode，用seed42划分80/10/10，保存逐帧PNG和T5-large文本；loader默认128尺寸、存在末帧padding及有效标记，valid默认只取100个episode。此处记录的是代码事实，不声称已经复现论文表格或取得其精确划分清单。
 - **Why**：不能用已有multirobot或四条模拟工程样例替代已规划的LanguageTable主实验，也不能把三种V71内部effect变体当全部外部baseline。
-- **Impact**：下一步先取得官方原始数据/episode身份与真实准备结果，再冻结共同窗口与评价清单；padding帧不当作真实未来，T5默认32-token截断与本项目完整指令cache的条件差异需分开报告。新增TensorFlow/TFDS、T5及LPWM依赖的独立PFS环境已向用户询问，尚未安装下载。正式主对照与non-object容量对照仍未完成，不据此标记goal完成。
+- **Impact**：下一步先取得官方原始数据/episode身份与真实准备结果，再冻结共同窗口与评价清单；padding帧不当作真实未来，T5默认32-token截断与本项目完整指令cache的条件差异需分开报告。后续LPWM/T5/VGG/LPIPS准备及单卡测试已获授权并完成，见21.5；TensorFlow/TFDS与LanguageTable全量数据不在本轮执行范围。正式模型比较仍未完成。
 
 **已经核对的LPWM调用边界**：[官方 `DLP.sample_from_x`](https://github.com/taldatech/lpwm/blob/main/models.py) 支持直接传history RGB。部署生成必须使用 `use_all_ctx=False`、`n_pred_eq_gt=False`，明确给 `cond_steps`、`num_steps` 和文本embedding；后一个参数关闭“输入GT长度必须等于输出长度”的假设，不需要把真实未来或dummy future拼进模型输入。`use_all_ctx=True` 会从完整视频提取context，只用于标明读未来的posterior reconstruction。构造可复用[官方配置loader](https://github.com/taldatech/lpwm/blob/main/generate_lpwm_video_prediction.py)的无checkpoint路径，再直接 `load_state_dict` 加载指定快照；不沿用其捕获所有加载错误后继续生成的分支。尚未据此声称baseline已运行。
 
@@ -1320,9 +1322,9 @@ printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
 
 ## 21. LPWM原生外部对照接入
 
-- **What changed**：固定官方源码 `4cf53c403433e64c01652ac2adbec66231a46dea`，新增独立 `object_event_baselines/lpwm.py`，调用官方DLP、ELBO和sampling方法，不替换为V71网络或loss。新的准备/文本cache、FP32训练/恢复、RGB评价与单卡完整测试入口已写出；9个Python文件完成语法解析，两份shell入口完成语法检查。未安装新依赖、下载资产或运行LPWM，不能记为baseline已通过。
+- **What changed**：固定官方源码 `4cf53c403433e64c01652ac2adbec66231a46dea`，独立 `object_event_baselines/lpwm.py` 调用官方DLP、ELBO和sampling方法，不替换为V71网络或loss。用户已授权百度独立环境与单卡完整测试；环境、权重和engineering文本cache已完成，`20f5e23`完整测试退出0，实际范围与结果见21.5。不是正式训练后的benchmark成绩。
 - **Why**：内部scene/global/object/segment控制不能代替外部已有方法。接入要先核对真实调用与原生训练目标，再用同一视频/语言来源执行，不能仅凭论文摘要仿写一个“LPWM-like”模型。
-- **Impact**：先接当前受控数据和公开图像序列接口。LanguageTable原始RLDS读取、正式主体/顺序评分与FVD对齐仍未完成；当前RGB evaluator不冒充这些结果。依赖/权重准备仍等待此前发给用户的授权，不在Mac安装或下载。
+- **Impact**：先接当前受控数据和公开图像序列接口。LanguageTable原始RLDS读取、LPWM正式主体/顺序评分与FVD对齐仍未完成；本轮不下载LanguageTable全量数据。环境/资产全部在百度旧PFS根，不在Mac安装或下载，不改原训练环境。
 
 ### 21.1 已核对的模型与loss
 
@@ -1332,6 +1334,7 @@ printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
 2. 保留原生Adam参数、ELBO系数、VGG/LPIPS重建及FP32计算。当前原生配置无LR scheduler；共享checkpoint保存支持scheduler=None，V71已有非空scheduler行为不变。warmup仍以数据epoch表示，scene均匀采样的epoch按实际访问数计算。
 3. 原生loss可自行下载VGG/LPIPS。接入只改权重构造方式：从PFS显式加载TorchVision VGG与官方LPIPS文件，forward直接继承官方实现。训练进程不调用下载或hash校验，不改成MSE替代方法。criterion不进入model optimizer，模型checkpoint不重复保存该冻结VGG。
 4. 未来posterior路径调用 `sample_from_x(... use_all_ctx=True)`；部署路径只传history，使用 `use_all_ctx=False, n_pred_eq_gt=False`。当前接口不读取机器人action或image goal。两类结果明确分栏。
+5. 使用PyTorch原生non-reentrant activation checkpointing包装29个原生Transformer blocks，保留原forward、dropout RNG和state_dict键；不切换官方torch_attn分支的不同mask语义。FP32与完整16+50帧不变。所有成本比较需计入重算开销。
 
 ### 21.2 数据与条件对齐的边界
 
@@ -1339,9 +1342,11 @@ printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
 
 语言采用本地T5-large。保留原生不传padding attention mask的编码方式；不截断原指令，cache长度取max(32,实际最长token数)，并在模型配置记录必要的language_max_len调整。若所有指令都不超过32，长度与原生配置一致；超过32时明确是完整指令适配，不是原样的32-token条件。T5只读语言，cache只保存小型文本张量，不保存视频特征。
 
+无语言对照使用T5编码的空字符串，保留32个语言位置，不将lang_embed设为None。固定官方实现会在None输入时跳过语言token拼接，但仍删除末尾32个tokens，误删物理particles并造成维度错误。空字符串移除的是指令信息，不是拆掉网络分支；metadata记录这一对照定义，训练任务指令保持不变。
+
 LPWM训练联合使用语言条件，因此使用与V71 prior相同的有效语言窗口集合；受控oracle未完成的视频仍保留在数据中，但不作为成功实现指令的LPWM训练标签。V71 joint可使用这些无标签RGB，两者的实际episode数分别记录，不能声称视觉样本暴露次数完全相同。
 
-原生batch3/epoch150是外部方法的初始recipe，不等于V71的global batch256/1000步预算。正式比较前需报告实际访问数、更新数、两阶段总成本和预训练资产；不把不同loss的数值直接比较。八卡LPWM默认global batch24，尚未实际测量显存或训练吞吐。
+原生batch3/epoch150是外部方法的初始recipe，不等于V71的global batch256/1000步预算。正式比较前需报告实际访问数、更新数、两阶段总成本和预训练资产；不把不同loss的数值直接比较。完整长序列已测单卡micro-batch1；下列八卡模板用B1/累积3保持global batch24，不把它说成原生B3逐位等价或已测八卡吞吐。
 
 ### 21.3 工程入口与测试定义
 
@@ -1354,17 +1359,17 @@ LPWM训练联合使用语言条件，因此使用与V71 prior相同的有效语�
 | `evaluate_lpwm_rgb_v71.py` | posterior、正确语言单样本、无语言及当前图copy，逐帧RGB/PSNR/SSIM/LPIPS和本地视频。 |
 | `test_lpwm_object_events_v71.py/.sh` | 一次真实短更新、保存恢复、history-only生成、future swap及视频评价。 |
 
-LPWM的CUDA STN含grid_sample，其backward可能非确定，见[PyTorch2.8说明](https://docs.pytorch.org/docs/2.8/generated/torch.nn.functional.grid_sample.html)。测试验证模型/优化器/RNG的精确序列化往返、恢复后的step与采样顺序，并报告独立轨迹的参数差异，不把浮点逐位一致当已保证能力。测试只有在后续RGB评价也完成后才写passed；当前所有运行结果仍待真实PFS环境与资产。
+LPWM的CUDA STN含grid_sample，其backward可能非确定，见[PyTorch2.8说明](https://docs.pytorch.org/docs/2.8/generated/torch.nn.functional.grid_sample.html)。测试验证模型/优化器/RNG的精确序列化往返、恢复后的step与采样顺序，并报告独立轨迹的参数差异，不把浮点逐位一致当已保证能力。测试只有在后续RGB评价也完成后才写passed；21.5记录本轮实际通过的范围。
 
 ### 21.4 独立执行命令
 
-以下命令在百度准备机/训练任务中执行，不在Mac运行。当前LPWM环境、权重的安装下载授权尚未收到，准备命令先保留，不自动执行；后面的完整测试/训练也尚未运行。
+以下命令在百度准备机/训练任务中执行，不在Mac运行。环境、权重与单卡完整测试已执行；下列为可独立复现入口，不要求因文档更新重做准备。正式八卡训练尚未启动。
 
 **源码同步，仅此段和资产准备段联网**：
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export SOURCE_REVISION=20f5e232fddfc46ab1f6cf97054bdf50746b94d6
 export http_proxy=http://10.66.65.186:18000
 export https_proxy=http://10.66.65.186:18000
 "${WORK_ROOT}/.venv/bin/python" - <<'PY'
@@ -1389,11 +1394,11 @@ print("ROOT="+str(destination))
 PY
 ```
 
-**授权后准备独立环境和资产**：使用已安装的PFS uv，不动旧训练 `.venv`。不包含LanguageTable全量下载或TensorFlow安装。
+**独立环境和资产准备**：使用已安装的PFS uv，不动旧训练 `.venv`。不包含LanguageTable全量下载或TensorFlow安装；已完成的环境和权重可直接复用。
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export SOURCE_REVISION=20f5e232fddfc46ab1f6cf97054bdf50746b94d6
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export http_proxy=http://10.66.65.186:18000
 export https_proxy=http://10.66.65.186:18000
@@ -1409,14 +1414,14 @@ printf 'PREPARE_RC=%s\nASSETS=%s/metadata/lpwm_assets_v71.json\n' "$?" "${WORK_R
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export SOURCE_REVISION=20f5e232fddfc46ab1f6cf97054bdf50746b94d6
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/environments/lpwm-v71/bin/python"
 export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
 export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71_engineering_c682ec9.json"
 export ASSETS="${WORK_ROOT}/metadata/lpwm_assets_v71.json"
-export TEXT_CACHE="${WORK_ROOT}/metadata/lpwm_cliport_engineering_text_v71"
-export RUN_NAME="lpwm_v71_e2e_e985f0e_$(date +%Y%m%d_%H%M%S)"
+export TEXT_CACHE="${WORK_ROOT}/metadata/lpwm_cliport_engineering_text_v71_empty"
+export RUN_NAME="lpwm_v71_e2e_20f5e23_$(date +%Y%m%d_%H%M%S)"
 export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
 export LOG_ROOT="${WORK_ROOT}/logs/${RUN_NAME}"
 "${PYTHON}" "${ROOT}/code/scripts/prepare_lpwm_instruction_cache_v71.py" \
@@ -1430,7 +1435,7 @@ printf 'TEST_RC=%s\nREPORT=%s/test_report.json\n' "$?" "${OUT}"
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export SOURCE_REVISION=20f5e232fddfc46ab1f6cf97054bdf50746b94d6
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 "${WORK_ROOT}/environments/lpwm-v71/bin/python" "${ROOT}/code/scripts/prepare_lpwm_instruction_cache_v71.py" \
@@ -1439,21 +1444,21 @@ export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
   --out "${WORK_ROOT}/metadata/lpwm_cliport_text_v71" --batch 16
 ```
 
-**八卡前台模板**：这是原生recipe的执行模板，batch3尚未做本项目的实际容量测试；单卡完整链路与正式数据完成前，不把它当已验证的长训启动。默认150个scene访问epoch，实际步数由数据量/global batch计算，日志记录真实访问数。没有Git、模型下载或后台启动。
+**八卡前台模板**：B1来自完整长序列实测，累积3保持global batch24；八卡硬件执行尚未测量。默认150个scene访问epoch，实际步数由998个可采样训练scene/global batch计算，日志记录真实访问数。没有Git、模型下载或后台启动。
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export SOURCE_REVISION=20f5e232fddfc46ab1f6cf97054bdf50746b94d6
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/environments/lpwm-v71/bin/python"
 export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
 export ASSETS="${WORK_ROOT}/metadata/lpwm_assets_v71.json"
 export TEXT_CACHE="${WORK_ROOT}/metadata/lpwm_cliport_text_v71"
-export RUN_NAME=lpwm_cliport_v71_native_seed17_e985f0e
+export RUN_NAME=lpwm_cliport_v71_native_seed17_20f5e23
 export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export NPROC_PER_NODE=8 NNODES=1 NODE_RANK=0
-export BATCH_PER_GPU=3 GRAD_ACCUM=1 EPOCHS=150 WORKERS_PER_RANK=2
+export BATCH_PER_GPU=1 GRAD_ACCUM=3 EPOCHS=150 WORKERS_PER_RANK=2
 export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
 unset STEPS RESUME
 bash "${ROOT}/code/scripts/train_lpwm_object_events_v71.sh"
@@ -1464,24 +1469,38 @@ printf 'TRAIN_RC=%s\nTRAIN_LOG=%s/train.jsonl\n' "$?" "${OUT}"
 
 ```bash
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=e985f0eaeffd8d4cdc51a6b6e58153b5f24e40fc
+export SOURCE_REVISION=20f5e232fddfc46ab1f6cf97054bdf50746b94d6
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
 "${WORK_ROOT}/environments/lpwm-v71/bin/python" "${ROOT}/code/scripts/evaluate_lpwm_rgb_v71.py" \
-  --checkpoint "${WORK_ROOT}/outputs/lpwm_cliport_v71_native_seed17_e985f0e/latest.json" \
+  --checkpoint "${WORK_ROOT}/outputs/lpwm_cliport_v71_native_seed17_20f5e23/latest.json" \
   --manifest "${WORK_ROOT}/metadata/cliport_event_v71.json" --partition development \
   --items-per-source 200 --samples 1 \
-  --out "${WORK_ROOT}/outputs/lpwm_cliport_v71_native_seed17_e985f0e_development"
+  --out "${WORK_ROOT}/outputs/lpwm_cliport_v71_native_seed17_20f5e23_development"
 printf 'EVAL_RC=%s\n' "$?"
 ```
 
 上述评价是当前逐帧RGB接口，不自动包含共同分辨率主表、FVD或独立主体/事件成功率；这些属于仍需完成的外部对照工作，不沿用内部V71结果冒充。
 
+### 21.5 LPWM真实单卡链路完成（2026-10-16）
+
+- **What changed**：用户授权后，独立 `environments/lpwm-v71`、固定LPWM源码、T5-large、VGG和LPIPS均在百度旧PFS根准备完成。`20f5e232fddfc46ab1f6cf97054bdf50746b94d6`完整单卡测试退出0，test_report.status=passed，覆盖两步更新、模型/optimizer/RNG精确存取、恢复后的step与采样顺序、history-only 50帧生成、future swap和真实RGB评价。
+- **Why**：外部对照需要实际可执行，不能只用内部消融或静态代码替代。完整测试沿用原生FP32/ELBO、128输入及16历史/50未来，不缩短序列或改loss获得通过。
+- **Impact**：模型实际146,507,261参数，encoder256/decoder24 particles、context dim7。启用29个Transformer blocks的activation checkpointing后，单卡B1峰值31.64013GiB。保存往返model/optimizer/RNG均相同，恢复到step2、optimizer steps=[2]、采样顺序相同；两条独立CUDA训练轨迹最终参数差0.0001783436，并非逐位等价。history生成case为scene_000017_order_01，输出[1,50,3,128,128]，future swap差0。
+
+两步loss为133.57617和128.66869，首步grad norm约7.74e8、第二步约2189.9。它们有限，但初始梯度很大；测试为覆盖完整目标关闭warmup，不能据两步有限数值宣称长训稳定。正式模板保留原生1 epoch warmup。RGB评价实际只覆盖scene_000018_order_01：posterior L1=0.370392、正确语言=0.370777、空指令=0.370777，copy=0.061469。此为两步工程输出，未显示预测或语言能力；正式组合benchmark还未运行。
+
+环境记录为 `metadata/lpwm_environment_v71.json`，资产记录为 `metadata/lpwm_assets_v71.json`。已安装torch2.8.0+cu126、torchvision0.23.0+cu126、Transformers4.57.1、NumPy1.26.4、SwanLab0.10.1、protobuf6.31.1，原训练环境不变。T5 revision为 `150ebc2c4b72291e770f58e6057481c8d2ed331a`；LPIPS使用作者官方 `082bb24f84c091ea94de2867d34c4544f68e0963` 的v0.1 VGG权重，旧上游mirror与实际来源均记录，不替换原loss forward。
+
+完整证据根：`/mnt/pfs/public/xuhaoming/instruct_gs_world/outputs/lpwm_cliport_e2e_20f5e23_20261016T012137Z`；含test_report.json、checkpoint_roundtrip.json、uninterrupted/recovered训练日志及evaluation/report.json、cases.jsonl、视频。工程T5 cache为 `metadata/lpwm_cliport_engineering_text_v71_empty`，4条任务指令加空串共5条、32 tokens、width1024。正式训练、四例独立配对导出与共同评分尚未执行。
+
+正式T5准备随后也退出0：`metadata/lpwm_cliport_text_v71` 含344个 `.pt`，为343条既有任务指令加空字符串。实际token长度1-20，统一32、width1024、FP32，无截断；index与completion及文件数一致。此缓存只编码文本，没有生成新视频、安装新包或启动正式训练。
+
 ## 22. 共同真值与统一成像评价
 
 - **What changed**：新增 `score_cliport_predictions_common_v71.py`，直接读取既有无损预测NPZ，使用同一manifest中的原始RGB和模拟器mask重新评分，不运行模型。操作物区域与顺序分数仍在原生坐标计算；RGB/PSNR/SSIM统一从原生视图缩放到最长边128，保留比例、采用bilinear antialias。GT不再来自各模型已经缩放过的训练target。
 - **Why**：LPWM的128像素结果与V71的512像素结果不能直接混合原有分数，模型resize链路也不能各自改变参照GT。统一评价尺寸只解决测量尺度，不消除输入分辨率、预训练资产或训练预算的差别。
-- **Impact**：旧预测与旧report不覆盖，新分数写独立目录。逐例、逐帧、seen/held标签、反序参考指令、时间匹配与缺失原因均保留；原生空间field ownership仍属于V71既有单独指标，不借RGB分数替代。新增LPWM受控预测导出入口，读取与V71相同的scene pairs，提供posterior、正确/无/反序语言以及copy；反序语言按真实反序后果评分。LPWM exporter仍待资产授权后的实际运行。
+- **Impact**：旧预测与旧report不覆盖，新分数写独立目录。逐例、逐帧、seen/held标签、反序参考指令、时间匹配与缺失原因均保留；原生空间field ownership仍属于V71既有单独指标，不借RGB分数替代。新增LPWM受控预测导出入口，读取与V71相同的scene pairs，提供posterior、正确/无/反序语言以及copy；反序语言按真实反序后果评分。LPWM环境与单卡RGB入口已完成，受控paired exporter仍待实际执行。
 
 ### 22.1 评分口径
 

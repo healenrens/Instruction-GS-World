@@ -2,6 +2,8 @@
 
 ## 2026-10-16 V71继续实施
 
+- **LPWM准备与完整单卡测试通过**：用户授权后在百度独立uv环境完成官方LPWM/T5/VGG/LPIPS准备，原训练环境不变。`20f5e23`完整测试退出0，146.5M参数、B1/FP32/16+50帧、29个blocks activation checkpointing，峰值31.64GiB；模型/optimizer/RNG存取相同，独立训练轨迹参数差约1.78e-4，future swap差0。无语言对照明确使用T5空字符串，保留语言token结构。工程RGB只测1例，正确语言与空语言误差近乎相同且不优于copy，不据此宣布科学能力；首步梯度很大也不隐去。完整产物和更新后的独立命令见研究计划21.4-21.5，正式八卡与配对benchmark未启动。
+- **正式LPWM文本输入完成**：现有343条任务指令加空字符串，共344条T5 cache已离线保存到 `metadata/lpwm_cliport_text_v71`，32 tokens/1024维、无截断，不产生新视频。四种内部结构和LPWM的正式训练比较尚未执行；global_step不等于整段单一effect，相关E2对照仍缺。当前科学判据与实施缺口已明确写入研究计划第6节，不将工程passed改写成方法work。
 - **正式数据和文本cache完成**：原session32782退出0，实际1300 scenes/2200 programs；train1000/1600、development100/200、test200/400，scene交集均0。900组双program场景的生成器历史RGB比较全部相同。2196条oracle完成，4条未完成原样保留；joint训练1600条RGB/1000 scenes，语言prior使用其中1597条完成program/998 scenes。三个split均覆盖全部30种原子关系，train/development/test有序actor-color pair数24/30/30。343条完整指令的离线Qwen cache退出0，width2560。正式manifest为 `metadata/cliport_event_v71.json`，文本为 `metadata/cliport_ordered_text_v71`；完整统计和失败case见研究计划18.11。未启动八卡长训，也未将数据完成写成模型对照完成。
 - **view128完整评测收回**：`aab8913`四例独立eval与共同CPU评分均退出0，四例七条件无漏评分。正确语言actor L1=0.45846309、无语言0.45878868、copy0.16980290；正确语言paired margin仅7.98e-7。结果确认测量链路已可用，不能用两步工程模型证明运动或语言能力。原始逐例/视频和共同report位于 `outputs/cliport_view128_e2e_aab8913_20261015T200205Z`，见研究计划22.4；正式数据任务与文本cache继续原会话。
 - **LanguageTable原始字段确认**：官方0.0.1 GCS元数据实际为单个train split，RGB360x640/JPEG、UTF-8指令、episode_id及机器人状态，无时间戳和对象实例真值。适配使用frame-step而非推测秒数，官方relabel数据的录制级划分需读取真实ID后确定。未安装额外依赖或下载视频；它不能替代受控模拟器的独立主体/顺序标注，见研究计划19.1。
