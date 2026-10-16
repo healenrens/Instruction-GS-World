@@ -74,14 +74,16 @@ def main():
 
             save("posterior", model.reconstruct_posterior(batch, language))
             if meta["status"] == "completed":
-                instructions = {"correct_language": sample["instruction"], "no_language": None}
+                instructions = {"correct_language": sample["instruction"], "no_language": ""}
                 if alternative is not None:
                     other = json.loads(Path(alternative["episode"]).read_text())
                     instructions["opposite_order_language"] = other["instruction"]
                 for count in range(args.samples):
                     seed = int(np.random.SeedSequence([args.seed, meta["seed"], count]).generate_state(1)[0])
                     for mode, instruction in instructions.items():
-                        context = texts.batch([instruction], device)[0] if instruction is not None else None
+                        context = texts.batch([instruction], device)[0]
+                        print(json.dumps({"event": "predicting_condition", "case_id": sample["case_id"],
+                                          "condition": mode, "sample": count}), flush=True)
                         torch.cuda.synchronize()
                         started = time.perf_counter()
                         prediction = model.predict_history(history_batch(batch), tf, context, seed=seed)
@@ -96,7 +98,8 @@ def main():
         "checkpoint": args.checkpoint, "case_ids": exported, "partition": args.partition, "samples": args.samples,
         "inventory": model.inventory(), "upstream_revision": model.config.upstream_revision,
         "native_config_changes": saved["native_config_changes"], "image_policy": model.config.image_policy,
-        "prior_uses_future_rgb": False, "posterior_uses_future_rgb": True, "entity_labels_exported": False})
+        "prior_uses_future_rgb": False, "posterior_uses_future_rgb": True, "entity_labels_exported": False,
+        "no_language_condition": "T5-encoded empty instruction; language tokens retained"})
 
 
 if __name__ == "__main__":

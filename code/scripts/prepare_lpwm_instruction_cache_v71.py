@@ -22,7 +22,8 @@ def main():
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
     manifest = json.loads(Path(args.manifest).read_text())
-    instructions = sorted({window["instruction"] for row in manifest["entries"] for window in row["language_windows"]})
+    instructions = sorted({""} | {window["instruction"] for row in manifest["entries"]
+                                  for window in row["language_windows"]})
     tokenizer = T5Tokenizer.from_pretrained(args.model, local_files_only=True)
     model = T5EncoderModel.from_pretrained(args.model, local_files_only=True).to(args.device).eval().requires_grad_(False)
     lengths = [len(tokenizer(text, truncation=False)["input_ids"]) for text in instructions]
@@ -31,6 +32,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     metadata = {"instructions": instructions, "width": model.config.d_model, "model": str(Path(args.model).resolve()),
                 "manifest": str(Path(args.manifest).resolve()), "sequence_length": sequence_length,
+                "nonempty_instructions": len(instructions)-1, "empty_instruction_cached": True,
                 "upstream_token_limit": 32, "truncation": False, "token_lengths": lengths,
                 "device": args.device, "torch_version": torch.__version__, "dtype": "float32",
                 "above_upstream_token_limit": [index for index, length in enumerate(lengths) if length > 32],

@@ -73,7 +73,8 @@ def main():
     model = LPWMVideoModel(config, assets["repository"]).cuda().eval()
     model.load_state_dict(recovered["model"])
     dataset = build_video_dataset(args.manifest, partition=args.partition, text_cache=args.text_cache)
-    batch = device_batch(collate_object_event_video([dataset[0]]), torch.device("cuda", 0))
+    sample = dataset[0]
+    batch = device_batch(collate_object_event_video([sample]), torch.device("cuda", 0))
     tf = batch["rgb"].shape[1]-batch["history_frames"]
     language = batch["text_tokens"].float()
     prediction = model.predict_history(history_batch(batch), tf, language, seed=17)
@@ -84,6 +85,7 @@ def main():
     prefix_difference = float((prediction-repeated).abs().max())
     assert prefix_difference < 1e-6 and bool(torch.isfinite(prediction).all())
     report = {"status": "training_and_history_generation_completed", "source_revision": args.source_revision,
+              "history_generation_case_id": sample["case_id"],
               "inventory": model.inventory(),
               "checkpoint_roundtrip": roundtrip, "sample_order_equal": same_cases,
               "resumed_step": recovered["step"], "optimizer_step_values": optimizer_steps,

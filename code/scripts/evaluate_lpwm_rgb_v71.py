@@ -45,12 +45,15 @@ def main():
             images, mask = letterbox_video(batch, model.config.native["image_size"])
             th, tf = batch["history_frames"], images.shape[1]-batch["history_frames"]
             language = batch["text_tokens"].float()
+            empty_language = dataset.text_store.batch([""], device)[0]
             predictions = {"posterior": model.reconstruct_posterior(batch, language)[0],
                            "current_image_copy": images[0, th-1:th].expand(tf, -1, -1, -1)}
             timings = {}
             for count in range(args.samples):
-                for name, text in (("correct_language", language), ("no_language", None)):
+                for name, text in (("correct_language", language), ("no_language", empty_language)):
                     key = f"{name}_sample_{count}"
+                    print(json.dumps({"event": "predicting_condition", "case_id": sample["case_id"],
+                                      "condition": key}), flush=True)
                     torch.cuda.synchronize()
                     start = time.perf_counter()
                     predictions[key] = model.predict_history(history_batch(batch), tf, text,
@@ -65,6 +68,7 @@ def main():
                     "generation_seconds": timings, "timing_includes_text_encoding": False,
                     "posterior_uses_future": True, "prior_uses_future": False,
                     "no_language_outcomes_are_ambiguous": True,
+                    "no_language_condition": "T5-encoded empty instruction; language tokens retained",
                     "sample_reporting": "sample_0 primary; remaining samples reported individually, not best-of-N"}
             folder = output/"videos"/sample["case_id"]
             folder.mkdir(parents=True, exist_ok=True)
@@ -82,6 +86,7 @@ def main():
         "partition": args.partition, "cases": len(records), "metrics": summarize_cases(records),
         "inventory": model.inventory(), "native_config_changes": saved["native_config_changes"],
         "metric_image_size": model.config.native["image_size"], "time_unit": dataset.manifest.get("time_unit", "seconds"),
+        "no_language_condition": "T5-encoded empty instruction; language tokens retained",
         "measurement_scope": "per-frame RGB; not independent object identity or event-order success"})
 
 
