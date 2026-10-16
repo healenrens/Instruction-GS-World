@@ -3,7 +3,7 @@ Pillow==11.3.0
 av==15.1.0
 transformers==4.57.1
 sentencepiece==0.2.0
-protobuf==4.25.8
+protobuf==6.31.1
 opencv-python-headless==4.11.0.86
 matplotlib==3.10.3
 imageio==2.37.0
