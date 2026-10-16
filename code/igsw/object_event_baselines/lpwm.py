@@ -9,6 +9,7 @@ import sys
 
 import torch
 from torch import nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import apply_activation_checkpointing
 
 from igsw.object_event_wm.codec import letterbox_video
 from . import LPWM_REVISION
@@ -23,6 +24,7 @@ class LPWMConfig:
     native: dict
     upstream_revision: str = LPWM_REVISION
     image_policy: str = "letterbox_full_field_of_view"
+    activation_checkpointing: bool = True
 
 
 def load_upstream(repository):
@@ -51,6 +53,13 @@ class LPWMVideoModel(nn.Module):
         arguments = {name: config.native[CONFIG_ALIASES.get(name, name)]
                      for name in parameters if CONFIG_ALIASES.get(name, name) in config.native}
         self.native = upstream.DLP(**arguments)
+        blocks = importlib.import_module("modules.modules")
+        block_types = (blocks.CausalBlock, blocks.SelfBlock, blocks.CrossBlock)
+        self.checkpointed_blocks = 0
+        if config.activation_checkpointing:
+            self.checkpointed_blocks = sum(isinstance(module, block_types) for module in self.native.modules())
+            # PyTorch preserves dropout RNG and the upstream state_dict names.
+            apply_activation_checkpointing(self.native, check_fn=lambda module: isinstance(module, block_types))
 
     def inventory(self):
         return {"parameters": sum(p.numel() for p in self.parameters()),
@@ -59,7 +68,9 @@ class LPWMVideoModel(nn.Module):
                 "context_dimension": self.native.context_dim,
                 "image_size": self.native.image_size,
                 "upstream_revision": self.config.upstream_revision,
-                "image_policy": self.config.image_policy}
+                "image_policy": self.config.image_policy,
+                "activation_checkpointing": self.config.activation_checkpointing,
+                "checkpointed_transformer_blocks": self.checkpointed_blocks}
 
     def images(self, batch):
         return letterbox_video(batch, self.config.native["image_size"])[0]
