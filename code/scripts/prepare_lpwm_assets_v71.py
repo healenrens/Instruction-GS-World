@@ -14,6 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from igsw.object_event_baselines import LPWM_REVISION
 
 
+LPIPS_REVISION = "082bb24f84c091ea94de2867d34c4544f68e0963"
+LPIPS_URL = (f"https://raw.githubusercontent.com/richzhang/PerceptualSimilarity/{LPIPS_REVISION}"
+             "/lpips/weights/v0.1/vgg.pth")
+
+
 def download(url, path):
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.is_file():
@@ -49,7 +54,7 @@ def main():
     sys.path.insert(0, str(repository))
     loss_module = importlib.import_module("utils.loss_functions")
     model_root = root/"models/lpwm-v71"
-    vgg_url, lpips_url = VGG16_Weights.IMAGENET1K_V1.url, loss_module.URL_MAP["vgg_lpips"]
+    vgg_url, lpips_url = VGG16_Weights.IMAGENET1K_V1.url, LPIPS_URL
     vgg = download(vgg_url, model_root/"vgg16.pth")
     lpips = download(lpips_url, model_root/"vgg_lpips.pth")
     api, model_id = HfApi(), "google-t5/t5-large"
@@ -63,6 +68,8 @@ def main():
               "native_config": str(repository/"configs/langtable.json"),
               "vgg16_weights": vgg, "vgg16_source": vgg_url,
               "lpips_weights": lpips, "lpips_source": lpips_url,
+              "lpips_version": "0.1", "lpips_revision": LPIPS_REVISION,
+              "lpips_upstream_mirror": loss_module.URL_MAP["vgg_lpips"],
               "t5_encoder": str(t5), "t5_model_id": model_id, "t5_revision": revision,
               "training_downloads": False}
     path = root/"metadata/lpwm_assets_v71.json"
