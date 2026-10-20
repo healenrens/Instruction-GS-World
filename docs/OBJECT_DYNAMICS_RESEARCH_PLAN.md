@@ -1695,7 +1695,7 @@ export https_proxy=http://10.66.65.186:18000
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
 export SOURCE_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
 git -C "${SOURCE_ROOT}" fetch origin codex/object-event-world-model-v71
-export SOURCE_REVISION="$(git -C "${SOURCE_ROOT}" rev-parse FETCH_HEAD)"
+export SOURCE_REVISION=3b3f097510e38bf60edcf7b58d5474b2430a9b4d
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 mkdir -p "${ROOT}"
 git -C "${SOURCE_ROOT}" archive "${SOURCE_REVISION}" | tar -xf - -C "${ROOT}"
@@ -1703,12 +1703,12 @@ printf 'SOURCE_REVISION=%s\nROOT=%s\n' "${SOURCE_REVISION}" "${ROOT}"
 )
 ```
 
-独立执行时将 `SOURCE_REVISION` 设置为本次发布提交；不使用旧训练release来寻找新增评测脚本。
+评测代码提交为 `3b3f097510e38bf60edcf7b58d5474b2430a9b4d`。同步时可将 `SOURCE_REVISION` 固定为该提交；不使用旧训练release来寻找新增评测脚本。
 
 ```bash
 set -o pipefail
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=<本次评测代码发布提交>
+export SOURCE_REVISION=3b3f097510e38bf60edcf7b58d5474b2430a9b4d
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/.venv/bin/python"
 export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
