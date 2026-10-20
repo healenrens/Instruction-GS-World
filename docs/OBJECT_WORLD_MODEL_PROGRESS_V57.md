@@ -1,5 +1,21 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
+## 2026-10-21 V71固定帧重建诊断实现
+
+- **What changed**：新增 `fit_object_state_reconstruction_v71.py/.sh` 与独立 `reconstruction_probe.py`。默认从失败的step500权重初始化，只训练现有encoder/renderer；train集按seed17固定选4个scene，每例取0/2/5/10秒，共16帧，不按运动或重建成绩筛选。每张图独立重置State，输入只有该帧DINO特征与空间坐标，模型时间置零。沿用原feature MSE＋RGB L1及权重，不调用Posterior/Dynamics，不加入KL、mask监督或新loss。DINO/RAE保持冻结，RGB梯度通过冻结RAE回到renderer。
+- **Why**：最早未解决的问题是可解码的当前物体状态。需要先判断原State/renderer在固定小集合上能否优化出可辨认物体，而非继续扩大预测网络。该实验刻意移除跨帧memory和联合动态目标；不能把其单帧初始化分数直接与完整历史held分数混比。
+- **Impact / execution**：单卡前台，默认1000步，micro-batch4，每次optimizer更新累计全部16帧，AdamW lr2e-4/weight_decay0.01/clip1。旧模型、数据和训练输出不改；只在独立OUT保存16帧固定输入、轻量encoder/renderer＋optimizer恢复点、训练标量和Target/codec/before/after PNG。每100步刷新对照图和小型report；SwanLab只同步训练标量。显式恢复复用原固定帧及初始对照，不自动恢复。可用`INITIALIZATION=fresh`在独立OUT做同结构初始条件对照，但本轮默认不追加此实验。
+- **Evidence / next**：CPU BF16小尺寸真实ObjectEventWorldModel完整执行：固定帧准备、反向、仅encoder/renderer更新、图片/HTML/report、保存恢复全部完成，4步连续训练与2+2步恢复参数最大差0。视觉codec是测试替身，不是正式预训练资产；正式单卡结果待用户执行。固定小集合拟合成功只支持优化可行性，不证明泛化/对象语义；失败也不能直接证明容量不可能，仍需区分初始化、优化与模块责任。独立指令见研究计划第24节。
+
+## 2026-10-21 V71 step500 held：变化还原尚未成立
+
+- **可视证据补充**：用户查看视频后报告learned路径均模糊，并提供`t=3.6s`九宫格截图（文件名 `截屏2026-10-21 凌晨2.10.17.png`，截图未标case_id）。图中target、codec_reference、resize_reference和原图rgb_copy可分辨机械臂及物体；posterior、zero、observed_state、source_state_copy、反序effect主要只剩桌面/背景大块外观。`observed_state`无需预测未来，`source_state_copy`无需Dynamics，两者同样失败；结合上述逐例误差，判断由“动态收益不足”明确为“500步State/renderer链路尚未建立可用的物体细节重建”。同一冻结RAE直接解码真实DINO特征仍有物体细节，不能把失败单独归为视频导出、128分辨率或decoder不可用；也未据此排除codec损失。尚未证明latent本身完全不含信息，或唯一确定encoder与renderer责任。下一项优先做固定少量真实帧的observed-state重建优化，去掉posterior/Dynamics梯度干扰，区分表示/渲染瓶颈与联合优化问题；1000步同协议结果可补充学习趋势，但不再把继续加步数当作解决方案。本轮未改模型或启动新实验。
+- **What changed / evidence**：用户上传两段评测摘录，原始附件分别为 `5ebbfa02-5213-4233-ae8e-64a5e1a965af/已粘贴的文本.txt` 和 `754214ad-891f-467f-8df5-26e2299a53a6/已粘贴的文本.txt`。首段保留完整by_case/by_scene汇总，200 cases/100 development scenes；后续paired明细截断，不宣称读取了所有配对胜率。第二段含15个完整case（8 scenes，其中7对完整）、30个actor、每例50个有效未来帧；首行仅缺左花括号，在解析内补回，尾部未完成记录不采用。checkpoint为 `step_00000500.pt`，训练20f5e23、评测3b3f097；未读取视频或1000步结果。
+- **Why / findings**：正确posterior没有显示有效变化收益。全200例actor RGB L1：posterior0.186367、zero0.181185、反序0.186894、State copy0.178047、原图copy0.214781、observed-state0.178585、codec0.130976、resize0.029732。posterior比zero差2.86%，比State copy差4.67%；比反序仅好0.28%。actor变化归一化误差分别为posterior1.29514、zero1.11376、State/RGB copy1、observed-state1.00379、codec0.47566、resize0.19175。这是逐actor归一化后汇总的RGB变化误差，不是物理位移误差，也不是由两个总均值相除所得。
+- **逐例依据**：15例/30actor中，observed-state预测RGB变化幅度均值0.004513，GT0.195249；逐actor幅度比均值2.49%，范围0.75%-4.72%。同批codec幅度比均值81.67%；posterior幅度比49.63%，但30/30actor的变化误差都高于静态copy。posterior actor RGB只在1/15例优于zero、2/15例优于State copy。例 `scene_002048_order_01` 红方块GT变化0.232712，observed-state变化0.006290，posterior变化误差0.273210，高于copy0.232712。不能把15例局部统计冒充200例胜率。
+- **定位与边界**：即使每帧输入真实未来，State/renderer组合的输出仍近似静态，因此问题不只是10秒rollout难，也不能直接归咎于预训练DINO完全不含变化。normalized DINO change误差observed-state0.217423、State copy0.217628，改善仅0.094%；当前表示/渲染链路未有效还原已有动态信号。尚不能据输出将问题唯一定位到encoder或renderer。全图observed-state L1=0.125320优于codec0.134538，而actor区域反而更差，与静态/背景捷径相容，但未独立证实其训练机制。
+- **Impact / next**：500步Stage 1不判达标，不因posterior优于原图copy就启动Prior。保留当前数据/划分/模型供定位；先查看固定case的对照视频，并在已有1000步快照上复用同一held评测，区分仍在学习与稳定捷径。若现象保持，优先拆查observed-state/renderer对输入物体变化的响应，再设计单一受控修改，不直接扩充Dynamics或切换encoder。此轮仅更新实验记录，未改训练或评测代码。
+
 ## 2026-10-20 V71 Stage 1 held变化评测
 
 - **What changed**：新增独立 `evaluate_object_event_stage1_v71.py/.sh`，不修改模型、loss或训练入口。固定500步快照，development 100 scenes/200 programs；同case比较posterior、zero、反序effect、source-state copy、原图copy，以及observed-state、codec、resize参考。评分区域来自模拟器actor mask；保存逐帧/逐actor误差、GT物理运动量、逐case配对gain、scene平衡统计和0-2/2-5/5-10秒切片，不用训练均值替代held证据。八卡训练不受影响。

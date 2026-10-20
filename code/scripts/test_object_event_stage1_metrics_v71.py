@@ -18,12 +18,15 @@ from igsw.object_event_wm.stage1_metrics import actor_change_records, summarize_
 def run_pipeline(rgb, labels):
     import av
     import torch
+    from argparse import Namespace
+    from copy import deepcopy
     from torch.nn import functional as F
     from igsw.object_event_wm.config import ModelConfig
     from igsw.object_event_wm.data import SequenceConfig, write_json
     from igsw.object_event_wm.model import ObjectEventWorldModel
     from igsw.object_event_wm.simulation_data import SimulationVideoDataset, prepare_simulation_manifest
     from igsw.object_event_wm.stage1_evaluation import evaluate_stage1
+    from igsw.object_event_wm.reconstruction_probe import prepare_frames, train_probe
 
     class FixtureCodec(torch.nn.Module):
         image_size, grid_size = 32, 4
@@ -77,7 +80,32 @@ def run_pipeline(rgb, labels):
             decoded = list(video.decode(video=0))
         assert len(decoded) == len(rgb) and decoded[0].width == 768
         assert (out/"index.html").is_file() and (out/"cases"/"fixture"/"terminal.jpg").is_file()
+        bank = prepare_frames(dataset, FixtureCodec(), 32, 1, [0, 1, 2, 4], torch.device("cpu"), "bf16")
+        assert len(bank["images"]) == 4
+        original = deepcopy(model.state_dict())
+        options = dict(checkpoint="fixture", initialization="checkpoint", source_revision="fixture",
+            batch=2, precision="bf16", lr=.001, weight_decay=.01, log_every=1, save_every=2, steps=4)
+        uninterrupted = root/"probe_uninterrupted"
+        uninterrupted.mkdir()
+        report = train_probe(model, FixtureCodec(), bank, Namespace(out=str(uninterrupted), **options))
+        complete = deepcopy(model.state_dict())
+        assert any(not torch.equal(complete[k], original[k]) for k in original if k.startswith("encoder."))
+        assert any(not torch.equal(complete[k], original[k]) for k in original if k.startswith("renderer."))
+        assert all(torch.equal(complete[k], original[k]) for k in original
+                   if k.startswith(("posterior.", "dynamics.")))
+        assert all(np.isfinite(value) for value in report["after"].values())
+        assert (uninterrupted/"frames"/"frame_03.png").is_file()
+        model.load_state_dict(original)
+        interrupted = root/"probe_resumed"
+        interrupted.mkdir()
+        train_probe(model, FixtureCodec(), bank, Namespace(out=str(interrupted), **{**options, "steps": 2}))
+        checkpoint = torch.load(interrupted/"latest.pt", map_location="cpu", weights_only=False)
+        train_probe(model, FixtureCodec(), bank, Namespace(out=str(interrupted), **options), resume=checkpoint)
+        difference = max(float((model.state_dict()[k]-complete[k]).abs().max()) for k in complete)
+        assert difference == 0
         return {"conditions": 8, "video_frames": len(decoded), "resume_reused_case": True,
+                "reconstruction_probe_frames": 4, "reconstruction_probe_steps": 4,
+                "only_encoder_renderer_updated": True, "probe_resume_max_difference": difference,
                 "scope": "CPU BF16 real small ObjectEventWorldModel; fixture visual codec, not DINO/RAE"}
 
 

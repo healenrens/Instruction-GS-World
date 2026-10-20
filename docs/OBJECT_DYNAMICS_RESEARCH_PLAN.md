@@ -1729,3 +1729,67 @@ printf 'EVAL_RC=%s\nREVIEW=%s/index.html\nREPORT=%s/report.json\n' "${EVAL_RC}" 
 ### 23.3 已完成的本地执行
 
 `test_object_event_stage1_metrics_v71.py --pipeline` 在已有CPU环境运行退出0：精确预测actor误差0、copy变化比值1；机械臂不计入actor变化，静止比值为空，缺帧不跨帧做差，遮挡/缺失终点不代换。随后实际小尺寸ObjectEventWorldModel以BF16跑完8条件、JSON、5帧视频和HTML，resume复用case且不重写结果。codec使用固定测试替身，非正式DINO/RAE权重；真实500步单卡held评测尚待执行，不把本地管线测试当作实验成绩。
+
+## 24. 固定16帧：隔离State与renderer的重建诊断
+
+**What changed**：step500的200-case held及用户视频反馈已确认learned路径丢失物体细节；不再把它仅称为长时Dynamics失败。新增独立单卡入口，只优化现有encoder/renderer，保持DINO、RAE、State尺寸、renderer结构和原有重建loss不变；不覆盖原八卡模型。
+
+**Why**：直接DINO/RAE参考仍能还原物体，失败发生在加入学习的State/renderer之后。先把任务简化成固定少量图像的独立重建，区分基础重建是否可优化与联合/时序训练的问题，而非同时换encoder、扩容量、改loss。
+
+### 24.1 数据、训练与判断
+
+- 从现有train split选4个不同scene，每个scene选一个已有program，取请求时间0/2/5/10秒。seed17、按scene均匀、不看未来运动挑帧。记录真实case/frame/time；缺失请求帧列入skipped，不冒充准确时刻。正式数据预计16帧，实际数量写入输出。
+- 当前帧 `[B,1024,768]` DINO特征进入原encoder，每帧独立State初值，得到 `[B,17,4,384]` state tokens与centers；原renderer恢复feature，原冻结RAE解码并输出view128。没有前序图片、帧ID或任务ID条件。它与原16帧历史的时序任务不同，不能把初始分数混为同一协议。
+- 默认加载500步encoder/renderer，重建诊断使用新AdamW。只更新这两个模块；posterior、Dynamics不调用，DINO/RAE不更新，但RAE保留对输入feature的梯度。
+- 目标仍是原权重的feature MSE＋RGB L1。模拟器actor masks仅用于输出评分，不进入模型或loss；不新增trajectory、KL或contrast目标。
+- micro-batch4，完整固定集合参与每次更新，默认1000 optimizer steps，lr2e-4、weight_decay0.01、clip1。不将其当作正式长训或held成绩。
+- 先看同帧Target/codec/before/after是否恢复物体，再看逐帧actor RGB误差和原目标是否改善。固定集合能拟合，只说明当前链路在该任务上可优化；不能证明泛化、object grouping或Dynamics。不能拟合也不唯一证明“容量不足”，下一步需区分初始化与模块责任。
+- 不产生海量逐时刻JSON。`report.json`只含before/after/codec均值和16帧摘要；`frames/frame_00.png`至`frame_15.png`用于逐例查看，`index.html`汇总全部图片。`selection.json`记录来源；`fixed_frames.pt`仅缓存这16帧及目标以保证恢复；`latest.pt`只保存本实验encoder/renderer、optimizer、RNG与SwanLab ID，不是原joint训练恢复点。
+
+### 24.2 独立执行
+
+同步和运行分开。准备机可联网fetch/export；实际GPU运行不访问GitHub或下载权重。
+
+```bash
+(
+set -euo pipefail
+export http_proxy=http://10.66.65.186:18000
+export https_proxy=http://10.66.65.186:18000
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
+git -C "${SOURCE_ROOT}" fetch origin codex/object-event-world-model-v71
+export SOURCE_REVISION=PROBE_RELEASE_REVISION
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+mkdir -p "${ROOT}"
+git -C "${SOURCE_ROOT}" archive "${SOURCE_REVISION}" | tar -xf - -C "${ROOT}"
+printf 'ROOT=%s\n' "${ROOT}"
+)
+```
+
+```bash
+set -o pipefail
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=PROBE_RELEASE_REVISION
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export CHECKPOINT="${WORK_ROOT}/outputs/v71_joint_object_step_view128_seed17_20f5e23_20261020_021715/step_00000500.pt"
+export RUN_NAME="v71_reconstruction_probe_step500_$(date +%Y%m%d_%H%M%S)"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export CUDA_VISIBLE_DEVICES=0 INITIALIZATION=checkpoint
+export SCENES=4 FRAME_SECONDS=0,2,5,10 STEPS=1000 BATCH=4
+export FRAME_BATCH=4 DECODE_BATCH=2 PRECISION=bf16 LOG_EVERY=10 SAVE_EVERY=100
+export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
+unset RESUME
+mkdir -p "${OUT}"
+bash "${ROOT}/code/scripts/fit_object_state_reconstruction_v71.sh" 2>&1 | tee -a "${OUT}/launcher.log"
+RC=$?
+printf 'PROBE_RC=%s\nREVIEW=%s/index.html\nREPORT=%s/report.json\n' "${RC}" "${OUT}" "${OUT}"
+```
+
+恢复时重用原OUT，设置 `RESUME="${OUT}/latest.pt"`，并运行同一入口；不要使用新的时间戳目录。新初始化对照使用 `INITIALIZATION=fresh` 和独立OUT；相同seed/数据配置选同一组帧，原500步checkpoint仅提供模型配置。首轮默认仅跑checkpoint初始化。
+
+### 24.3 本地结果
+
+在已有CPU环境运行完整BF16小模型流程：准备4帧、训练4步、写PNG/HTML/compact JSON、只更新encoder/renderer、保存和2+2步恢复，退出0；与4步连续训练参数差0。复用了现有单个端到端测试入口，没有安装或下载本地权重。正式DINO/RAE和实际16帧GPU重建结果仍待运行。
