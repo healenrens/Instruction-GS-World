@@ -17,6 +17,10 @@ ARGS=(
   --log-every "${LOG_EVERY:-10}" --save-every "${SAVE_EVERY:-100}"
 )
 if [[ -n "${RESUME:-}" ]]; then ARGS+=(--resume "${RESUME}"); fi
-if [[ -n "${SWANLAB_PROJECT:-}" ]]; then ARGS+=(--swanlab-project "${SWANLAB_PROJECT}"); fi
-if [[ -n "${SWANLAB_WORKSPACE:-}" ]]; then ARGS+=(--swanlab-workspace "${SWANLAB_WORKSPACE}"); fi
+TRACKING_PROJECT="${PROBE_SWANLAB_PROJECT:-${SWANLAB_PROJECT:-}}"
+TRACKING_WORKSPACE="${PROBE_SWANLAB_WORKSPACE:-${SWANLAB_WORKSPACE:-}}"
+if [[ -n "${TRACKING_PROJECT}" ]]; then ARGS+=(--swanlab-project "${TRACKING_PROJECT}"); fi
+if [[ -n "${TRACKING_WORKSPACE}" ]]; then ARGS+=(--swanlab-workspace "${TRACKING_WORKSPACE}"); fi
+# These legacy launcher strings conflict with the SDK's structured settings.
+unset SWANLAB_PROJECT SWANLAB_WORKSPACE
 exec "${PYTHON}" "${ROOT}/code/scripts/fit_object_state_reconstruction_v71.py" "${ARGS[@]}" "$@"

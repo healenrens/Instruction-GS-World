@@ -1780,13 +1780,15 @@ export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
 export CUDA_VISIBLE_DEVICES=0 INITIALIZATION=checkpoint
 export SCENES=4 FRAME_SECONDS=0,2,5,10 STEPS=1000 BATCH=4
 export FRAME_BATCH=4 DECODE_BATCH=2 PRECISION=bf16 LOG_EVERY=10 SAVE_EVERY=100
-export SWANLAB_PROJECT=instruct-gs-world SWANLAB_WORKSPACE=healenrens
+export PROBE_SWANLAB_PROJECT=instruct-gs-world PROBE_SWANLAB_WORKSPACE=healenrens
 unset RESUME
 mkdir -p "${OUT}"
 bash "${ROOT}/code/scripts/fit_object_state_reconstruction_v71.sh" 2>&1 | tee -a "${OUT}/launcher.log"
 RC=$?
 printf 'PROBE_RC=%s\nREVIEW=%s/index.html\nREPORT=%s/report.json\n' "${RC}" "${OUT}" "${OUT}"
 ```
+
+运行机器需要设置 `SWANLAB_API_KEY`。该值仅留在运行环境，不写入源码或本文档。项目和workspace使用 `PROBE_SWANLAB_PROJECT/PROBE_SWANLAB_WORKSPACE`，传给SDK的显式参数；入口继续接受旧launcher变量，但在SDK初始化前移除冲突的 `SWANLAB_PROJECT/SWANLAB_WORKSPACE`。SwanLab新版将project环境字段解释为结构化JSON，不能把普通项目名字符串直接留给其Settings解析。
 
 恢复时重用原OUT，设置 `RESUME="${OUT}/latest.pt"`，并运行同一入口；不要使用新的时间戳目录。新初始化对照使用 `INITIALIZATION=fresh` 和独立OUT；相同seed/数据配置选同一组帧，原500步checkpoint仅提供模型配置。首轮默认仅跑checkpoint初始化。
 

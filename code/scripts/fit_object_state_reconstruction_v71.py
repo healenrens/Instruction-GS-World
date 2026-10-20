@@ -39,10 +39,13 @@ def main():
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--frame-batch", type=int, default=4)
     parser.add_argument("--decode-batch", type=int, default=2)
-    parser.add_argument("--swanlab-project", default="")
-    parser.add_argument("--swanlab-workspace", default="")
+    parser.add_argument("--swanlab-project", default=os.environ.get("PROBE_SWANLAB_PROJECT", os.environ.get("SWANLAB_PROJECT", "")))
+    parser.add_argument("--swanlab-workspace", default=os.environ.get("PROBE_SWANLAB_WORKSPACE", os.environ.get("SWANLAB_WORKSPACE", "")))
     parser.add_argument("--source-revision", default=os.environ.get("SOURCE_REVISION", ""))
     args = parser.parse_args()
+    # Pass project/workspace through init(), not the SDK's nested JSON environment fields.
+    os.environ.pop("SWANLAB_PROJECT", None)
+    os.environ.pop("SWANLAB_WORKSPACE", None)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     resume = torch.load(args.resume, map_location="cpu", weights_only=False) if args.resume else None
