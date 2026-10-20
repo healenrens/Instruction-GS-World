@@ -1652,3 +1652,80 @@ export OUT="${WORK_ROOT}/outputs/cliport_view128_eval_v71_${EFFECT_MODE}_aab8913
   --max-edge 128 --model-image-size 128 --cpu-threads 2
 printf 'EVAL_RC=%s\nREPORT=%s/common128/report.json\n' "$?" "${OUT}"
 ```
+
+## 23. Stage 1：500步held变化诊断
+
+**What changed**：针对正式run `v71_joint_object_step_view128_seed17_20f5e23_20261020_021715` 新增单卡、无需Prior的评测入口。不改变训练，不将最近训练loss下降写成动态能力。固定500步编号checkpoint，使用全部development 100 scenes/200 programs，不访问最终test集。
+
+**Why**：SwanLab step690之前的重建误差有改善，但feature-change几乎不变。需要区分“观测状态可还原”“Dynamics使用了正确effect”和“静态画面捷径”，不能用同一个平均重建数解释所有问题。
+
+### 23.1 条件与指标
+
+| 条件 | 做什么 | 是否读取真实未来 |
+| --- | --- | --- |
+| posterior | 正确后验mean effects，连续rollout，共用renderer | 是 |
+| zero_effect | 同一历史末态、时间和Dynamics，所有effects置零 | 否 |
+| reversed_effect_order | 反转后验effect时间顺序，其他保持不变 | 是 |
+| source_state_copy | 解码历史末态，复制到每个未来时刻 | 否 |
+| rgb_copy | 直接复制原生相机的最后观测帧，不经过模型 | 否 |
+| observed_state | 逐帧观测真实未来后重建，检查State/renderer | 是 |
+| codec_reference | 真实未来DINO特征经冻结RAE重建，作为视觉codec参考 | 是 |
+| resize_reference | 真实未来仅走当前模型的缩放/还原视图链路 | 是 |
+
+所有模型RGB先限制到 `[0,1]` 再还原到原生视图，与原始无损RGB比较，因此不是训练中未clamp的RGB loss。原图copy数值不经过缩放；视频仅为展示会缩放。codec/resize是参考链路，不声称其误差是所有模型的理论下界。
+
+- **Actor RGB L1**：在真实actor初始位置与当前可见位置的mask并集上比较RGB，排除当前机械臂/tool像素。区域不由模型mask决定。保留每个actor、每帧和逐case值。
+- **Actor anchor-change L1**：各预测路径先减去该路径自己的历史末帧重建，再与真实RGB相对真实历史末帧的变化比较；排除初始与当前机械臂像素。这分离静态重建偏差与变化误差，但仍是RGB变化，不是物理运动。
+- **Actor step-change L1**：比较相邻预测帧的RGB差和相邻真实帧的RGB差；第一步使用各路径自身anchor。加入上一帧actor位置，排除相关机械臂像素，只评分真实相邻的有效帧，不跨缺帧计算。
+- **Change-normalized error**：在每个actor内部，用anchor-change误差除以该actor真实RGB变化幅度。只有分母至少为 `1/255` 才计算；这是uint8颜色分辨率，不是运动阈值或teacher筛点参数。copy对有变化actor的比值为1；静止actor不强行计算ratio。
+- **Feature MSE / feature-change L1**：使用与训练相同的normalized DINO、有效patch与相邻时间差，覆盖全部未来帧。它们用于解释训练目标，不等同于独立object质量。
+- **外部事实与辅助诊断**：保留GT body的3D位移/路径长度，以及初始帧固定匹配的field ownership、visible-centroid误差。field不是RGB实例分割，visible centroid不是3D body center。末帧缺失或actor被遮挡时，不用更早时刻冒充可见终点。
+
+统计顺序：逐帧/actor → case → 同scene两个program平均 → scene分布。报告均值、median、p10/p90，以及posterior对zero/reverse/copy逐case和逐scene的差值、胜/平数量。0-2s、2-5s、5-10s分别报告，不只给整段平均；seen/held combination保留独立切片。没有新增自动“通过”门槛。
+
+### 23.2 同步与单卡执行
+
+准备机同步允许联网；运行命令无Git、模型下载、后台训练行为。下面同步只fetch/export评测代码，不切换或覆盖八卡任务正在使用的release。
+
+```bash
+(
+set -euo pipefail
+export http_proxy=http://10.66.65.186:18000
+export https_proxy=http://10.66.65.186:18000
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
+git -C "${SOURCE_ROOT}" fetch origin codex/object-event-world-model-v71
+export SOURCE_REVISION="$(git -C "${SOURCE_ROOT}" rev-parse FETCH_HEAD)"
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+mkdir -p "${ROOT}"
+git -C "${SOURCE_ROOT}" archive "${SOURCE_REVISION}" | tar -xf - -C "${ROOT}"
+printf 'SOURCE_REVISION=%s\nROOT=%s\n' "${SOURCE_REVISION}" "${ROOT}"
+)
+```
+
+独立执行时将 `SOURCE_REVISION` 设置为本次发布提交；不使用旧训练release来寻找新增评测脚本。
+
+```bash
+set -o pipefail
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=<本次评测代码发布提交>
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export CHECKPOINT="${WORK_ROOT}/outputs/v71_joint_object_step_view128_seed17_20f5e23_20261020_021715/step_00000500.pt"
+export OUT="${WORK_ROOT}/outputs/v71_stage1_held_step500_${SOURCE_REVISION:0:7}"
+export CUDA_VISIBLE_DEVICES=0
+export PARTITION=development ITEMS=200 VIDEO_CASES=12
+export FRAME_BATCH=4 DECODE_BATCH=2 PRECISION=bf16 RESUME_EVAL=1
+mkdir -p "${OUT}"
+bash "${ROOT}/code/scripts/evaluate_object_event_stage1_v71.sh" 2>&1 | tee -a "${OUT}/eval.log"
+EVAL_RC=$?
+printf 'EVAL_RC=%s\nREVIEW=%s/index.html\nREPORT=%s/report.json\n' "${EVAL_RC}" "${OUT}" "${OUT}"
+```
+
+`RESUME_EVAL=1` 只复用同一输出目录的已完成评测case，不恢复或修改训练。比较其他checkpoint必须更换 `CHECKPOINT` 和 `OUT`。默认12个视频取固定scene排列的前12例，不按效果选择；全部200例仍完整评分。结果为 `index.html`、`report.json`、`cases.jsonl`、逐case `metrics.json` 和所选case的 `comparison.mp4/terminal.jpg`。视频前3秒是相同的真实历史，后10秒才展示各条件；不上传SwanLab评测数据或媒体。
+
+### 23.3 已完成的本地执行
+
+`test_object_event_stage1_metrics_v71.py --pipeline` 在已有CPU环境运行退出0：精确预测actor误差0、copy变化比值1；机械臂不计入actor变化，静止比值为空，缺帧不跨帧做差，遮挡/缺失终点不代换。随后实际小尺寸ObjectEventWorldModel以BF16跑完8条件、JSON、5帧视频和HTML，resume复用case且不重写结果。codec使用固定测试替身，非正式DINO/RAE权重；真实500步单卡held评测尚待执行，不把本地管线测试当作实验成绩。

@@ -1,5 +1,29 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
+## 2026-10-20 V71 Stage 1 held变化评测
+
+- **What changed**：新增独立 `evaluate_object_event_stage1_v71.py/.sh`，不修改模型、loss或训练入口。固定500步快照，development 100 scenes/200 programs；同case比较posterior、zero、反序effect、source-state copy、原图copy，以及observed-state、codec、resize参考。评分区域来自模拟器actor mask；保存逐帧/逐actor误差、GT物理运动量、逐case配对gain、scene平衡统计和0-2/2-5/5-10秒切片，不用训练均值替代held证据。八卡训练不受影响。
+- **Why**：最早仍未回答的是“正确effect是否带来真实变化还原收益”，不是程序能否运行。变化误差同时报告相对各路径自身anchor的RGB变化、相邻帧RGB变化和训练中的DINO feature-change；它们不是物理flow。DINO patch不充当object GT，field ownership只作独立mask匹配诊断。归一化在每actor内计算，低于一个uint8强度级时不算ratio；缺失/被遮挡的终点不代换。
+- **Impact / evidence**：复用现有数据、DINO/RAE和同一checkpoint，不造数据、不训练Prior；默认前12个固定case写九宫格视频，全部case写JSON，显式resume复用已完成case。CPU受控运动/静止/遮挡评分与小尺寸真实模型BF16完整流程均退出0，8条件、5帧可解码视频、报告和resume已执行；视觉codec为测试替身，未在本地加载真实预训练权重，不宣称正式GPU评测完成。此轮不设自动成功阈值，等真实逐例/配对结果决定下一步。独立执行命令和指标说明见研究计划第23节；评测不上传SwanLab，维持仅上传训练标量的边界。
+
+## 2026-10-20 V71正式训练：SwanLab API回读
+
+- **What changed / observed**：直接读取[SwanLab gidx7ik8](https://swanlab.cn/@healenrens/instruct-gs-world/runs/gidx7ik8/chart)的配置、标量和云端console日志，不读取服务器本地训练日志。run为 `v71_joint_object_step_view128_seed17_20f5e23_20261020_021715`，source revision `20f5e232fddfc46ab1f6cf97054bdf50746b94d6`，joint/object_step、view128、B2/acc16/global256、1000步。北京时间02:17:48创建，最新已上传step690时间为15:30:47，云端仍标为RUNNING；没有完成或held评测证据。79条云端文本记录含70个训练点（1及10至690每10步），数值均有限。
+- **Why / interpretation**：重建仍改善，但变化目标几乎不动。下表是对应区间已上传训练点的均值，不是逐case的held结果；100步前rollout权重由0.01升到1，不能直接用总loss前后值判断退化。
+
+| Metric | 101-200，10点 | 401-500，10点 | 601-690，9点 |
+| --- | ---: | ---: | ---: |
+| loss | 1.71286 | 1.58629 | 1.53519 |
+| observed_rgb_l1 | 0.15582 | 0.12547 | 0.11291 |
+| posterior_rgb_l1 | 0.19061 | 0.12733 | 0.11286 |
+| posterior_feature_mse | 0.63371 | 0.61471 | 0.60227 |
+| feature_change_l1 | 0.22013 | 0.22114 | 0.21998 |
+| effect_kl | 0.37600 | 0.30424 | 0.04950 |
+
+- **Impact / next**：401-500至601-690，posterior RGB误差下降11.36%，feature MSE下降2.02%，change误差只下降0.52%；全程change在0.21782-0.22468之间，不能把画面重建改善称为学会物体变化。观测与posterior误差接近也不证明Dynamics有效；需要同一held上的posterior/zero/copy与独立actor区域结果。KL为跨维/时间平均，不据其下降独自断言posterior collapse或调权重。当前没有这些held指标，优先评价500步快照，不因训练loss下降直接开启Prior或延长预算。
+- **运行事实**：rollout末态RMS曾在250步到48.9127，690步为0.8074；同刻observed末态RMS为0.99095。说明早期有内部幅度漂移、后段不再持续放大，不等于运动准确。601-690裁剪前grad norm均值2.707、step690为2.556；最近单次optimizer更新约68.39s，rank0取batch等待累计约0.0054s，peak allocated51.6958GiB，NVML显存比例约68.25%。cursor11040对应176640次全局scene访问，约176.64次1000-scene遍历，不是只见过少量数据。未读取服务器checkpoint文件。
+- **保存说明纠正**：这版训练循环只在step整除save_every=100时调用保存，编号snapshot又要求整除250，因此按代码只有500/1000触发编号快照；先前命令说明中的250/750编号快照不成立。该问题是代码读取所得，本轮未修改正在运行的训练或保存逻辑。
+
 ## 2026-10-16 V71继续实施
 
 - **LPWM准备与完整单卡测试通过**：用户授权后在百度独立uv环境完成官方LPWM/T5/VGG/LPIPS准备，原训练环境不变。`20f5e23`完整测试退出0，146.5M参数、B1/FP32/16+50帧、29个blocks activation checkpointing，峰值31.64GiB；模型/optimizer/RNG存取相同，独立训练轨迹参数差约1.78e-4，future swap差0。无语言对照明确使用T5空字符串，保留语言token结构。工程RGB只测1例，正确语言与空语言误差近乎相同且不优于copy，不据此宣布科学能力；首步梯度很大也不隐去。完整产物和更新后的独立命令见研究计划21.4-21.5，正式八卡与配对benchmark未启动。
