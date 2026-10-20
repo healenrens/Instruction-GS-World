@@ -1758,7 +1758,7 @@ export https_proxy=http://10.66.65.186:18000
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
 export SOURCE_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
 git -C "${SOURCE_ROOT}" fetch origin codex/object-event-world-model-v71
-export SOURCE_REVISION=5aefc2cf389afa04d3a0c905230526272de5b9a0
+export SOURCE_REVISION=8388079b73a22d1915114d903be76f84dcb5cae7
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 mkdir -p "${ROOT}"
 git -C "${SOURCE_ROOT}" archive "${SOURCE_REVISION}" | tar -xf - -C "${ROOT}"
@@ -1769,7 +1769,7 @@ printf 'ROOT=%s\n' "${ROOT}"
 ```bash
 set -o pipefail
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=5aefc2cf389afa04d3a0c905230526272de5b9a0
+export SOURCE_REVISION=8388079b73a22d1915114d903be76f84dcb5cae7
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/.venv/bin/python"
 export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
