@@ -20,13 +20,15 @@ def run_pipeline(rgb, labels):
     import torch
     from argparse import Namespace
     from copy import deepcopy
+    from PIL import Image
     from torch.nn import functional as F
     from igsw.object_event_wm.config import ModelConfig
     from igsw.object_event_wm.data import SequenceConfig, write_json
     from igsw.object_event_wm.model import ObjectEventWorldModel
     from igsw.object_event_wm.simulation_data import SimulationVideoDataset, prepare_simulation_manifest
     from igsw.object_event_wm.stage1_evaluation import evaluate_stage1
-    from igsw.object_event_wm.reconstruction_probe import prepare_frames, train_probe
+    from igsw.object_event_wm.reconstruction_probe import (
+        initialize_frame_states, load_encoder_comparison, prepare_frames, train_probe)
 
     class FixtureCodec(torch.nn.Module):
         image_size, grid_size = 32, 4
@@ -103,9 +105,39 @@ def run_pipeline(rgb, labels):
         train_probe(model, FixtureCodec(), bank, Namespace(out=str(interrupted), **options), resume=checkpoint)
         difference = max(float((model.state_dict()[k]-complete[k]).abs().max()) for k in complete)
         assert difference == 0
+        model.load_state_dict(original)
+        comparison = load_encoder_comparison(model, FixtureCodec(), bank, uninterrupted/"latest.pt", 2, "bf16")
+        assert all(torch.equal(model.state_dict()[k], original[k]) for k in original)
+        initial_states = deepcopy(initialize_frame_states(model, FixtureCodec(), bank, 2, "bf16").state_dict())
+        free_options = {**options, "state_source": "free"}
+        free_out = root/"free_uninterrupted"
+        free_out.mkdir()
+        free_report = train_probe(model, FixtureCodec(), bank, Namespace(out=str(free_out), **free_options),
+                                  comparison=comparison)
+        free_saved = torch.load(free_out/"latest.pt", map_location="cpu", weights_only=False)
+        assert free_report["trainable_modules"] == ["per_frame_states", "renderer"]
+        assert free_report["encoder_comparison"]["step"] == 4
+        assert all(torch.equal(model.state_dict()[k], original[k]) for k in original
+                   if k.startswith(("encoder.", "posterior.", "dynamics.")))
+        assert not torch.equal(initial_states["tokens"], free_saved["free_states"]["tokens"])
+        assert Image.open(free_out/"frames"/"frame_00.png").width == 1280
+        free_complete = deepcopy(model.state_dict())
+        model.load_state_dict(original)
+        free_resume = root/"free_resumed"
+        free_resume.mkdir()
+        train_probe(model, FixtureCodec(), bank,
+                    Namespace(out=str(free_resume), **{**free_options, "steps": 2}), comparison=comparison)
+        free_checkpoint = torch.load(free_resume/"latest.pt", map_location="cpu", weights_only=False)
+        train_probe(model, FixtureCodec(), bank, Namespace(out=str(free_resume), **free_options), resume=free_checkpoint)
+        free_final = torch.load(free_resume/"latest.pt", map_location="cpu", weights_only=False)
+        free_difference = max(float((free_saved["free_states"][k]-free_final["free_states"][k]).abs().max())
+                              for k in free_saved["free_states"])
+        assert free_difference == 0
+        assert all(torch.equal(model.state_dict()[k], free_complete[k]) for k in free_complete)
         return {"conditions": 8, "video_frames": len(decoded), "resume_reused_case": True,
                 "reconstruction_probe_frames": 4, "reconstruction_probe_steps": 4,
                 "only_encoder_renderer_updated": True, "probe_resume_max_difference": difference,
+                "free_state_encoder_frozen": True, "free_state_resume_max_difference": free_difference,
                 "scope": "CPU BF16 real small ObjectEventWorldModel; fixture visual codec, not DINO/RAE"}
 
 

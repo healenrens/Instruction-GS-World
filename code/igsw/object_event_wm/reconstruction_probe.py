@@ -16,15 +16,43 @@ from .independent_metrics import score_rgb_outcomes
 from .model import weighted_mean
 from .native_view import native_rgb
 from .simulation_data import load_truth
-from .state import coordinates
+from .state import ObjectState, coordinates
 from .training import device_batch
 
 
-def set_probe_trainable(model):
+class PerFrameStates(torch.nn.Module):
+    def __init__(self, tokens, centers):
+        super().__init__()
+        self.tokens = torch.nn.Parameter(tokens.detach().float().clone())
+        self.center_logits = torch.nn.Parameter(centers.detach().float().atanh())
+
+    def forward(self, indices):
+        return ObjectState(self.tokens[indices], self.center_logits[indices].tanh(),
+                           self.tokens.new_zeros(len(indices)))
+
+
+@torch.no_grad()
+def initialize_frame_states(model, codec, bank, batch_size, precision):
+    device = next(model.parameters()).device
+    tokens, centers = [], []
+    model.eval()
+    for first in range(0, len(bank["features"]), batch_size):
+        features = bank["features"][first:first+batch_size].to(device)
+        valid = bank["patch_valid"][first:first+batch_size].to(device)
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
+            state = model.observe(features[:, None], valid[:, None], features.new_zeros((len(features), 1)))[0]
+        tokens.append(state.tokens)
+        centers.append(state.centers)
+    return PerFrameStates(torch.cat(tokens), torch.cat(centers))
+
+
+def set_probe_trainable(model, frame_states=None):
     model.requires_grad_(False)
-    model.encoder.requires_grad_(True)
     model.renderer.requires_grad_(True)
-    return list(model.encoder.parameters()) + list(model.renderer.parameters())
+    if frame_states is None:
+        model.encoder.requires_grad_(True)
+        return list(model.encoder.parameters()) + list(model.renderer.parameters())
+    return list(frame_states.parameters()) + list(model.renderer.parameters())
 
 
 def probe_state_dict(model):
@@ -75,17 +103,18 @@ def prepare_frames(dataset, codec, view_size, scenes, seconds, device, precision
             "metadata": metadata, "truth": truth, "skipped": skipped}
 
 
-def single_frame_forward(model, codec, features, valid):
+def single_frame_forward(model, codec, features, valid, frame_states=None, indices=None):
     # Each image is an independent observation. No frame ID or prior image enters this path.
     times = features.new_zeros((len(features), 1))
-    states = model.observe(features[:, None], valid[:, None], times)
+    states = (model.observe(features[:, None], valid[:, None], times) if frame_states is None
+              else [frame_states(indices)])
     rendered, _ = model.render_features(states, coordinates(codec.grid_size, features.device))
     rgb = model.decode_features(codec, rendered)
     return rendered[:, 0], rgb[:, 0]
 
 
 @torch.no_grad()
-def evaluate_frames(model, codec, bank, batch_size, precision):
+def evaluate_frames(model, codec, bank, batch_size, precision, frame_states=None):
     model.eval()
     device = next(model.parameters()).device
     records, predicted = [], []
@@ -96,7 +125,8 @@ def evaluate_frames(model, codec, bank, batch_size, precision):
         images = bank["images"][start:end].to(device)
         pixels = bank["pixel_valid"][start:end].to(device)
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
-            rendered, rgb = single_frame_forward(model, codec, target, valid)
+            indices = torch.arange(start, start+len(target), device=device)
+            rendered, rgb = single_frame_forward(model, codec, target, valid, frame_states, indices)
         for offset in range(len(rgb)):
             index = start+offset
             external = bank["truth"][index]
@@ -142,23 +172,37 @@ def reference_scores(bank, reference):
     return rows
 
 
-def write_probe_review(out, bank, reference, before, after, report):
+@torch.no_grad()
+def load_encoder_comparison(model, codec, bank, path, batch_size, precision):
+    original = {name: {key: value.detach().clone() for key, value in state.items()}
+                for name, state in probe_state_dict(model).items()}
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    load_probe_state(model, checkpoint["model"])
+    images, records = evaluate_frames(model, codec, bank, batch_size, precision)
+    load_probe_state(model, original)
+    return {"rgb": images, "records": records, "checkpoint": str(path), "step": checkpoint["step"]}
+
+
+def write_probe_review(out, bank, reference, before, after, report, comparison=None):
     out = Path(out)
     folder = out/"frames"
     folder.mkdir(parents=True, exist_ok=True)
     sections = []
-    columns = ("target", "codec_reference", "before", "after")
+    panels = [("target", bank["images"]), ("codec_reference", reference), ("before", before)]
+    if comparison is not None:
+        panels.append(("encoder_after", comparison["rgb"]))
+    panels.append(("free_state_after" if report["state_source"] == "free" else "after", after))
     for index, meta in enumerate(bank["metadata"]):
-        canvas = Image.new("RGB", (256*len(columns), 280), "white")
+        canvas = Image.new("RGB", (256*len(panels), 280), "white")
         draw = ImageDraw.Draw(canvas)
-        for column, (name, tensor) in enumerate(zip(columns, (bank["images"], reference, before, after))):
+        for column, (name, tensor) in enumerate(panels):
             image = Image.fromarray((tensor[index].permute(1, 2, 0).numpy().clip(0, 1)*255).round().astype(np.uint8))
             canvas.paste(image.resize((256, 256)), (column*256, 24))
             draw.text((column*256+4, 5), name, fill="black")
         name = f"frame_{index:02d}.png"
         canvas.save(folder/name)
         sections.append(f'<section><h2>{escape(meta["case_id"])} / {meta["seconds"]:.1f}s</h2>'
-                        f'<img src="frames/{name}" alt="Target, codec reference, before, after"></section>')
+                        f'<img src="frames/{name}" alt="Fixed-frame reconstruction comparisons"></section>')
     write_json(out/"report.json", report)
     (out/"index.html").write_text('<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1"><title>V71 Reconstruction Probe</title>'
@@ -170,13 +214,19 @@ def write_probe_review(out, bank, reference, before, after, report):
         '<p><a href="report.json">Compact report</a></p>'+''.join(sections)+'</html>')
 
 
-def train_probe(model, codec, bank, args, tracker=None, resume=None):
+def train_probe(model, codec, bank, args, tracker=None, resume=None, comparison=None):
     out = Path(args.out)
-    parameters = set_probe_trainable(model)
+    state_source = getattr(args, "state_source", "encoder")
+    if resume is not None:
+        load_probe_state(model, resume["model"])
+    frame_states = (initialize_frame_states(model, codec, bank, args.batch, args.precision)
+                    if state_source == "free" else None)
+    parameters = set_probe_trainable(model, frame_states)
     optimizer = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
     start = 0
     if resume is not None:
-        load_probe_state(model, resume["model"])
+        if frame_states is not None:
+            frame_states.load_state_dict(resume["free_states"])
         optimizer.load_state_dict(resume["optimizer"])
         start = resume["step"]
         initial = torch.load(out/"initial.pt", map_location="cpu", weights_only=False)
@@ -184,23 +234,27 @@ def train_probe(model, codec, bank, args, tracker=None, resume=None):
         if torch.cuda.is_available():
             torch.cuda.set_rng_state_all(resume["cuda_rng"])
     else:
-        before, initial_records = evaluate_frames(model, codec, bank, args.batch, args.precision)
+        before, initial_records = evaluate_frames(model, codec, bank, args.batch, args.precision, frame_states)
         reference = codec_reference(model, codec, bank, args.batch, args.precision)
         initial = {"before": before, "reference": reference, "records": initial_records,
-                   "codec_records": reference_scores(bank, reference)}
+                   "codec_records": reference_scores(bank, reference), "comparison": comparison}
         torch.save(initial, out/"initial.pt")
     device = next(model.parameters()).device
     count = len(bank["images"])
     config = asdict(model.config)
 
     def export(step):
-        after, rows = evaluate_frames(model, codec, bank, args.batch, args.precision)
+        after, rows = evaluate_frames(model, codec, bank, args.batch, args.precision, frame_states)
         report = {"contract": "v71_fixed_frame_observed_reconstruction_v1", "step": step,
             "base_checkpoint": args.checkpoint, "initialization": args.initialization,
             "source_revision": args.source_revision, "model_config": config,
+            "state_source": state_source,
+            "trainable_modules": ["per_frame_states", "renderer"] if frame_states is not None else ["encoder", "renderer"],
+            "state_shape_per_frame": [model.config.slots, model.config.local_tokens, model.config.width],
             "frames": count, "scenes": len({row["scene_seed"] for row in bank["metadata"]}),
             "partition": bank["metadata"][0]["partition"],
-            "input": "one RGB frame, state reset for every image; zero model time",
+            "input": ("per-image optimized tokens/centers initialized from the original encoder"
+                      if frame_states is not None else "one RGB frame, state reset for every image; zero model time"),
             "objective": "original feature MSE + original RGB L1; no KL, change, posterior or dynamics losses",
             "feature_weight": model.config.feature_weight, "rgb_weight": model.config.rgb_weight,
             "effective_batch": count, "micro_batch": args.batch,
@@ -213,13 +267,35 @@ def train_probe(model, codec, bank, args, tracker=None, resume=None):
                                 for key in ("full_native_rgb_l1", "actor_rgb_l1")},
             "per_frame": [{**meta, "before": initial["records"][i], "after": rows[i],
                            "codec_reference": initial["codec_records"][i]} for i, meta in enumerate(bank["metadata"])]}
-        write_probe_review(out, bank, initial["reference"], initial["before"], after, report)
+        reference_fit = initial.get("comparison")
+        if reference_fit is not None:
+            report["encoder_comparison"] = {key: reference_fit[key] for key in ("checkpoint", "step")}
+            report["encoder_comparison"]["scores"] = mean_scores(reference_fit["records"])
+            for index, row in enumerate(report["per_frame"]):
+                row["encoder_after"] = reference_fit["records"][index]
+        write_probe_review(out, bank, initial["reference"], initial["before"], after, report, reference_fit)
+        evaluation = {"reconstruction/"+key: value for key, value in report["after"].items()}
+        evaluation.update({"reference/initial_"+key: value for key, value in report["before"].items()})
+        evaluation.update({"reference/codec_"+key: value for key, value in report["codec_reference"].items()})
+        if reference_fit is not None:
+            evaluation.update({"reference/encoder_"+key: value
+                               for key, value in report["encoder_comparison"]["scores"].items()})
+        for index, row in enumerate(rows):
+            for actor in row["actors"]:
+                if actor["rgb_l1"] is not None:
+                    evaluation[f"frames/frame_{index:02d}/actor_{actor['body_id']}_rgb_l1"] = actor["rgb_l1"]
+        print(json.dumps({"event": "reconstruction_probe_evaluation", "step": step, **evaluation}), flush=True)
+        if tracker is not None:
+            import swanlab
+            swanlab.log(evaluation, step=step)
         return report
 
     def save(step):
         temporary = out/"latest.partial"
         torch.save({"format": "v71_observed_reconstruction_probe", "step": step,
             "model": probe_state_dict(model), "model_config": config, "optimizer": optimizer.state_dict(),
+            "state_source": state_source,
+            "free_states": frame_states.state_dict() if frame_states is not None else None,
             "args": vars(args), "torch_rng": torch.get_rng_state(),
             "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
             "swanlab_run_id": tracker.id if tracker is not None else None}, temporary)
@@ -243,7 +319,8 @@ def train_probe(model, codec, bank, args, tracker=None, resume=None):
                 images = bank["images"][first:last].to(device)
                 pixels = bank["pixel_valid"][first:last].to(device)
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.precision == "bf16"):
-                    rendered, rgb = single_frame_forward(model, codec, target, valid)
+                    indices = torch.arange(first, first+len(target), device=device)
+                    rendered, rgb = single_frame_forward(model, codec, target, valid, frame_states, indices)
                     feature_loss = ((rendered.float()-target).square()*valid[..., None]).sum()/feature_denominator
                     rgb_loss = ((rgb.float()-images).abs()*pixels).sum()/rgb_denominator
                     loss = model.config.feature_weight*feature_loss + model.config.rgb_weight*rgb_loss

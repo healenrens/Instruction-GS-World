@@ -12,11 +12,13 @@ ARGS=(
   --manifest "${MANIFEST:-${WORK_ROOT}/metadata/cliport_event_v71.json}"
   --assets "${ASSETS:-${WORK_ROOT}/metadata/rae_assets_512.json}"
   --initialization "${INITIALIZATION:-checkpoint}" --steps "${STEPS:-1000}" --batch "${BATCH:-4}"
+  --state-source "${STATE_SOURCE:-encoder}"
   --scenes "${SCENES:-4}" --frame-seconds "${FRAME_SECONDS:-0,2,5,10}"
   --precision "${PRECISION:-bf16}" --frame-batch "${FRAME_BATCH:-4}" --decode-batch "${DECODE_BATCH:-2}"
   --log-every "${LOG_EVERY:-10}" --save-every "${SAVE_EVERY:-100}"
 )
 if [[ -n "${RESUME:-}" ]]; then ARGS+=(--resume "${RESUME}"); fi
+if [[ -n "${REFERENCE_RUN:-}" ]]; then ARGS+=(--reference-run "${REFERENCE_RUN}"); fi
 TRACKING_PROJECT="${PROBE_SWANLAB_PROJECT:-${SWANLAB_PROJECT:-}}"
 TRACKING_WORKSPACE="${PROBE_SWANLAB_WORKSPACE:-${SWANLAB_WORKSPACE:-}}"
 if [[ -n "${TRACKING_PROJECT}" ]]; then ARGS+=(--swanlab-project "${TRACKING_PROJECT}"); fi

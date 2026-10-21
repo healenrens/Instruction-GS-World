@@ -1,5 +1,25 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
+## 2026-10-21 Free State对照实现
+
+- **What changed**：原固定帧入口新增 `STATE_SOURCE=free`。直接复用已完成run `v71_reconstruction_probe_step500_20261021_030844/fixed_frames.pt`；原joint step500 encoder只用于初始化每帧的tokens/centers，训练仅更新这些逐图State与原step500 renderer。State形状仍为17x4x384及17x4x2 centers，centers使用atanh/tanh参数化以保留归一化坐标范围；DINO/RAE、目标、1000步、micro4/effective16、AdamW recipe相同。没有新增图像/运动筛选或修改正式world model。
+- **Why**：上一轮固定帧训练后仍丢失小物体，需要区分encoder聚合与后续空间还原链路。逐图State可记忆图像，是有意允许的诊断自由度；成功支持优先检查encoder/优化，失败则优先检查renderer/解码接口及目标优化，不当作理论容量证明。
+- **Impact / evidence**：新OUT独立保存free State、renderer、optimizer与恢复状态，原run不改。一次读取旧probe终点encoder/renderer，得到同帧encoder_after参考，随后恢复step500权重开始新优化；五列图为Target/codec/before/encoder_after/free_state_after。SwanLab只上传训练标量，补齐重建actor误差、codec与encoder参考及逐帧逐actor误差；结束摘要在finish前打印。CPU BF16小尺寸完整训练/图像/评分/恢复通过，free State确实更新、encoder不变，4步连续与2+2恢复的free State和renderer参数相同。真实16帧GPU结果待用户执行。独立命令见研究计划第25节。
+
+## 2026-10-21 固定16帧实验：SwanLab API结果
+
+- **后续可视证据与决策**：用户补充22:11/22:12三张Target/codec/before/after截图；第一与第三画面高度相似，不作为三个独立case统计。所示after较before恢复了机械臂粗轮廓及左右位置差异、桌面边界，但彩色碗/方块仍基本消失；同帧codec_reference能分辨这些物体。结合已读训练曲线，只支持“大尺度重建有改善”，当前所示固定训练样本的物体细节重建仍未达预期；不能宣布Stage 1通过，也不能认定整个State完全不含图像条件信息。下一项候选诊断为同一固定16帧、同一原始step500 renderer、相同state形状和损失，使用逐图可优化State tokens/centers替代encoder输出，并从原encoder输出初始化，以隔离encoder聚合与renderer/解码优化。若可恢复小物体则优先定位encoder；若不可恢复则优先定位renderer/接口/优化，不能直接据失败断言表示容量在理论上不可能。本轮只记录图像反馈与下一项思路，未实现或运行新诊断。
+- **What changed / evidence**：直接从SwanLab API读取run `zzxfqr9s`（`v71_reconstruction_probe_step500_20261021_030844`），状态FINISHED，北京时间03:09:15至04:18:11，共约68分56秒。配置为8388079、从joint step500初始化、4 scenes/16帧、micro-batch4/effective batch16、BF16、1000步、lr2e-4；单帧独立重置State，只优化encoder/renderer。实际读到101个训练标量点和111条云端console记录；未读取服务器本地日志、report或PNG。
+
+| 指标 | step1 | 401-500均值，10点 | 901-1000均值，10点 | step1000 |
+| --- | ---: | ---: | ---: | ---: |
+| loss | 0.784450 | 0.603161 | 0.491956 | 0.490384 |
+| feature_mse | 0.616110 | 0.505353 | 0.424604 | 0.421218 |
+| rgb_l1 | 0.168341 | 0.097808 | 0.067352 | 0.069167 |
+
+- **Why / interpretation**：首步至step1000记录，feature MSE下降31.63%、全图RGB L1下降58.91%；最后100步相比前100步分别再降2.81%和5.78%，尚非完全平台。101点数值均有限，裁剪前grad norm最大5.157（step1），最后100步均值1.429，无明显数值发散。所有点的loss均等于feature_mse+rgb_l1。它支持当前State/renderer联合链路可优化，不能据此宣布恢复了物体细节，也不能将改进唯一归因于移除Dynamics：本实验同时固定小集合并将历史改为独立单帧。不能将这里的全图view128训练误差与上轮native actor held误差直接比较。
+- **Impact / next**：当前上传的自定义量只有loss/feature_mse/rgb_l1/grad_norm/seconds/effective_batch/step，缺actor评分、codec参考误差和图片。代码将这些写入本地compact report与PNG，结束摘要还在swanlab.finish之后打印，因此云端日志没有该摘要。尚无法从现有API判断encoder与renderer各自学到了多少，或最终物体是否清晰；下一证据是已生成的 `outputs/v71_reconstruction_probe_step500_20261021_030844/report.json` 与 `frames/frame_XX.png`，不需重跑。当前不据全图loss推进Prior或宣布Stage 1达标。本轮仅更新账本，未改模型或启动实验。
+
 ## 2026-10-21 V71固定帧重建诊断实现
 
 - **What changed**：新增 `fit_object_state_reconstruction_v71.py/.sh` 与独立 `reconstruction_probe.py`。默认从失败的step500权重初始化，只训练现有encoder/renderer；train集按seed17固定选4个scene，每例取0/2/5/10秒，共16帧，不按运动或重建成绩筛选。每张图独立重置State，输入只有该帧DINO特征与空间坐标，模型时间置零。沿用原feature MSE＋RGB L1及权重，不调用Posterior/Dynamics，不加入KL、mask监督或新loss。DINO/RAE保持冻结，RGB梯度通过冻结RAE回到renderer。

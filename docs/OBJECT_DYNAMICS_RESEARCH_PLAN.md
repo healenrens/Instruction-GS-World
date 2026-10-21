@@ -1795,3 +1795,56 @@ printf 'PROBE_RC=%s\nREVIEW=%s/index.html\nREPORT=%s/report.json\n' "${RC}" "${O
 ### 24.3 本地结果
 
 在已有CPU环境运行完整BF16小模型流程：准备4帧、训练4步、写PNG/HTML/compact JSON、只更新encoder/renderer、保存和2+2步恢复，退出0；与4步连续训练参数差0。复用了现有单个端到端测试入口，没有安装或下载本地权重。正式DINO/RAE和实际16帧GPU重建结果仍待运行。
+
+## 25. 绕过encoder：逐图Free State与同一renderer
+
+**What changed**：固定16帧入口新增 `--state-source free` 和 `--reference-run`，不另建world model。直接读取上一轮完整固定帧bank，保持case、原帧、目标和评分区域相同。每帧tokens与centers从原joint step500 encoder的独立帧输出初始化；冻结encoder，优化逐图State和同一原step500 renderer，1000步、AdamW lr2e-4、weight_decay0.01、clip1、micro4/effective16。原数据、旧probe checkpoint及正式训练均保持原样。
+
+**Why**：用户提供的after图仍丢失小物体。若允许逐图直接拟合State后能够恢复物体，优先定位encoder聚合/优化；若不能，优先定位renderer、feature解码接口或共同目标优化。逐图State允许记忆，是诊断而非部署模型，也不是同参数量的泛化对比。
+
+**Impact**：同帧五列PNG展示Target、codec_reference、before、旧probe终点encoder_after、free_state_after。旧probe终点只用于一次参考计算，计算后恢复原step500参数，新优化不从已训1000步renderer继续。每100步输出compact report与图片，SwanLab补齐重建actor误差、codec/旧encoder参考与逐帧逐actor标量，不上传媒体。报告、free State、optimizer及初始参考写入新OUT，显式resume恢复；旧encoder模式继续兼容。
+
+### 25.1 同步代码
+
+```bash
+(
+set -euo pipefail
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
+export SOURCE_REVISION=FREE_STATE_RELEASE
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+git -C "${SOURCE_ROOT}" fetch git@github.com:healenrens/Instruction-GS-World.git codex/object-event-world-model-v71
+mkdir -p "${ROOT}"
+git -C "${SOURCE_ROOT}" archive "${SOURCE_REVISION}" | tar -xf - -C "${ROOT}"
+printf 'ROOT=%s\n' "${ROOT}"
+)
+```
+
+### 25.2 单卡前台运行
+
+运行环境设置SWANLAB_API_KEY，值不写入源码或文档。此命令不访问GitHub或下载模型。
+
+```bash
+set -o pipefail
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=FREE_STATE_RELEASE
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export CHECKPOINT="${WORK_ROOT}/outputs/v71_joint_object_step_view128_seed17_20f5e23_20261020_021715/step_00000500.pt"
+export REFERENCE_RUN="${WORK_ROOT}/outputs/v71_reconstruction_probe_step500_20261021_030844"
+export RUN_NAME="v71_free_state_probe_step500_$(date +%Y%m%d_%H%M%S)"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export CUDA_VISIBLE_DEVICES=0 STATE_SOURCE=free INITIALIZATION=checkpoint
+export STEPS=1000 BATCH=4 FRAME_BATCH=4 DECODE_BATCH=2 PRECISION=bf16
+export LOG_EVERY=10 SAVE_EVERY=100
+export PROBE_SWANLAB_PROJECT=instruct-gs-world PROBE_SWANLAB_WORKSPACE=healenrens
+unset SWANLAB_PROJECT SWANLAB_WORKSPACE RESUME
+mkdir -p "${OUT}"
+bash "${ROOT}/code/scripts/fit_object_state_reconstruction_v71.sh" 2>&1 | tee -a "${OUT}/launcher.log"
+RC=$?
+printf 'PROBE_RC=%s\nREVIEW=%s/index.html\nREPORT=%s/report.json\n' "${RC}" "${OUT}" "${OUT}"
+```
+
+显式恢复时沿用原OUT，增加 `RESUME="${OUT}/latest.pt"`，原frames/初始参考/free State/optimizer/RNG会恢复。CPU BF16小尺寸完整流程已通过：训练、encoder冻结、五列PNG、逐actor评分、4步与2+2步恢复参数一致；真实DINO/RAE的16帧结果尚未执行，不据工程通过宣布方法有效。

@@ -15,7 +15,7 @@ from igsw.object_event_wm.codec import FrozenVisualCodec
 from igsw.object_event_wm.config import ModelConfig
 from igsw.object_event_wm.data import build_video_dataset
 from igsw.object_event_wm.model import ObjectEventWorldModel
-from igsw.object_event_wm.reconstruction_probe import prepare_frames, train_probe
+from igsw.object_event_wm.reconstruction_probe import load_encoder_comparison, prepare_frames, train_probe
 from igsw.object_event_wm.training import checkpoint_path, read_checkpoint
 
 
@@ -26,6 +26,8 @@ def main():
     parser.add_argument("--assets", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--initialization", choices=("checkpoint", "fresh"), default="checkpoint")
+    parser.add_argument("--state-source", choices=("encoder", "free"), default="encoder")
+    parser.add_argument("--reference-run", default="", help="Reuse this probe's exact frames and show its fitted encoder reconstruction.")
     parser.add_argument("--resume", default="", help="Explicit probe checkpoint, not the original joint run.")
     parser.add_argument("--scenes", type=int, default=4)
     parser.add_argument("--frame-seconds", default="0,2,5,10")
@@ -51,6 +53,8 @@ def main():
     resume = torch.load(args.resume, map_location="cpu", weights_only=False) if args.resume else None
     if resume is not None:
         saved_args = resume["args"]
+        args.state_source = resume.get("state_source", "encoder")
+        args.reference_run = saved_args.get("reference_run", "")
         for name in ("checkpoint", "initialization", "manifest", "assets", "scenes", "frame_seconds",
                      "batch", "precision", "lr", "weight_decay", "seed", "frame_batch", "decode_batch"):
             setattr(args, name, saved_args[name])
@@ -66,14 +70,20 @@ def main():
     if resume is not None:
         bank = torch.load(out/"fixed_frames.pt", map_location="cpu", weights_only=False)
     else:
-        dataset = build_video_dataset(args.manifest, partition="train", seed=args.seed)
-        bank = prepare_frames(dataset, codec, model.view_size(codec), args.scenes,
-                              [float(value) for value in args.frame_seconds.split(",")], device, args.precision)
+        if args.reference_run:
+            bank = torch.load(Path(args.reference_run)/"fixed_frames.pt", map_location="cpu", weights_only=False)
+        else:
+            dataset = build_video_dataset(args.manifest, partition="train", seed=args.seed)
+            bank = prepare_frames(dataset, codec, model.view_size(codec), args.scenes,
+                                  [float(value) for value in args.frame_seconds.split(",")], device, args.precision)
         # The fixed set is the experiment input; an existing run is resumed explicitly.
         with (out/"selection.json").open("x") as stream:
             json.dump({"args": vars(args), "frames": bank["metadata"], "skipped": bank["skipped"]},
                       stream, ensure_ascii=False, indent=2)
         torch.save(bank, out/"fixed_frames.pt")
+    comparison = (load_encoder_comparison(model, codec, bank, Path(args.reference_run)/"latest.pt",
+                                          args.batch, args.precision)
+                  if args.reference_run and resume is None else None)
     tracker = None
     if args.swanlab_project:
         import swanlab
@@ -83,13 +93,14 @@ def main():
             id=run_id, resume="must" if run_id else None)
     print(json.dumps({"event": "reconstruction_probe_start", "frames": len(bank["images"]),
         "micro_batch": args.batch, "steps": args.steps, "initialization": args.initialization,
+        "state_source": args.state_source, "reference_run": args.reference_run,
         "base_checkpoint": args.checkpoint, "out": str(out)}), flush=True)
-    report = train_probe(model, codec, bank, args, tracker, resume)
+    report = train_probe(model, codec, bank, args, tracker, resume, comparison)
+    print(json.dumps({"event": "reconstruction_probe_complete", "step": report["step"],
+        "before": report["before"], "after": report["after"], "review": str(out/"index.html")}), flush=True)
     if tracker is not None:
         import swanlab
         swanlab.finish()
-    print(json.dumps({"event": "reconstruction_probe_complete", "step": report["step"],
-        "before": report["before"], "after": report["after"], "review": str(out/"index.html")}), flush=True)
 
 
 if __name__ == "__main__":
