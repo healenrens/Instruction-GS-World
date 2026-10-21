@@ -1811,7 +1811,7 @@ printf 'PROBE_RC=%s\nREVIEW=%s/index.html\nREPORT=%s/report.json\n' "${RC}" "${O
 set -euo pipefail
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
 export SOURCE_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world_v28_source
-export SOURCE_REVISION=FREE_STATE_RELEASE
+export SOURCE_REVISION=12443559a7f01a1421bca2573e1036f8b721e2d4
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 git -C "${SOURCE_ROOT}" fetch git@github.com:healenrens/Instruction-GS-World.git codex/object-event-world-model-v71
 mkdir -p "${ROOT}"
@@ -1827,7 +1827,7 @@ printf 'ROOT=%s\n' "${ROOT}"
 ```bash
 set -o pipefail
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=FREE_STATE_RELEASE
+export SOURCE_REVISION=12443559a7f01a1421bca2573e1036f8b721e2d4
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/.venv/bin/python"
 export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
