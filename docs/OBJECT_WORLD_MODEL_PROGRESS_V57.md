@@ -2,6 +2,7 @@
 
 ## 2026-10-23 Free State八卡入口
 
+- **用户追加执行要求**：八卡入口代码cd7c375已通过SSH发布。本轮改为10000步、每1000步保存，global16/每卡2不变；第1000步保留等步数对照，其后是追加优化预算，不作等预算结构收益声明。停止追加测试流程，远端运行未取得测试结果，不宣称八卡NCCL已经实测。
 - **What changed**：固定帧probe新增torchrun/DDP入口，NPROC_PER_NODE默认1、八卡显式8；原16帧按rank分摊，每卡2帧，所有rank同步同一个renderer和完整free-State参数。每个rank的loss以全体16帧为分母，backward乘world_size抵消DDP平均，使目标仍为完整固定集合。只有rank0写文件、评分和上传SwanLab，保存每rank RNG并支持同配置恢复。
 - **Why**：用户要求八卡执行当前Free State对照。它是同一小集合拟合实验的并行实现，不增加样本或更改目标，不将8个独立renderer当作一个共享renderer。
 - **Impact / evidence**：原单卡入口兼容，八卡仍前台运行。Python和shell语法检查完成；新增两rank CPU/Gloo完整训练与恢复入口，远端执行待回执。本机此前PyTorch缓存已清理，不安装新依赖，不把静态检查写成NCCL八卡实测。执行指令见研究计划第26节。

@@ -1853,12 +1853,12 @@ printf 'PROBE_RC=%s\nREVIEW=%s/index.html\nREPORT=%s/report.json\n' "${RC}" "${O
 
 用户于2026-10-23要求八卡。新增单机torchrun/DDP，固定16帧、每卡2帧；renderer与每图State在8rank间同步，保持1000步、原loss和AdamW recipe。评分/图片/日志仅rank0输出，完整16帧重建参考保持一致；显式恢复保存各rank RNG。该配置用于并行当前诊断，不是增加八份数据或训练八个独立renderer。单卡仍用NPROC_PER_NODE=1。
 
-准备机按第25.1节同步，将SOURCE_REVISION替换为 `DDP_PROBE_RELEASE`；实际运行命令独立且不访问GitHub或下载模型。运行环境设置SWANLAB_API_KEY。
+准备机按第25.1节同步，将SOURCE_REVISION替换为 `cd7c375ced82aea27cc1d10aa81c3c6a63361712`；实际运行命令独立且不访问GitHub或下载模型。运行环境设置SWANLAB_API_KEY。用户追加要求多跑steps，本轮改为10000步、每1000步保存；第1000步用于同预算对照，其后仅观察进一步拟合，不能将10000步对1000步差值全部归因于结构。
 
 ```bash
 set -o pipefail
 export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
-export SOURCE_REVISION=DDP_PROBE_RELEASE
+export SOURCE_REVISION=cd7c375ced82aea27cc1d10aa81c3c6a63361712
 export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
 export PYTHON="${WORK_ROOT}/.venv/bin/python"
 export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
@@ -1868,8 +1868,8 @@ export REFERENCE_RUN="${WORK_ROOT}/outputs/v71_reconstruction_probe_step500_2026
 export RUN_NAME="v71_free_state_probe_8gpu_$(date +%Y%m%d_%H%M%S)"
 export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC_PER_NODE=8
-export STATE_SOURCE=free INITIALIZATION=checkpoint STEPS=1000 BATCH=2
-export FRAME_BATCH=4 DECODE_BATCH=2 PRECISION=bf16 LOG_EVERY=10 SAVE_EVERY=100
+export STATE_SOURCE=free INITIALIZATION=checkpoint STEPS=10000 BATCH=2
+export FRAME_BATCH=4 DECODE_BATCH=2 PRECISION=bf16 LOG_EVERY=20 SAVE_EVERY=1000
 export PROBE_SWANLAB_PROJECT=instruct-gs-world PROBE_SWANLAB_WORKSPACE=healenrens
 unset SWANLAB_PROJECT SWANLAB_WORKSPACE RESUME
 mkdir -p "${OUT}"
