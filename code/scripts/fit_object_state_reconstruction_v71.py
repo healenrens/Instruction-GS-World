@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 
 import torch
+import torch.distributed as dist
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -48,6 +49,12 @@ def main():
     # Pass project/workspace through init(), not the SDK's nested JSON environment fields.
     os.environ.pop("SWANLAB_PROJECT", None)
     os.environ.pop("SWANLAB_WORKSPACE", None)
+    rank = int(os.environ.get("RANK", 0))
+    world = int(os.environ.get("WORLD_SIZE", 1))
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    if world > 1:
+        dist.init_process_group("nccl")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     resume = torch.load(args.resume, map_location="cpu", weights_only=False) if args.resume else None
@@ -61,7 +68,7 @@ def main():
     args.checkpoint = str(checkpoint_path(args.checkpoint))
     saved = resume if resume is not None else read_checkpoint(args.checkpoint)
     torch.manual_seed(args.seed)
-    device = torch.device("cuda")
+    device = torch.device("cuda", local_rank)
     model = ObjectEventWorldModel(ModelConfig(**saved["model_config"])).to(device)
     if resume is None and args.initialization == "checkpoint":
         model.load_state_dict(saved["model"])
@@ -69,7 +76,7 @@ def main():
     codec = FrozenVisualCodec(args.assets, args.frame_batch, args.decode_batch).to(device).eval()
     if resume is not None:
         bank = torch.load(out/"fixed_frames.pt", map_location="cpu", weights_only=False)
-    else:
+    elif rank == 0:
         if args.reference_run:
             bank = torch.load(Path(args.reference_run)/"fixed_frames.pt", map_location="cpu", weights_only=False)
         else:
@@ -81,26 +88,35 @@ def main():
             json.dump({"args": vars(args), "frames": bank["metadata"], "skipped": bank["skipped"]},
                       stream, ensure_ascii=False, indent=2)
         torch.save(bank, out/"fixed_frames.pt")
+    if world > 1:
+        dist.barrier()
+        if rank != 0:
+            bank = torch.load(out/"fixed_frames.pt", map_location="cpu", weights_only=False)
     comparison = (load_encoder_comparison(model, codec, bank, Path(args.reference_run)/"latest.pt",
                                           args.batch, args.precision)
-                  if args.reference_run and resume is None else None)
+                  if args.reference_run and resume is None and rank == 0 else None)
     tracker = None
-    if args.swanlab_project:
+    if args.swanlab_project and rank == 0:
         import swanlab
         run_id = resume.get("swanlab_run_id") if resume else None
         tracker = swanlab.init(project=args.swanlab_project, workspace=args.swanlab_workspace or None,
             name=out.name, config=vars(args), log_dir=str(out/"swanlog"),
             id=run_id, resume="must" if run_id else None)
-    print(json.dumps({"event": "reconstruction_probe_start", "frames": len(bank["images"]),
-        "micro_batch": args.batch, "steps": args.steps, "initialization": args.initialization,
-        "state_source": args.state_source, "reference_run": args.reference_run,
-        "base_checkpoint": args.checkpoint, "out": str(out)}), flush=True)
+    if rank == 0:
+        print(json.dumps({"event": "reconstruction_probe_start", "frames": len(bank["images"]),
+            "micro_batch": args.batch, "steps": args.steps, "initialization": args.initialization,
+            "state_source": args.state_source, "reference_run": args.reference_run, "world_size": world,
+            "base_checkpoint": args.checkpoint, "out": str(out)}), flush=True)
     report = train_probe(model, codec, bank, args, tracker, resume, comparison)
-    print(json.dumps({"event": "reconstruction_probe_complete", "step": report["step"],
-        "before": report["before"], "after": report["after"], "review": str(out/"index.html")}), flush=True)
+    if rank == 0:
+        print(json.dumps({"event": "reconstruction_probe_complete", "step": report["step"],
+            "before": report["before"], "after": report["after"], "review": str(out/"index.html")}), flush=True)
     if tracker is not None:
         import swanlab
         swanlab.finish()
+    if world > 1:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

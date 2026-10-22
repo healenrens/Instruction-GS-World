@@ -1848,3 +1848,34 @@ printf 'PROBE_RC=%s\nREVIEW=%s/index.html\nREPORT=%s/report.json\n' "${RC}" "${O
 ```
 
 显式恢复时沿用原OUT，增加 `RESUME="${OUT}/latest.pt"`，原frames/初始参考/free State/optimizer/RNG会恢复。CPU BF16小尺寸完整流程已通过：训练、encoder冻结、五列PNG、逐actor评分、4步与2+2步恢复参数一致；真实DINO/RAE的16帧结果尚未执行，不据工程通过宣布方法有效。
+
+## 26. 同一Free State实验的八卡执行
+
+用户于2026-10-23要求八卡。新增单机torchrun/DDP，固定16帧、每卡2帧；renderer与每图State在8rank间同步，保持1000步、原loss和AdamW recipe。评分/图片/日志仅rank0输出，完整16帧重建参考保持一致；显式恢复保存各rank RNG。该配置用于并行当前诊断，不是增加八份数据或训练八个独立renderer。单卡仍用NPROC_PER_NODE=1。
+
+准备机按第25.1节同步，将SOURCE_REVISION替换为 `DDP_PROBE_RELEASE`；实际运行命令独立且不访问GitHub或下载模型。运行环境设置SWANLAB_API_KEY。
+
+```bash
+set -o pipefail
+export WORK_ROOT=/mnt/pfs/public/xuhaoming/instruct_gs_world
+export SOURCE_REVISION=DDP_PROBE_RELEASE
+export ROOT="${WORK_ROOT}/runtime/object_event_world_model_v71/releases/${SOURCE_REVISION}"
+export PYTHON="${WORK_ROOT}/.venv/bin/python"
+export MANIFEST="${WORK_ROOT}/metadata/cliport_event_v71.json"
+export ASSETS="${WORK_ROOT}/metadata/rae_assets_512.json"
+export CHECKPOINT="${WORK_ROOT}/outputs/v71_joint_object_step_view128_seed17_20f5e23_20261020_021715/step_00000500.pt"
+export REFERENCE_RUN="${WORK_ROOT}/outputs/v71_reconstruction_probe_step500_20261021_030844"
+export RUN_NAME="v71_free_state_probe_8gpu_$(date +%Y%m%d_%H%M%S)"
+export OUT="${WORK_ROOT}/outputs/${RUN_NAME}"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC_PER_NODE=8
+export STATE_SOURCE=free INITIALIZATION=checkpoint STEPS=1000 BATCH=2
+export FRAME_BATCH=4 DECODE_BATCH=2 PRECISION=bf16 LOG_EVERY=10 SAVE_EVERY=100
+export PROBE_SWANLAB_PROJECT=instruct-gs-world PROBE_SWANLAB_WORKSPACE=healenrens
+unset SWANLAB_PROJECT SWANLAB_WORKSPACE RESUME
+mkdir -p "${OUT}"
+bash "${ROOT}/code/scripts/fit_object_state_reconstruction_v71.sh" 2>&1 | tee -a "${OUT}/launcher.log"
+RC=$?
+printf 'PROBE_RC=%s\nREVIEW=%s/index.html\nREPORT=%s/report.json\n' "${RC}" "${OUT}" "${OUT}"
+```
+
+恢复仍保留八卡与BATCH=2，重用原OUT并设RESUME为该目录latest.pt。两rank CPU/Gloo完整测试脚本为 `code/scripts/test_reconstruction_probe_distributed_v71.py`；目标为与单进程固定全集优化近似一致、DDP连续与恢复一致，并验证单份结果及每rank RNG。当前静态检查完成，远端运行待回执，不声称八张A100的实际吞吐或显存已经测得。

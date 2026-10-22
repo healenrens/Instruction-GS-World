@@ -25,4 +25,9 @@ if [[ -n "${TRACKING_PROJECT}" ]]; then ARGS+=(--swanlab-project "${TRACKING_PRO
 if [[ -n "${TRACKING_WORKSPACE}" ]]; then ARGS+=(--swanlab-workspace "${TRACKING_WORKSPACE}"); fi
 # These legacy launcher strings conflict with the SDK's structured settings.
 unset SWANLAB_PROJECT SWANLAB_WORKSPACE
-exec "${PYTHON}" "${ROOT}/code/scripts/fit_object_state_reconstruction_v71.py" "${ARGS[@]}" "$@"
+if [[ "${NPROC_PER_NODE:-1}" == 1 ]]; then
+  exec "${PYTHON}" "${ROOT}/code/scripts/fit_object_state_reconstruction_v71.py" "${ARGS[@]}" "$@"
+fi
+exec "${PYTHON}" -m torch.distributed.run --standalone --nnodes=1 \
+  --nproc_per_node "${NPROC_PER_NODE}" \
+  "${ROOT}/code/scripts/fit_object_state_reconstruction_v71.py" "${ARGS[@]}" "$@"

@@ -1,5 +1,11 @@
 # Instruct-GS-World Object-Level World Model 永久主线与实验账本
 
+## 2026-10-23 Free State八卡入口
+
+- **What changed**：固定帧probe新增torchrun/DDP入口，NPROC_PER_NODE默认1、八卡显式8；原16帧按rank分摊，每卡2帧，所有rank同步同一个renderer和完整free-State参数。每个rank的loss以全体16帧为分母，backward乘world_size抵消DDP平均，使目标仍为完整固定集合。只有rank0写文件、评分和上传SwanLab，保存每rank RNG并支持同配置恢复。
+- **Why**：用户要求八卡执行当前Free State对照。它是同一小集合拟合实验的并行实现，不增加样本或更改目标，不将8个独立renderer当作一个共享renderer。
+- **Impact / evidence**：原单卡入口兼容，八卡仍前台运行。Python和shell语法检查完成；新增两rank CPU/Gloo完整训练与恢复入口，远端执行待回执。本机此前PyTorch缓存已清理，不安装新依赖，不把静态检查写成NCCL八卡实测。执行指令见研究计划第26节。
+
 ## 2026-10-21 Free State对照实现
 
 - **What changed**：原固定帧入口新增 `STATE_SOURCE=free`。直接复用已完成run `v71_reconstruction_probe_step500_20261021_030844/fixed_frames.pt`；原joint step500 encoder只用于初始化每帧的tokens/centers，训练仅更新这些逐图State与原step500 renderer。State形状仍为17x4x384及17x4x2 centers，centers使用atanh/tanh参数化以保留归一化坐标范围；DINO/RAE、目标、1000步、micro4/effective16、AdamW recipe相同。没有新增图像/运动筛选或修改正式world model。

@@ -1,6 +1,7 @@
 """Fixed-frame reconstruction diagnosis without posterior or dynamics objectives."""
 
 from dataclasses import asdict
+from contextlib import nullcontext
 from html import escape
 import json
 from pathlib import Path
@@ -9,6 +10,8 @@ import time
 import numpy as np
 from PIL import Image, ImageDraw
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 
 from .codec import letterbox_video
 from .data import collate_object_event_video, write_json
@@ -111,6 +114,15 @@ def single_frame_forward(model, codec, features, valid, frame_states=None, indic
     rendered, _ = model.render_features(states, coordinates(codec.grid_size, features.device))
     rgb = model.decode_features(codec, rendered)
     return rendered[:, 0], rgb[:, 0]
+
+
+class ProbeForward(torch.nn.Module):
+    def __init__(self, model, codec, frame_states):
+        super().__init__()
+        self.model, self.codec, self.frame_states = model, codec, frame_states
+
+    def forward(self, features, valid, indices):
+        return single_frame_forward(self.model, self.codec, features, valid, self.frame_states, indices)
 
 
 @torch.no_grad()
@@ -216,12 +228,18 @@ def write_probe_review(out, bank, reference, before, after, report, comparison=N
 
 def train_probe(model, codec, bank, args, tracker=None, resume=None, comparison=None):
     out = Path(args.out)
+    rank, world = (dist.get_rank(), dist.get_world_size()) if dist.is_initialized() else (0, 1)
+    device = next(model.parameters()).device
     state_source = getattr(args, "state_source", "encoder")
     if resume is not None:
         load_probe_state(model, resume["model"])
     frame_states = (initialize_frame_states(model, codec, bank, args.batch, args.precision)
                     if state_source == "free" else None)
     parameters = set_probe_trainable(model, frame_states)
+    forwarder = ProbeForward(model, codec, frame_states)
+    if world > 1:
+        forwarder = DistributedDataParallel(forwarder,
+            device_ids=[device.index] if device.type == "cuda" else None, broadcast_buffers=False)
     optimizer = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
     start = 0
     if resume is not None:
@@ -229,18 +247,24 @@ def train_probe(model, codec, bank, args, tracker=None, resume=None, comparison=
             frame_states.load_state_dict(resume["free_states"])
         optimizer.load_state_dict(resume["optimizer"])
         start = resume["step"]
-        initial = torch.load(out/"initial.pt", map_location="cpu", weights_only=False)
-        torch.set_rng_state(resume["torch_rng"])
-        if torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(resume["cuda_rng"])
-    else:
+        initial = torch.load(out/"initial.pt", map_location="cpu", weights_only=False) if rank == 0 else None
+        if "rank_rng" in resume:
+            rng = resume["rank_rng"][rank]
+            torch.set_rng_state(rng["torch"])
+            if device.type == "cuda":
+                torch.cuda.set_rng_state(rng["cuda"], device)
+        else:
+            torch.set_rng_state(resume["torch_rng"])
+            if device.type == "cuda":
+                torch.cuda.set_rng_state_all(resume["cuda_rng"])
+    elif rank == 0:
         before, initial_records = evaluate_frames(model, codec, bank, args.batch, args.precision, frame_states)
         reference = codec_reference(model, codec, bank, args.batch, args.precision)
         initial = {"before": before, "reference": reference, "records": initial_records,
                    "codec_records": reference_scores(bank, reference), "comparison": comparison}
         torch.save(initial, out/"initial.pt")
-    device = next(model.parameters()).device
     count = len(bank["images"])
+    local_indices = torch.arange(rank, count, world, device=device)
     config = asdict(model.config)
 
     def export(step):
@@ -258,6 +282,7 @@ def train_probe(model, codec, bank, args, tracker=None, resume=None, comparison=
             "objective": "original feature MSE + original RGB L1; no KL, change, posterior or dynamics losses",
             "feature_weight": model.config.feature_weight, "rgb_weight": model.config.rgb_weight,
             "effective_batch": count, "micro_batch": args.batch,
+            "world_size": world, "local_frame_counts": [len(range(r, count, world)) for r in range(world)],
             "optimizer": {"name": "AdamW", "lr": args.lr, "weight_decay": args.weight_decay, "clip_norm": 1.0},
             "codec": "frozen; target DINO features cached only for this small fixed set",
             "gt_masks_role": "scoring only; never input or training loss",
@@ -291,18 +316,31 @@ def train_probe(model, codec, bank, args, tracker=None, resume=None, comparison=
         return report
 
     def save(step):
+        rng = {"torch": torch.get_rng_state(),
+               "cuda": torch.cuda.get_rng_state(device) if device.type == "cuda" else None}
+        rank_rng = [None]*world
+        if world > 1:
+            dist.all_gather_object(rank_rng, rng)
+        else:
+            rank_rng[0] = rng
+        if rank != 0:
+            return
         temporary = out/"latest.partial"
         torch.save({"format": "v71_observed_reconstruction_probe", "step": step,
             "model": probe_state_dict(model), "model_config": config, "optimizer": optimizer.state_dict(),
             "state_source": state_source,
             "free_states": frame_states.state_dict() if frame_states is not None else None,
             "args": vars(args), "torch_rng": torch.get_rng_state(),
-            "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+            "cuda_rng": [rng["cuda"]] if rng["cuda"] is not None else [],
+            "world_size": world, "rank_rng": rank_rng,
             "swanlab_run_id": tracker.id if tracker is not None else None}, temporary)
         temporary.replace(out/"latest.pt")
 
-    report = export(start)
-    with (out/"train.jsonl").open("a" if resume is not None else "x") as log:
+    report = export(start) if rank == 0 else None
+    if world > 1:
+        dist.barrier()
+    log_context = ((out/"train.jsonl").open("a" if resume is not None else "x") if rank == 0 else nullcontext())
+    with log_context as log:
         for step in range(start+1, args.steps+1):
             model.train()
             codec.eval()
@@ -312,34 +350,46 @@ def train_probe(model, codec, bank, args, tracker=None, resume=None, comparison=
             # All fixed frames contribute to every update, independent of micro-batch size.
             feature_denominator = bank["patch_valid"].sum().to(device)*bank["features"].shape[-1]
             rgb_denominator = bank["pixel_valid"].sum().to(device)*3
-            for first in range(0, count, args.batch):
+            for first in range(0, len(local_indices), args.batch):
                 last = first+args.batch
-                target = bank["features"][first:last].to(device)
-                valid = bank["patch_valid"][first:last].to(device)
-                images = bank["images"][first:last].to(device)
-                pixels = bank["pixel_valid"][first:last].to(device)
-                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.precision == "bf16"):
-                    indices = torch.arange(first, first+len(target), device=device)
-                    rendered, rgb = single_frame_forward(model, codec, target, valid, frame_states, indices)
-                    feature_loss = ((rendered.float()-target).square()*valid[..., None]).sum()/feature_denominator
-                    rgb_loss = ((rgb.float()-images).abs()*pixels).sum()/rgb_denominator
-                    loss = model.config.feature_weight*feature_loss + model.config.rgb_weight*rgb_loss
-                loss.backward()
+                indices = local_indices[first:last]
+                cpu_indices = indices.cpu()
+                target = bank["features"][cpu_indices].to(device)
+                valid = bank["patch_valid"][cpu_indices].to(device)
+                images = bank["images"][cpu_indices].to(device)
+                pixels = bank["pixel_valid"][cpu_indices].to(device)
+                sync = forwarder.no_sync() if world > 1 and last < len(local_indices) else nullcontext()
+                with sync:
+                    with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.precision == "bf16"):
+                        rendered, rgb = forwarder(target, valid, indices)
+                        feature_loss = ((rendered.float()-target).square()*valid[..., None]).sum()/feature_denominator
+                        rgb_loss = ((rgb.float()-images).abs()*pixels).sum()/rgb_denominator
+                        loss = model.config.feature_weight*feature_loss + model.config.rgb_weight*rgb_loss
+                    # DDP averages ranks; restore the gradient of the complete fixed set.
+                    (loss*world).backward()
                 feature_sum += float(feature_loss.detach())
                 rgb_sum += float(rgb_loss.detach())
             grad_norm = float(torch.nn.utils.clip_grad_norm_(parameters, 1.0))
             optimizer.step()
             if step == 1 or step % args.log_every == 0 or step == args.steps:
+                if world > 1:
+                    totals = torch.tensor([feature_sum, rgb_sum], device=device, dtype=torch.float64)
+                    dist.all_reduce(totals)
+                    feature_sum, rgb_sum = totals.tolist()
                 row = {"step": step, "loss": model.config.feature_weight*feature_sum+model.config.rgb_weight*rgb_sum,
                     "feature_mse": feature_sum, "rgb_l1": rgb_sum, "grad_norm": grad_norm,
-                    "seconds": time.perf_counter()-began, "effective_batch": count}
-                log.write(json.dumps(row, allow_nan=False)+"\n")
-                log.flush()
-                print(json.dumps({"event": "reconstruction_probe", **row}), flush=True)
-                if tracker is not None:
-                    import swanlab
-                    swanlab.log(row, step=step)
+                    "seconds": time.perf_counter()-began, "effective_batch": count, "world_size": world}
+                if rank == 0:
+                    log.write(json.dumps(row, allow_nan=False)+"\n")
+                    log.flush()
+                    print(json.dumps({"event": "reconstruction_probe", **row}), flush=True)
+                    if tracker is not None:
+                        import swanlab
+                        swanlab.log(row, step=step)
             if step % args.save_every == 0 or step == args.steps:
                 save(step)
-                report = export(step)
+                if rank == 0:
+                    report = export(step)
+                if world > 1:
+                    dist.barrier()
     return report
